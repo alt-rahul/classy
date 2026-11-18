@@ -1,0 +1,7 @@
+scored_0003 other>=20 new 266 store 266  53.6s
+scored_0079 other>=20 new 190 store 196 imp 77.0s
+scored_0148 other>=20 new 222 store 222  38.3s
+scored_0200 other>=20 new 179 store 175  35.9s
+scored_0266 other>=20 new 135 store 134  42.2s
+scored_0335 other>=20 new 247 store 235  41.9s
+TOTAL new 1239 store 1228 290s {'pool_cap': 46, 'lookahead': 4}

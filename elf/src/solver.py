@@ -126,6 +126,9 @@ class Cfg:
         self.evict_margin = 0
         self.la_slack = 1
         self.la_default = 7
+        self.evict_size = 0       # 1: evict largest values first (by bit length, LRU within)
+        self.evict_unused = 0     # 1: evict values never used as an operand first (LRU within)
+        self.evict_big = 0        # >0: evict values with bit_length >= (min target bits - evict_big) first
         self.__dict__.update(kw)
 
 
@@ -138,6 +141,7 @@ class Solver:
         engine.set_wemin(cfg.wemin)
         self.stats = {}
         self.times = {}
+        self.uses = {}
 
     # ---------- deep search helpers ----------
     def window(self, t, bestcost):
@@ -377,6 +381,8 @@ class Solver:
             last_use[a] = rnd
             last_use[b] = rnd
             last_use[r] = rnd
+            self.uses[a] = self.uses.get(a, 0) + 1
+            self.uses[b] = self.uses.get(b, 0) + 1
             uncovered.discard(r)
         if len(pool) > cfg.pool_cap + cfg.evict_margin:
             self.evict(pool, last_use, created, cfg.pool_cap, protect=set())
@@ -389,7 +395,15 @@ class Solver:
         if len(pool) <= cap:
             return
         cand = [v for v in pool if v > self.cfg.keep_small and v not in protect]
-        cand.sort(key=lambda v: (last_use.get(v, 0), created.get(v, 0)))
+        if self.cfg.evict_size:
+            cand.sort(key=lambda v: (-v.bit_length(), last_use.get(v, 0), created.get(v, 0)))
+        elif self.cfg.evict_unused:
+            cand.sort(key=lambda v: (self.uses.get(v, 0) > 0, last_use.get(v, 0), created.get(v, 0)))
+        elif self.cfg.evict_big > 0:
+            bb = min(self.p.targets).bit_length() - self.cfg.evict_big
+            cand.sort(key=lambda v: (v.bit_length() < bb, last_use.get(v, 0), created.get(v, 0)))
+        else:
+            cand.sort(key=lambda v: (last_use.get(v, 0), created.get(v, 0)))
         k = len(pool) - cap
         drop = set(cand[:k])
         if drop:

@@ -1,0 +1,6 @@
+scored_0001 indep>=20 new 309 store 302  40.6s
+scored_0058 indep>=20 new 350 store 354 imp 64.7s
+scored_0123 indep>=20 new 287 store 286  36.4s
+scored_0230 indep>=20 new 270 store 273 imp 38.5s
+scored_0306 indep>=20 new 346 store 346  61.2s
+TOTAL new 1562 store 1561 243s {'pool_cap': 46, 'win_budget': 4000000.0}

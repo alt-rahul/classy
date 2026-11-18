@@ -1,0 +1,7 @@
+scored_0003 other>=20 new 271 store 266  59.4s
+scored_0079 other>=20 new 201 store 190  49.6s
+scored_0148 other>=20 new 222 store 222  35.2s
+scored_0200 other>=20 new 159 store 175 imp 31.8s
+scored_0266 other>=20 new 131 store 134 imp 18.1s
+scored_0335 other>=20 new 248 store 235  41.0s
+TOTAL new 1232 store 1222 237s {'pool_cap': 46, 'noise': 2.0, 'seed': 3}

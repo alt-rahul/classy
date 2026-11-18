@@ -1,0 +1,7 @@
+scored_0003 other>=20 new 265 store 266 imp 60.4s
+scored_0079 other>=20 new 198 store 190  57.6s
+scored_0148 other>=20 new 216 store 222 imp 42.5s
+scored_0200 other>=20 new 189 store 159  37.5s
+scored_0266 other>=20 new 136 store 131  27.6s
+scored_0335 other>=20 new 247 store 235  40.7s
+TOTAL new 1251 store 1203 268s {'pool_cap': 46, 'evict_unused': 1}

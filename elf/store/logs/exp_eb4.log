@@ -1,0 +1,6 @@
+scored_0001 indep>=20 new 297 store 302 imp 42.2s
+scored_0058 indep>=20 new 337 store 354 imp 78.1s
+scored_0123 indep>=20 new 280 store 286 imp 38.1s
+scored_0230 indep>=20 new 265 store 273 imp 43.4s
+scored_0306 indep>=20 new 332 store 346 imp 74.0s
+TOTAL new 1511 store 1561 277s {'pool_cap': 46, 'evict_big': 4}

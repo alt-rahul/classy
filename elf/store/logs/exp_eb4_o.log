@@ -1,0 +1,7 @@
+scored_0003 other>=20 new 252 store 265 imp 89.4s
+scored_0079 other>=20 new 184 store 190 imp 76.5s
+scored_0148 other>=20 new 206 store 216 imp 62.3s
+scored_0200 other>=20 new 171 store 159  48.4s
+scored_0266 other>=20 new 129 store 131 imp 20.3s
+scored_0335 other>=20 new 231 store 235 imp 66.2s
+TOTAL new 1173 store 1196 366s {'pool_cap': 46, 'evict_big': 4}

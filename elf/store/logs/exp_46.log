@@ -1,0 +1,12 @@
+scored_0003 other>=20 new 266 store 271 imp 54.4s
+scored_0079 other>=20 new 202 store 196  46.6s
+scored_0148 other>=20 new 222 store 226 imp 38.2s
+scored_0200 other>=20 new 179 store 175  34.2s
+scored_0266 other>=20 new 134 store 137 imp 19.1s
+scored_0335 other>=20 new 235 store 241 imp 40.7s
+scored_0001 indep>=20 new 307 store 319 imp 38.2s
+scored_0058 indep>=20 new 357 store 360 imp 64.8s
+scored_0123 indep>=20 new 289 store 290 imp 30.5s
+scored_0230 indep>=20 new 276 store 292 imp 36.4s
+scored_0306 indep>=20 new 346 store 359 imp 60.8s
+TOTAL new 2813 store 2866 465s {'pool_cap': 46}

@@ -13,6 +13,10 @@ def work(args):
     import solver, tiny
     P = {p.id: p for p in load_puzzles(which)}
     p = P[pid]
+    if '_class' in cfgd:  # per-class overrides
+        cfgd = dict(cfgd)
+        over = cfgd.pop('_class')
+        cfgd.update(over.get(pclass(p), {}))
     t0 = time.time()
     try:
         if p.limit <= 20:
@@ -25,9 +29,25 @@ def work(args):
             if prog is None and cfg.pool_cap > 30:
                 cfg.pool_cap -= 6
                 prog, stats = solver.solve(p, cfg)
+        if prog is not None and REPAIR[0] and p.limit > 20:
+            import repair
+            from repair_store import prog_to_steps
+            repair.self_thr[0] = 150
+            st2 = repair.improve(p, prog_to_steps(p, prog), passes=3)
+            p2 = solver.regalloc(p.sv, st2, p.targets, p.nreg)
+            if p2 is not None and len(p2) < len(prog) and check(p, p2) is None:
+                stats['rep'] = len(prog) - len(p2)
+                prog = p2
     except Exception as e:
         return pid, None, {'error': traceback.format_exc()[-800:]}, time.time() - t0
     return pid, prog, stats, time.time() - t0
+
+
+REPAIR = [0]
+
+
+def _init(rep):
+    REPAIR[0] = rep
 
 
 def main():
@@ -40,6 +60,9 @@ def main():
     ap.add_argument('--classes', default='')
     ap.add_argument('--redo', action='store_true')
     ap.add_argument('--skip', default='', help='comma list of tags whose done puzzles are skipped')
+    ap.add_argument('--order', default='id', help="id | len (longest stored program first) | opt (highest ops/target first)")
+    ap.add_argument('--repair', action='store_true', help='apply the repair post-pass to each result')
+    ap.add_argument('--top', type=int, default=0, help='keep only the first N puzzles after ordering')
     a = ap.parse_args()
     cfgd = json.loads(a.cfg)
     puzzles = load_puzzles(a.which)
@@ -61,12 +84,18 @@ def main():
             d2 = json.load(open(runs_path(tg)))
             ids = [i for i in ids if i not in d2]
     st = load_store() if a.which == 'scored' else {}
+    if a.order == 'len' and st:
+        ids.sort(key=lambda i: -st[i]['len'])
+    elif a.order == 'opt' and st:
+        ids.sort(key=lambda i: -st[i]['len'] / len(P[i].targets))
+    if a.top:
+        ids = ids[:a.top]
     print('tag', a.tag, 'todo', len(ids), flush=True)
     t0 = time.time()
     nimp = 0
     gain = 0
     last_save = time.time()
-    with Pool(a.workers) as pool:
+    with Pool(a.workers, initializer=_init, initargs=(int(a.repair),)) as pool:
         for k, (pid, prog, stats, dt) in enumerate(pool.imap_unordered(work, [(i, cfgd, a.which) for i in ids])):
             p = P[pid]
             if prog is None:

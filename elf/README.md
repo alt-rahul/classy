@@ -49,4 +49,32 @@ Practice-set benchmarking: `src/bench.sh '<cfg json>'` (12 practice puzzles, 3 p
 
 ## Score history
 
-See the bottom of this file (filled in as stages complete).
+All totals are validated with `src/validate.py` (0 invalid).
+
+| Stage | Total |
+|---|---|
+| Sample baseline | 1,490,379 |
+| Stage 0: tiny puzzles solved exactly by BFS, rest baseline | 1,462,369 |
+| Main engine on 466 of 1,000 puzzles (runs s2a, s3), rest baseline | 868,900 |
+| Main engine on all 1,000 puzzles (runs s3-s7, `pool_cap` 46) | 179,208 |
+| Ruin-and-recreate repair post-pass | 176,025 |
+| Restarts on independent puzzles (r1, `evict_size`) | 174,337 |
+| Restarts on other puzzles (r2, `evict_big` 4), partial: 70 of 473 | 173,016 |
+
+Per-class breakdown at 173,016:
+
+| Class | Puzzles | Targets | Ops | Ops per target |
+|---|---|---|---|---|
+| indep<20 | 27 | 359 | 1,951 | 5.43 |
+| indep>=20 | 215 | 6,450 | 55,922 | 8.67 |
+| other<20 | 107 | 980 | 3,697 | 3.77 |
+| other>=20 | 635 | 19,068 | 111,389 | 5.84 |
+| tiny | 16 | 45 | 57 | 1.27 |
+
+What helped most: the greedy cheapest-target-next loop with every intermediate kept in the pool
+(about 8x over the baseline), a large pool (`pool_cap` 46), and eviction policies that drop big
+values first (`evict_big`, `evict_size`, worth a few percent on independent puzzles). The repair
+pass and multi-config restarts each give about 1-2%.
+
+Tried without gain on the 6-puzzle experiment sets (`store/logs/exp_*.log`): `lookahead` 4,
+`win_k` 3, random tie-break noise, `evict_unused`, a larger window budget.

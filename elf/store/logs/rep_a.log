@@ -1,0 +1,29 @@
+repair todo 357
+18/357 gain 30 improved 9 69s
+32/357 gain 64 improved 15 130s
+46/357 gain 84 improved 20 200s
+59/357 gain 105 improved 26 264s
+78/357 gain 126 improved 34 338s
+94/357 gain 149 improved 42 400s
+101/357 gain 164 improved 46 464s
+114/357 gain 198 improved 54 532s
+128/357 gain 222 improved 60 603s
+144/357 gain 251 improved 67 677s
+166/357 gain 282 improved 77 740s
+185/357 gain 321 improved 87 812s
+195/357 gain 340 improved 92 885s
+231/357 gain 370 improved 104 955s
+243/357 gain 407 improved 112 1021s
+252/357 gain 427 improved 118 1090s
+282/357 gain 456 improved 133 1155s
+317/357 gain 502 improved 147 1226s
+329/357 gain 520 improved 152 1296s
+333/357 gain 537 improved 155 1363s
+342/357 gain 549 improved 160 1442s
+repair done gain 560 improved 168 1475s
+  indep<20  puzzles   27 targets    359 ops     2004 ops/target 5.58
+  indep>=20 puzzles  215 targets   6450 ops    57557 ops/target 8.92
+  other<20  puzzles  107 targets    980 ops     3697 ops/target 3.77
+  other>=20 puzzles  635 targets  19068 ops   112710 ops/target 5.91
+  tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
+  total 176025
