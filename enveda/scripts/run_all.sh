@@ -21,7 +21,9 @@ nice -n 10 $PY -I scripts/build_npdb.py --stage all
 # WP3  PubChem tier: about 15 min wall (downloads at about 20 MB/s), 2 cores, 7 GB RAM; resumable, skips finished stages
 nice -n 10 $PY -I scripts/build_pubchem.py
 # WP6  train ingestion and audit  # $PY scripts/ingest_train.py
-# WP5  library index              # $PY scripts/build_library.py
+# WP5  library index: streams train.parquet by row groups (or WP6's data/processed/train/
+#      via --source); estimate 10-20 min wall, 1 core, under 4 GB RAM (see docs/ARTEFACTS.md)
+$PY scripts/build_library.py
 # WP7  holdout splits             # $PY scripts/make_splits.py   (splits/ is tracked; normally skipped)
 # WP9  fingerprint model          # $PY scripts/train_fpmodel.py --exclude-holdout ; --all
 # WP10 candidate features         # $PY scripts/build_features.py

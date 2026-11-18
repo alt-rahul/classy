@@ -610,6 +610,7 @@ def stage_table(ctx: Ctx) -> None:
     # Apply RDKit filters, fill missing ik14, pick per-source winners.
     winners = []
     agg = {}
+    all_bad = []
     for name in SOURCE_ORDER:
         df = raw[name]
         p = props.reindex(df["smiles"].to_numpy())
@@ -661,6 +662,17 @@ def stage_table(ctx: Ctx) -> None:
         w = df.loc[m].copy()
         w["formula"] = p.loc[m, "formula"].to_numpy()
         w["mono_mass"] = p.loc[m, "mono_mass"].to_numpy()
+        # RDKit vs source mass on every filter-passing row of the source (before dedup).
+        dm = (w["mono_mass"] - w["src_mass"]).abs()
+        bad_src = w["src_mass"].notna() & (dm > MASS_AGREE_DA)
+        rep.setdefault("mass_check_filtered_rows", {})[name] = {
+            "rows": int(len(w)), "with_source_mass": int(w["src_mass"].notna().sum()),
+            "disagree_gt_0p001": int(bad_src.sum()),
+            "agree_fraction": float(1.0 - bad_src.sum() / max(int(w["src_mass"].notna().sum()), 1))}
+        all_bad.append(w.loc[bad_src, ["src", "src_id", "ik14", "smiles", "formula", "src_formula",
+                                       "mono_mass", "src_mass"]])
+        log.info("mass check %s (all %d filtered rows): %d disagree by > %.3f Da", name, len(w),
+                 int(bad_src.sum()), MASS_AGREE_DA)
         if name == "coconut":
             w = w.sort_values(["ik14", "annotation_level", "src_id"], ascending=[True, False, True],
                               kind="mergesort", na_position="last")
@@ -721,13 +733,18 @@ def stage_table(ctx: Ctx) -> None:
              int(bad.sum()), n_has, MASS_AGREE_DA, frac, rep["mass_check"]["by_source"])
     log.info("formula differs from the source formula: %s", rep["formula_differs_from_source"])
     paths.ensure_dir(ctx.out)
-    dis = u.loc[bad, ["src", "src_id", "smiles", "formula", "src_formula", "mono_mass", "src_mass"]].copy()
-    dis["diff_da"] = (dis["mono_mass"] - dis["src_mass"])
-    dis = dis.sort_values(["src", "src_id"], kind="mergesort")
-    dis.to_csv(ctx.out / "mass_disagreements.csv")
+    # Every filter-passing source row whose RDKit mass disagrees with its source mass;
+    # ``in_np_parquet`` marks the rows whose SMILES ended up in np.parquet.
+    dis = pd.concat(all_bad, ignore_index=True)
+    dis["diff_da"] = dis["mono_mass"] - dis["src_mass"]
+    dis["in_np_parquet"] = [bool(ik in u.index and u.at[ik, "src"] == s_ and u.at[ik, "src_id"] == i_)
+                            for ik, s_, i_ in zip(dis["ik14"], dis["src"], dis["src_id"])]
+    dis = dis.sort_values(["src", "src_id", "ik14"], kind="mergesort")
+    dis.to_csv(ctx.out / "mass_disagreements.csv", index=False)
     for row in dis.head(15).itertuples():
-        log.info("  mass disagreement %s %s %s rdkit %.5f source %.5f (%s vs %s)", row.src, row.src_id,
-                 row.Index, row.mono_mass, row.src_mass, row.formula, row.src_formula)
+        log.info("  mass disagreement %s %s %s rdkit %.5f source %.5f (%s vs %s)%s", row.src, row.src_id,
+                 row.ik14, row.mono_mass, row.src_mass, row.formula, row.src_formula,
+                 " [in np.parquet]" if row.in_np_parquet else "")
 
     out = out.reset_index().rename(columns={"index": "ik14"})
     out = out.sort_values(["mono_mass", "ik14"], kind="mergesort").reset_index(drop=True)

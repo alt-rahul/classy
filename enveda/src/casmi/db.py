@@ -162,11 +162,17 @@ def _str_column(values, n: int):
     return pd.Series(values if n else [], dtype=_str_dtype()).array
 
 
+_EMPTY: pd.DataFrame | None = None
+
+
 def _empty_out() -> pd.DataFrame:
-    cols = {"_q": np.zeros(0, dtype=np.int64), "query_mass": np.zeros(0, dtype=np.float64)}
-    for c in OUT_COLUMNS:
-        cols[c] = _na_column(c, 0)
-    return pd.DataFrame(cols)
+    global _EMPTY
+    if _EMPTY is None:
+        cols = {"_q": np.zeros(0, dtype=np.int64), "query_mass": np.zeros(0, dtype=np.float64)}
+        for c in OUT_COLUMNS:
+            cols[c] = _na_column(c, 0)
+        _EMPTY = pd.DataFrame(cols)
+    return _EMPTY.copy()
 
 
 class CandidateDB:
@@ -207,7 +213,8 @@ class CandidateDB:
         missing = [c for c in _NP_REQUIRED if c not in tbl.column_names]
         if missing:
             raise ValueError(f"{self.np_path}: missing column(s) {missing}")
-        df = tbl.to_pandas(types_mapper=_nullable_mapper)
+        # One chunk per column: Arrow ``take`` on a multi-chunk column costs O(rows).
+        df = tbl.combine_chunks().to_pandas(types_mapper=_nullable_mapper)
         del tbl
         n = len(df)
         mass = df["mono_mass"].to_numpy(dtype=np.float64)
@@ -416,8 +423,11 @@ class CandidateDB:
             i1 = np.searchsorted(nm, hi, side="right")
             cnt = np.maximum(i1 - i0, 0)
             if cnt.sum():
-                idx = np.concatenate([np.arange(a, b) for a, b in zip(i0, i1) if b > a])
-                np_part = npdf.iloc[idx].reset_index(drop=True)
+                if len(masses) == 1:  # contiguous: a slice, no gather
+                    np_part = npdf.iloc[int(i0[0]):int(i1[0])].reset_index(drop=True)
+                else:
+                    idx = np.concatenate([np.arange(a, b) for a, b in zip(i0, i1) if b > a])
+                    np_part = npdf.iloc[idx].reset_index(drop=True)
                 np_part.insert(0, "_q", np.repeat(np.arange(len(masses)), cnt))
         pc_part = None
         if "pubchem" in tiers and self._pubchem_shards():

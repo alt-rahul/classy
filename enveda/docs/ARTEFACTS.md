@@ -15,6 +15,12 @@ Columns:
 | artefact | path | rows | size | sha256 | how to rebuild |
 |---|---|---|---|---|---|
 | PubChem tier (120 shards) | `data/processed/db/pubchem/mass_XXXX.parquet`, `_index.json` | 90,719,171 | 2.19 GB | `f08bdde0be1c814797f3f16cbf6c4e764aba72ca84cafff9f5cbaf5ed9c96346` (`_index.json`) | `nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras (CID-Mass.gz 16 Nov 2026, CID-SMILES.gz 17 Nov 2026, CID-PMID.gz 29 Aug 2025, CID-InChI-Key.gz 17 Nov 2026); about 14 min wall, 2 cores, 7 GB RAM |
+| NP tier table | `data/processed/db/np/np.parquet` | 854,475 | 32.5 MB | `ba9fe19ddda93a5bc473d387f279bd1e1829fcbd430baa5859884157a477513f` | `nice -n 10 python -I scripts/build_npdb.py` (stages download, headers, table, fp, check); inputs: the 4 raw NP files below, downloaded 2026-11-18; about 10 min wall after downloads, 2 cores, 2.4 GB RAM peak |
+| NP tier fingerprints | `data/processed/db/np/np_fp.npy` | (854,475, 512) uint8 | 437.5 MB | `c14c99ba09e191255ea43ea404f4474d978963cea2c0d532d0d56d7fa4d603a9` | same command (`--stage fp` alone redoes it, 5.5 min on 2 cores); row-aligned to np.parquet, recipe in the WP2 section |
+| NP raw: COCONUT | `data/external/coconut/coconut_csv-11-2026.zip` | 738,793 | 248.0 MB | `74582c17f34ce33ea8ff27ba721a7bcfb654e2521aa94d6d3caf53f19159187a` | `https://coconut.s3.uni-jena.de/prod/downloads/2026-11/coconut_csv-11-2026.zip` (2026-11 release), `build_npdb.py --stage download` |
+| NP raw: NPAtlas | `data/external/npatlas/NPAtlas_download.tsv` | 36,454 | 33.7 MB | `4fa5ce93cf5e271d65649f7f5c40e031b1e3d59144cb50c12c5fc9ee041cc72b` | `https://www.npatlas.org/static/downloads/NPAtlas_download.tsv` (no version in the URL: a later download may differ) |
+| NP raw: LOTUS | `data/external/lotus/structure_metadata.tsv.gz` | 555,952 | 95.8 MB | `ceab19657fa362bf72937c92b6a709e13a2377782a2ac705afa1c0f7c037b51a` | Zenodo record 7534077 (2022-09-16), md5 `a791309a82df1d7ac538624f8f7856dc` |
+| NP raw: PubChemLite | `data/external/pubchemlite/PubChemLite_CCSbase_20260925.csv` | 469,602 | 225.3 MB | `f1efd923b72a87ea7aa420ae6d71ea26a5b8cc0a0eea0f10d38a6c09ec02d88e` | Zenodo record 22953182 (2026-09-25), md5 `fd1629808c2cf2896acc502e26e352f0` |
 
 ## Source notes
 
@@ -69,3 +75,158 @@ InChIKey first block used), `timeout_s` (limit in force when computed, `inf` = n
 and rename, so several processes may share it. Timeout rows are recomputed when a later call
 allows a longer timeout. On Kaggle (read-only artefacts) it is read if shipped and never written.
 <!-- WP1:mkey-cache:end -->
+
+<!-- WP2:np:start -->
+## NP tier (WP2)
+
+Built 2026-11-18 by `scripts/build_npdb.py`; every count below is also in
+`data/processed/db/np/build_report.json` (with the full filter cascade and checksums).
+`mass_disagreements.csv` (same directory) lists filter-passing source rows whose RDKit mass
+differs from the source mass by more than 0.001 Da (3 rows, all NPAtlas, all with 4 extra H in
+the NPAtlas SMILES; none of them supplies the SMILES of an np.parquet row).
+
+### Columns found in each source (header printed and checked by `--stage headers`)
+
+- COCONUT (`coconut_csv-11-2026.csv` inside the zip, comma separated, quoted, 44 columns):
+  `identifier, canonical_smiles, standard_inchi, standard_inchi_key, name, iupac_name,
+  annotation_level, total_atom_count, heavy_atom_count, molecular_weight, exact_molecular_weight,
+  molecular_formula, alogp, topological_polar_surface_area, rotatable_bond_count,
+  hydrogen_bond_acceptors, hydrogen_bond_donors, hydrogen_bond_acceptors_lipinski,
+  hydrogen_bond_donors_lipinski, lipinski_rule_of_five_violations, aromatic_rings_count,
+  qed_drug_likeliness, formal_charge, fractioncsp3, number_of_minimal_rings, van_der_walls_volume,
+  contains_sugar, contains_ring_sugars, contains_linear_sugars, murcko_framework, np_likeness,
+  chemical_class, chemical_sub_class, chemical_super_class, direct_parent_classification,
+  np_classifier_pathway, np_classifier_superclass, np_classifier_class,
+  np_classifier_is_glycoside, organisms, collections, dois, synonyms, cas`.
+  There are no organism or citation count columns: `organisms`, `dois` and `collections` are
+  `|`-separated lists; counts are distinct items, unioned over all rows with the same ik14.
+  `exact_molecular_weight` is the monoisotopic mass (5 decimals).
+- NPAtlas (TSV, read with quoting off, 34 columns): `npaid, compound_id, compound_name,
+  compound_molecular_formula, compound_molecular_weight, compound_accurate_mass,
+  compound_m_plus_h, compound_m_plus_na, compound_inchi, compound_inchikey, compound_smiles,
+  compound_cluster_id, compound_node_id, origin_type, genus, origin_species,
+  original_reference_author_list, original_reference_year, original_reference_issue,
+  original_reference_volume, original_reference_pages, original_reference_doi,
+  original_reference_pmid, original_reference_title, original_reference_type,
+  original_journal_title, synonyms_dois, reassignment_dois, synthesis_dois, mibig_ids, gnps_ids,
+  cmmc_ids, npmrd_id, npatlas_url`.
+- LOTUS `structure_metadata.tsv.gz` (TSV, 15 columns, one row per stereo-resolved structure, no
+  organism links in this file): `structureCleanedSmiles, structureCleanedInchi,
+  structureCleanedInchikey, structureCleaned_smiles2D, structureCleaned_inchi2D,
+  structureCleaned_inchikey2D, structureCleaned_validatorLog, structureCleaned_molecularFormula,
+  structureCleaned_exactMass, structureCleaned_xlogp, structureCleaned_stereocenters_unspecified,
+  structureCleaned_stereocenters_total, structureCleaned_cid, structureCleaned_nameIupac,
+  structureCleaned_nameTraditional`. So `n_organisms` / `n_citations` come from COCONUT only.
+- PubChemLite (CSV, 36 columns): `Identifier, FirstBlock, PubMed_Count, Patent_Count,
+  Related_CIDs, Synonym, MolecularFormula, SMILES, InChI, InChIKey, MonoisotopicMass, XLogP,
+  CompoundName, AnnoTypeCount, AgroChemInfo, BioPathway, DrugMedicInfo, FoodRelated,
+  PharmacoInfo, SafetyInfo, ToxicityInfo, KnownUse, DisorderDisease, Identification, NORMANSLE`
+  and 11 `pred_CCS_A2_[adduct]` columns. Already unique on `FirstBlock` (= InChIKey[:14] on
+  every row); SMILES carry no stereo.
+
+### Filters and counts
+
+Order: non-empty SMILES, no `.`, no isotope label in the SMILES, RDKit parses, no isotope atom,
+net formal charge 0, elements in {C,H,N,O,P,S,F,Cl,Br,I}, at least 3 C, RDKit mono mass in
+[100, 1300], then dedup on the source ik14 within the source (COCONUT: highest
+annotation_level, then lowest identifier; LOTUS and PubChemLite: lowest CID; NPAtlas: lowest
+npaid).
+
+| Source | read | after filters | unique ik14 after filters | distinct ik14 (all rows) | SMILES used in np.parquet | in_<source> true |
+|---|---|---|---|---|---|---|
+| COCONUT | 738,793 | 710,141 | 460,532 | 479,689 | 460,532 | 460,605 |
+| NPAtlas | 36,454 | 35,327 | 32,399 | 33,497 | 124 | 32,424 |
+| LOTUS | 555,952 | 538,346 | 284,307 | 295,474 | 46,400 | 284,374 |
+| PubChemLite | 469,602 | 419,879 | 419,879 | 469,602 | 347,419 | 421,472 |
+| union (np.parquet) | | | 854,475 | | | |
+
+Rows only in one source: COCONUT 201,577, NPAtlas 75, LOTUS 45,047, PubChemLite 347,410.
+Membership flags and priors are taken over all rows of a source with that ik14 (before the
+filters), so a structure whose COCONUT row is, for example, drawn charged still gets
+`in_coconut` when its neutral SMILES came from another source (73 such rows).
+
+### np.parquet
+
+Sorted by (mono_mass, ik14), zstd, row groups of 100k. Columns: `ik14` (source InChIKey
+first block; RDKit's InChIKey[:14] agrees on 5,000 of 5,000 sampled rows), `smiles` (as
+shipped by the first source in the order COCONUT, NPAtlas, LOTUS, PubChemLite that passes the
+filters; stereo kept), `formula` (RDKit `CalcMolFormula`, Hill), `mono_mass` (RDKit
+`CalcExactMolWt`, both on the molecule as parsed, i.e. `casmi.chem.formula` / `mono_mass`),
+`in_coconut, in_npatlas, in_lotus, in_pubchemlite` (bool), `coconut_annotation_level` (int8),
+`coconut_np_likeness` (float32), `n_organisms, n_citations, n_collections` (int32, COCONUT,
+null when not in COCONUT), `pubmed_count, patent_count, anno_type_count` (int32, PubChemLite,
+null when not in it), `cid` (int64, PubChemLite CID, else LOTUS `structureCleaned_cid`),
+`smiles_source` (which source supplied the SMILES), `coconut_id` / `npaid` (id of the row that
+supplied the SMILES, null otherwise). `n_collections` (number of COCONUT source collections),
+`smiles_source`, `coconut_id`, `npaid` are additions to the PLAN 2.3 schema.
+RDKit mass vs the source mass of the supplying row: 854,475 of 854,475 within 0.001 Da.
+
+### np_fp.npy recipe (for `casmi.chem.morgan_fp` users)
+
+`np.load(..., mmap_mode="r")`, shape (854,475, 512), uint8, row i = np.parquet row i. Row i is
+`casmi.chem.morgan_fp(casmi.chem.std_mol(Chem.MolFromSmiles(smiles_i)))`, which equals
+`casmi.chem.morgan_fps([smiles_i], standardize=True)[0][0]`: WP1 `std_mol` (RemoveHs, metal
+disconnection, normalise, reionise, uncharge, remove stereo), then
+`rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=4096, includeChirality=False)`
+(other options at RDKit defaults), `GetFingerprintAsNumPy`, `np.packbits` with bit order "big"
+(bit j is `(row[j // 8] >> (7 - j % 8)) & 1`; unpack with
+`np.unpackbits(row, count=4096)` or `casmi.db.unpack_fp`). `std_mol` failed on 0 rows (the
+build would fingerprint the parsed molecule instead and list the rows in build_report.json).
+Spot check in `--stage check`: 1,000 sampled rows recomputed with `chem.morgan_fps`, 0
+mismatches. If WP1 changes `std_mol` or `morgan_fp`, rerun `build_npdb.py --stage fp`.
+
+### Lookup (casmi.db) on this build
+
+Load 0.7 s; the NP frame holds 200 MB (peak RSS during load about 630 MB above baseline). Single NP-tier lookup at 10 ppm: mean 1.6 ms,
+max 4.3 ms over 1,000 queries; 400 public-test masses in one `lookup_batch`: 14 ms.
+Public-test NP pool sizes (M = median over a molecule's spectra of precursor_mz minus the PLAN
+3.1 shift, 400 molecules):
+
+| window | median | p95 | max | fraction empty |
+|---|---|---|---|---|
+| 5 ppm | 27 | 89 | 651 | 0.005 |
+| 10 ppm | 44.5 | 138 | 702 | 0.0025 |
+| 20 ppm | 87.5 | 242 | 712 | 0.0025 |
+
+With the PubChem tier as well (10 ppm, 400 molecules, one `lookup_batch`): pool median 10,467,
+p95 21,182, max 33,523; 0.5 percent of rows are NP tier; 95.6 percent of NP rows in those windows
+are also in the PubChem tier; 34.6 s and 5.2 GB peak RSS for the single 4.6M-row result, so call
+`lookup_batch` on batches of about 50 molecules (`Config.batch_molecules`). Single both-tier
+lookups (caffeine, paclitaxel, quercetin): 40-50 ms with a cold cache.
+<!-- WP2:np:end -->
+
+<!-- WP5:library:start -->
+## Spectral library (WP5)
+
+Not built yet: `data/raw/train.parquet` has not arrived. Add the table row (size, sha256 of
+`library_info.json`) when `python scripts/build_library.py` has run on train.
+
+Command: `nice -n 10 python scripts/build_library.py` (default source `data/raw/train.parquet`;
+`--source data/processed/train/` reads WP6's parquet files instead, same columns; `--fake-test`
+builds a smoke-test library from `test.parquet` with one fake structure per molecule_id).
+Output `data/processed/library/` (written to `library.building/`, renamed at the end):
+
+| file | format |
+|---|---|
+| `peaks_mz.npy`, `peaks_int.npy` | float32, all cleaned peaks (PLAN.md 4.1), base peak 1, memory-mappable |
+| `offsets.npy` | int64, n_spectra + 1; spectrum i = `offsets[i]:offsets[i+1]` |
+| `meta.parquet` | one row per spectrum in store order: spec_idx, spectrum_id, struct_idx, cons_idx, ik14, precursor_mz, adduct, adduct_family, polarity (+1/-1), instrument_family, instrument_type, ingest_lib, collision_energy (mean eV), n_energies, base_peak_intensity, precursor_error_ppm, prec_intensity, n_peaks_raw, n_peaks, molecule_id, source_row |
+| `structures.parquet` | one row per ik14 sorted by (mono_mass, ik14): struct_idx, ik14, smiles, formula, mono_mass, spec_start/spec_end, cons_start/cons_end, n_spectra, n_consensus |
+| `consensus_mz.npy`, `consensus_int.npy`, `consensus_offsets.npy` | consensus spectra, same layout |
+| `consensus_meta.parquet` | cons_idx, struct_idx, ik14, polarity, adduct_family, instrument_family, ingest_lib, precursor_mz (reference), mono_mass, spec_start/spec_end (member rows), n_members, n_peaks, open_row |
+| `open_index_pos.npz`, `open_index_neg.npz` | `scipy.sparse.save_npz` (uncompressed) CSR float32, rows = consensus of that polarity in order, 80,000 columns ([fragment | neutral loss] at 0.05 Da to 2,000 Da) |
+| `library_info.json` | counts, drop reasons, cleaning settings, build time |
+
+Scale test on synthetic train-schema data (public test spectra replicated with per-structure
+m/z shifts, 150 raw peaks per spectrum, 6 libraries, 1 core under nice):
+
+| input spectra | structures | consensus | wall | peak RSS | on disk |
+|---|---|---|---|---|---|
+| 500,000 | 83,115 | 368,685 | 13 s | 1.58 GB | 465 MB |
+| 1,000,000 | 166,271 | 737,414 | 25 s | 2.01 GB | 926 MB |
+
+Linear extrapolation to 2.5M train spectra: 1 to 2 minutes plus parquet decoding of the 3 GB
+file, about 3.5 GB peak RSS, about 2.3 GB on disk (more if train keeps more peaks per spectrum
+after cleaning: the cap is 100). Loaded 1M library: 1.1 GB RSS; 400 public-test molecules,
+mass search 0.4 s (0.9 s with an exclusion mask); open search 38 ms per consensus query.
+<!-- WP5:library:end -->

@@ -244,3 +244,14 @@ def test_real_np_tier():
     assert (time.perf_counter() - t0) / 200 < 0.05
     fp = db.np_fingerprints(hit["np_row"].to_numpy())
     assert fp.shape == (1, 512) and fp.any()
+
+
+@pytest.mark.data(REAL_NP, "data/processed/db/pubchem/_index.json")
+def test_real_union_tiers():
+    db = CandidateDB()
+    for m, ik in ((194.0804, "RYYVLZVUVIJVGH"), (853.3310, "RCINICONZNJXQF")):
+        r = db.lookup(m, 10.0, tiers=("np", "pubchem"))
+        assert r["ik14"].is_unique and (r["tier"] == "pubchem").any()
+        hit = r[r["ik14"] == ik]
+        assert len(hit) == 1 and hit["tier"].iloc[0] == "np" and bool(hit["in_pubchem"].iloc[0])
+    db.release()
