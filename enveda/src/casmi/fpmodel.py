@@ -1475,8 +1475,7 @@ def fit_calibration(logits: np.ndarray, targets: np.ndarray, l2: float = 1.0,
 # Candidate scores
 # ======================================================================================
 
-_BYTE_BITS = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.float64)
-_POPCOUNT8 = _BYTE_BITS.sum(axis=1)
+_POPCOUNT8 = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(1).astype(float)
 
 
 def _as_bits(fp: np.ndarray, n_bits: int) -> tuple[np.ndarray, bool]:
