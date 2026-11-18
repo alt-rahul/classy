@@ -25,3 +25,94 @@ tag r2 todo 473
 69/473 scored_0504 len 223 old 237 69.5s elapsed 1458s improved 69 gain 1321
 70/473 scored_0482 len 215 old 236 69.1s elapsed 1461s improved 70 gain 1342
 tag r2 todo 404
+1/404 scored_0160 len 218 old 234 68.5s elapsed 69s improved 1 gain 16
+5/404 scored_0364 len 214 old 231 62.6s elapsed 133s improved 5 gain 89
+9/404 scored_0324 len 207 old 230 63.4s elapsed 197s improved 9 gain 157
+10/404 scored_0577 len 207 old 230 74.1s elapsed 213s improved 10 gain 180
+13/404 scored_0214 len 202 old 228 69.6s elapsed 266s improved 13 gain 236
+18/404 scored_0582 len 204 old 223 58.2s elapsed 329s improved 17 gain 308
+20/404 scored_0441 len 204 old 221 52.5s elapsed 351s improved 19 gain 344
+21/404 scored_0099 len 209 old 219 69.9s elapsed 392s improved 20 gain 354
+26/404 scored_0274 len 198 old 217 60.7s elapsed 458s improved 24 gain 412
+30/404 scored_0626 len 200 old 215 57.8s elapsed 516s improved 28 gain 484
+32/404 scored_0154 len 192 old 211 62.1s elapsed 545s improved 30 gain 510
+36/404 scored_0189 len 211 old 209 69.3s elapsed 615s improved 33 gain 540
+40/404 scored_0140 len 185 old 206 39.9s elapsed 654s improved 37 gain 597
+42/404 scored_0439 len 198 old 205 55.8s elapsed 676s improved 39 gain 618
+47/404 scored_0616 len 192 old 203 58.5s elapsed 739s improved 44 gain 686
+50/404 scored_0053 len 196 old 201 49.1s elapsed 772s improved 47 gain 720
+52/404 scored_0408 len 189 old 200 39.0s elapsed 812s improved 49 gain 734
+58/404 scored_0294 len 183 old 199 54.2s elapsed 878s improved 54 gain 790
+60/404 scored_0363 len 180 old 199 47.4s elapsed 912s improved 56 gain 824
+63/404 scored_0206 len 184 old 197 34.2s elapsed 947s improved 59 gain 859
+68/404 scored_0516 len 181 old 197 61.8s elapsed 1009s improved 64 gain 916
+70/404 scored_0028 len 203 old 196 63.1s elapsed 1017s improved 65 gain 922
+75/404 scored_0192 len 190 old 195 58.2s elapsed 1095s improved 70 gain 960
+80/404 scored_0530 len 185 old 193 39.3s elapsed 1158s improved 75 gain 1008
+86/404 scored_0326 len 178 old 191 59.1s elapsed 1221s improved 80 gain 1082
+90/404 scored_0025 len 156 old 188 37.8s elapsed 1260s improved 84 gain 1142
+92/404 scored_0100 len 171 old 187 36.0s elapsed 1296s improved 86 gain 1165
+97/404 scored_0609 len 179 old 187 45.0s elapsed 1360s improved 89 gain 1180
+100/404 scored_0041 len 172 old 185 50.3s elapsed 1398s improved 92 gain 1207
+103/404 scored_0038 len 170 old 184 27.1s elapsed 1425s improved 95 gain 1246
+108/404 scored_0453 len 176 old 183 61.8s elapsed 1487s improved 100 gain 1293
+110/404 scored_0457 len 180 old 181 46.9s elapsed 1497s improved 102 gain 1303
+116/404 scored_0458 len 175 old 179 41.3s elapsed 1584s improved 108 gain 1351
+120/404 scored_0353 len 172 old 178 32.8s elapsed 1617s improved 112 gain 1382
+124/404 scored_0076 len 170 old 177 25.3s elapsed 1661s improved 116 gain 1411
+130/404 scored_0535 len 168 old 176 56.2s elapsed 1722s improved 122 gain 1455
+135/404 scored_0489 len 176 old 173 26.2s elapsed 1786s improved 126 gain 1489
+140/404 scored_0072 len 159 old 172 40.8s elapsed 1826s improved 130 gain 1541
+143/404 scored_0205 len 162 old 171 44.9s elapsed 1856s improved 133 gain 1563
+149/404 scored_0288 len 162 old 170 52.5s elapsed 1923s improved 138 gain 1622
+150/404 scored_0186 len 176 old 169 40.7s elapsed 1934s improved 138 gain 1622
+155/404 scored_0484 len 168 old 167 59.7s elapsed 1994s improved 141 gain 1642
+160/404 scored_0433 len 155 old 166 48.3s elapsed 2042s improved 146 gain 1684
+162/404 scored_0327 len 161 old 165 34.8s elapsed 2064s improved 148 gain 1695
+170/404 scored_0371 len 158 old 161 30.4s elapsed 2130s improved 155 gain 1748
+176/404 scored_0575 len 162 old 159 32.6s elapsed 2194s improved 157 gain 1756
+180/404 scored_0101 len 145 old 157 35.9s elapsed 2256s improved 161 gain 1796
+187/404 scored_0329 len 150 old 156 45.2s elapsed 2332s improved 167 gain 1848
+190/404 scored_0607 len 148 old 156 61.4s elapsed 2363s improved 170 gain 1889
+192/404 scored_0152 len 143 old 153 51.9s elapsed 2403s improved 172 gain 1902
+197/404 scored_0202 len 140 old 152 63.0s elapsed 2477s improved 177 gain 1948
+200/404 scored_0243 len 142 old 152 75.0s elapsed 2491s improved 180 gain 1978
+204/404 scored_0164 len 139 old 150 79.4s elapsed 2561s improved 183 gain 2006
+210/404 scored_0414 len 148 old 149 57.2s elapsed 2627s improved 189 gain 2050
+218/404 scored_0347 len 148 old 146 53.7s elapsed 2708s improved 196 gain 2098
+220/404 scored_0366 len 137 old 145 43.1s elapsed 2722s improved 198 gain 2119
+224/404 scored_0639 len 141 old 145 50.0s elapsed 2772s improved 202 gain 2131
+230/404 scored_0362 len 128 old 143 42.1s elapsed 2827s improved 205 gain 2162
+231/404 scored_0615 len 130 old 143 30.8s elapsed 2835s improved 206 gain 2175
+238/404 scored_0316 len 135 old 141 43.5s elapsed 2898s improved 213 gain 2211
+240/404 scored_0486 len 136 old 141 41.0s elapsed 2924s improved 215 gain 2222
+245/404 scored_0071 len 132 old 139 37.4s elapsed 2961s improved 219 gain 2249
+250/404 scored_0602 len 132 old 138 32.9s elapsed 3007s improved 223 gain 2264
+254/404 scored_0404 len 132 old 137 31.6s elapsed 3042s improved 227 gain 2279
+260/404 scored_0547 len 127 old 135 31.4s elapsed 3075s improved 233 gain 2323
+264/404 scored_0169 len 129 old 132 22.7s elapsed 3106s improved 237 gain 2341
+270/404 scored_0343 len 134 old 131 36.4s elapsed 3142s improved 242 gain 2359
+273/404 scored_0032 len 136 old 130 31.4s elapsed 3167s improved 244 gain 2376
+280/404 scored_0078 len 124 old 127 19.7s elapsed 3224s improved 249 gain 2398
+282/404 scored_0132 len 130 old 128 37.1s elapsed 3230s improved 250 gain 2402
+290/404 scored_0574 len 122 old 123 24.5s elapsed 3271s improved 256 gain 2433
+295/404 scored_0147 len 121 old 118 22.1s elapsed 3293s improved 258 gain 2442
+300/404 scored_0519 len 107 old 114 9.2s elapsed 3313s improved 262 gain 2462
+310/404 scored_0210 len 107 old 109 10.8s elapsed 3341s improved 271 gain 2516
+316/404 scored_0260 len 110 old 107 15.3s elapsed 3358s improved 275 gain 2535
+320/404 scored_0562 len 99 old 104 11.1s elapsed 3369s improved 279 gain 2559
+330/404 scored_0431 len 95 old 99 10.4s elapsed 3389s improved 286 gain 2595
+340/404 scored_0271 len 49 old 46 0.3s elapsed 3392s improved 293 gain 2615
+350/404 scored_0620 len 42 old 43 1.1s elapsed 3393s improved 297 gain 2620
+360/404 scored_0630 len 38 old 38 0.8s elapsed 3395s improved 301 gain 2627
+370/404 scored_0368 len 37 old 35 0.8s elapsed 3396s improved 305 gain 2631
+380/404 scored_0401 len 31 old 32 1.1s elapsed 3398s improved 309 gain 2636
+390/404 scored_0473 len 26 old 27 0.0s elapsed 3399s improved 311 gain 2638
+400/404 scored_0289 len 21 old 21 0.0s elapsed 3399s improved 313 gain 2641
+done r2 improved 313 gain 2641 3400s
+  indep<20  puzzles   27 targets    359 ops     1951 ops/target 5.43
+  indep>=20 puzzles  215 targets   6450 ops    55922 ops/target 8.67
+  other<20  puzzles  107 targets    980 ops     3662 ops/target 3.74
+  other>=20 puzzles  635 targets  19068 ops   108783 ops/target 5.71
+  tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
+  total 170375

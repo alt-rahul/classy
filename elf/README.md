@@ -60,15 +60,16 @@ All totals are validated with `src/validate.py` (0 invalid).
 | Ruin-and-recreate repair post-pass | 176,025 |
 | Restarts on independent puzzles (r1, `evict_size`) | 174,337 |
 | Restarts on other puzzles (r2, `evict_big` 4), partial: 70 of 473 | 173,016 |
+| r2 completed on all 473 | **170,375** (final) |
 
-Per-class breakdown at 173,016:
+Per-class breakdown at 170,375 (final):
 
 | Class | Puzzles | Targets | Ops | Ops per target |
 |---|---|---|---|---|
 | indep<20 | 27 | 359 | 1,951 | 5.43 |
 | indep>=20 | 215 | 6,450 | 55,922 | 8.67 |
-| other<20 | 107 | 980 | 3,697 | 3.77 |
-| other>=20 | 635 | 19,068 | 111,389 | 5.84 |
+| other<20 | 107 | 980 | 3,662 | 3.74 |
+| other>=20 | 635 | 19,068 | 108,783 | 5.71 |
 | tiny | 16 | 45 | 57 | 1.27 |
 
 What helped most: the greedy cheapest-target-next loop with every intermediate kept in the pool

@@ -1,7 +1,7 @@
   indep<20  puzzles   27 targets    359 ops     1951 ops/target 5.43
   indep>=20 puzzles  215 targets   6450 ops    55922 ops/target 8.67
-  other<20  puzzles  107 targets    980 ops     3697 ops/target 3.77
-  other>=20 puzzles  635 targets  19068 ops   112710 ops/target 5.91
+  other<20  puzzles  107 targets    980 ops     3662 ops/target 3.74
+  other>=20 puzzles  635 targets  19068 ops   108783 ops/target 5.71
   tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
-  total 174337
-wrote submissions/.sub_tmp.csv score 174337
+  total 170375
+wrote submissions/.sub_tmp.csv score 170375
