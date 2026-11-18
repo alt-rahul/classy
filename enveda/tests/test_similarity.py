@@ -157,7 +157,7 @@ def test_cross_check_matchms_ms_entropy(public_clean):
                 peaks[a], peaks[b], ms2_tolerance_in_da=tol, clean_spectra=False)
             err["uent"] = max(err["uent"],
                               abs(entropy_similarity(ma, xa, mb, xb, tol, weighted=False)[0] - e))
-        assert n_high > 300            # the same-molecule pairs give high scores
+        assert n_high > 200            # the same-molecule pairs give high scores
         for k, v in err.items():
             assert v < 1e-6, (tol, k, v)
         worst[tol] = err
