@@ -46,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-queries", action="store_true", help="only write the holdout file")
     ap.add_argument("--queries-only", action="store_true",
                     help="rebuild the query tables from an existing holdout file")
+    ap.add_argument("--no-truth-keys", action="store_true",
+                    help="skip precomputing the truth keys (DB rows with the truth mkey; "
+                         "evaluate.py computes them lazily and caches them)")
     args = ap.parse_args(argv)
     lg = get_logger("make_splits")
     log_run(lg, args)
@@ -78,8 +81,18 @@ def main(argv: list[str] | None = None) -> int:
                     "/".join(f"{x:.0f}" for x in q), m["query_lib"].value_counts().to_dict())
         lg.info("wrote %s: %d rows, %d molecules", path, len(ho), len(mols))
     if not args.no_queries:
-        build_queries(ho, args.train_dir, cfg, raw=args.raw, test_path=args.test,
-                      out_dir=args.val_dir)
+        res = build_queries(ho, args.train_dir, cfg, raw=args.raw, test_path=args.test,
+                            out_dir=args.val_dir)
+        if not args.no_truth_keys:
+            from casmi.validation import truth_keys
+
+            for s, (_, truth) in res.items():
+                keys = truth_keys(truth, cfg, n_jobs=args.n_jobs,
+                                  cache_path=args.val_dir / "truth_keys.parquet")
+                extra = sum(len(v) for v in keys.values()) - sum(
+                    len(str(g).split(";")) for g in truth["ik14_group"])
+                lg.info("truth keys %s: %d molecules, %d DB ik14 beyond the train ik14 groups",
+                        s, len(keys), extra)
     return 0
 
 

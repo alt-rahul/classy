@@ -547,7 +547,8 @@ class Ingest:
                             cols[c] = t.column(c)
                     for c, v in derived.items():
                         vv = v[sel]
-                        cols[c] = pa.array(vv, from_pandas=True) if vv.dtype == object else pa.array(vv)
+                        cols[c] = (pa.array(vv, type=pa.string(), from_pandas=True)
+                                   if vv.dtype == object else pa.array(vv))
                     tbl = pa.table(cols)
                     w = self._writer(L, tbl.schema)
                     w.write_table(tbl)
@@ -572,7 +573,7 @@ class Ingest:
                         "n_above_precursor": above[rows], "prec_intensity": pint[rows].astype(np.float32),
                         "query_ok": q_ok[rows],
                     }
-                    self.meta_parts.append(pa.table({k: (pa.array(v, from_pandas=True)
+                    self.meta_parts.append(pa.table({k: (pa.array(v, type=pa.string(), from_pandas=True)
                                                          if v.dtype == object else pa.array(v))
                                                      for k, v in meta.items()}))
                 lab = pd.DataFrame({"ik14": ik[kidx], "smiles": smi[kidx], "formula": form[kidx]})

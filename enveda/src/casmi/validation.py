@@ -456,6 +456,29 @@ def skeleton_key(smiles: str | None) -> str | None:
             return None
 
 
+_BRACKET_RE = None
+_RING_RE = None
+
+
+def ring_closures(smiles: str) -> int:
+    """Ring-closure pairs in a SMILES (digits and %nn outside brackets, halved). For a
+    connected molecule this is the cycle rank of the heavy-atom graph, which tautomers
+    share, so it is a sound string-level prefilter for ``skeleton_key``."""
+    import re
+
+    global _BRACKET_RE, _RING_RE
+    if _BRACKET_RE is None:
+        _BRACKET_RE = re.compile(r"\[[^\]]*\]")
+        _RING_RE = re.compile(r"%\d\d|\d")
+    if not isinstance(smiles, str):
+        return -1
+    return len(_RING_RE.findall(_BRACKET_RE.sub("", smiles))) // 2
+
+
+def _skeleton_chunk(smiles: list[str]) -> list[str | None]:
+    return [skeleton_key(s) for s in smiles]
+
+
 def _formula_counts(f: Any) -> tuple | None:
     import re
 
@@ -490,13 +513,30 @@ def truth_keys(truth: pd.DataFrame, cfg: Config | None = None, db: Any = None, n
         t0 = time.perf_counter()
         res = dbh.lookup_batch(todo["mono_mass"].to_numpy(np.float64), tol_ppm=1.0, tiers=tiers,
                                min_tol_da=0.001, keys=todo["mkey"].tolist())
+        from .chem import parallel_map
+
+        n_window = len(res)
         tf = dict(zip(todo["mkey"], [_formula_counts(f) for f in todo["formula"]]))
         tsk = dict(zip(todo["mkey"], [skeleton_key(s) for s in todo["smiles"]]))
-        res = res.assign(_fc=[_formula_counts(f) for f in res["formula"]])
-        res = res[[fc is not None and fc == tf.get(q) for q, fc in zip(res["query"], res["_fc"])]]
-        sk = [skeleton_key(s) for s in res["smiles"]]
-        res = res.assign(_sk=sk)
-        res = res[[s is not None and s == tsk.get(q) for q, s in zip(res["query"], res["_sk"])]]
+        trc = dict(zip(todo["mkey"], [ring_closures(s) for s in todo["smiles"]]))
+        fmap = {f: _formula_counts(f) for f in pd.unique(res["formula"].astype(object))}
+        q = res["query"].astype(object).to_numpy(object)
+        ok = np.fromiter((fmap.get(f) is not None and fmap.get(f) == tf.get(k)
+                          for k, f in zip(q, res["formula"].astype(object))), bool, len(res))
+        res = res[ok]
+        n_formula = len(res)
+        q = res["query"].astype(object).to_numpy(object)
+        ok = np.fromiter((ring_closures(sm) == trc.get(k) for k, sm in
+                          zip(q, res["smiles"].astype(object))), bool, len(res))
+        res = res[ok]
+        uniq = sorted(set(res["smiles"].astype(object)) - {None})
+        chunks = [uniq[i:i + 5000] for i in range(0, len(uniq), 5000)]
+        skm = dict(zip(uniq, [k for part in parallel_map(_skeleton_chunk, chunks, n_jobs)
+                              for k in part]))
+        res = res[[skm.get(sm) is not None and skm.get(sm) == tsk.get(k)
+                   for k, sm in zip(res["query"], res["smiles"])]]
+        log.info("truth keys: %d window rows, %d same formula, %d same ring count (%d unique "
+                 "SMILES), %d same skeleton", n_window, n_formula, int(ok.sum()), len(uniq), len(res))
         keys = mkeys(res["smiles"].tolist(), cfg, n_jobs=n_jobs, cache=True) if len(res) else []
         res = res.assign(_mk=keys)
         hit = res[res["_mk"] == res["query"]]
@@ -565,7 +605,7 @@ class ValidationHooks:
         self.active: tuple[str, ...] = ()
         self.pools: dict[str, dict[str, set]] = defaultdict(lambda: {"main": set(), "any": set()})
         self.violations: list[str] = []
-        self._lib_cache: dict[tuple[int, str], np.ndarray] = {}
+        self._lib_cache: dict[tuple[int, str], np.ndarray] = {}   # excluded spectrum indices
         self._lib_index: dict[int, dict] = {}
         self.n_union_fallbacks = 0
 
@@ -608,31 +648,41 @@ class ValidationHooks:
             self._lib_index[k] = ix
         return ix
 
-    def library_mask(self, lib: Any, molecule_id: str | Iterable[str]) -> np.ndarray | None:
-        """Spectra of ``molecule_id`` (or the union over several ids) removed under this
-        condition (True = excluded), or None if nothing is removed."""
-        ids = [molecule_id] if isinstance(molecule_id, str) else list(molecule_id)
-        mask = None
-        for m in ids:
-            e = self.excl.get(str(m))
-            if e is None:
-                continue
-            key = (id(lib), str(m))
-            mm = self._lib_cache.get(key)
-            if mm is None:
+    def excluded_spectra(self, lib: Any, molecule_id: str) -> np.ndarray:
+        """Library store rows of ``molecule_id`` removed under this condition (sorted int64;
+        cached per molecule, small)."""
+        key = (id(lib), str(molecule_id))
+        idx = self._lib_cache.get(key)
+        if idx is None:
+            e = self.excl.get(str(molecule_id))
+            parts = []
+            if e is not None:
                 ix = self._index(lib)
-                mm = np.zeros(lib.n_spectra, dtype=bool)
-                for k in e.group:
+                for k in sorted(e.group):
                     s = ix["struct"].get(k)
                     if s is None:
                         continue
-                    a, b = lib.struct_spec[s]
-                    if e.lib_libs is None:
-                        mm[a:b] = True
-                    else:
-                        mm[a:b] = np.isin(ix["lib"][a:b], list(e.lib_libs))
-                self._lib_cache[key] = mm
-            mask = mm.copy() if mask is None else (mask | mm)
+                    a, b = (int(v) for v in lib.struct_spec[s])
+                    r = np.arange(a, b, dtype=np.int64)
+                    if e.lib_libs is not None:
+                        r = r[np.isin(ix["lib"][a:b], list(e.lib_libs))]
+                    parts.append(r)
+            idx = np.unique(np.concatenate(parts)) if parts else np.zeros(0, np.int64)
+            self._lib_cache[key] = idx
+        return idx
+
+    def library_mask(self, lib: Any, molecule_id: str | Iterable[str]) -> np.ndarray | None:
+        """Spectra of ``molecule_id`` (or the union over several ids) removed under this
+        condition (True = excluded, one entry per library spectrum), or None if nothing is
+        removed. Built on demand from ``excluded_spectra`` (not cached)."""
+        ids = [molecule_id] if isinstance(molecule_id, str) else list(molecule_id)
+        idx = [self.excluded_spectra(lib, m) for m in ids if str(m) in self.excl]
+        idx = [i for i in idx if i.size]
+        if not idx:
+            return None
+        mask = np.zeros(lib.n_spectra, dtype=bool)
+        for i in idx:
+            mask[i] = True
         return mask
 
     def check_library(self, lib: Any, truth: pd.DataFrame) -> pd.DataFrame:
@@ -648,7 +698,7 @@ class ValidationHooks:
         ix = self._index(lib)
         for r in truth.itertuples(index=False):
             e = self.excl[str(r.molecule_id)]
-            mask = self.library_mask(lib, e.molecule_id)
+            gone = self.excluded_spectra(lib, e.molecule_id)
             idx = {ix["struct"][k] for k in e.group if k in ix["struct"]}
             alias = set(by_mkey.get(e.mkey, []))
             if self.lib_mkeys is not None and not alias <= idx:
@@ -658,8 +708,8 @@ class ValidationHooks:
                 idx |= alias
             own = other = 0
             for s in sorted(idx):
-                a, b = lib.struct_spec[s]
-                keep = ~mask[a:b] if mask is not None else np.ones(b - a, bool)
+                a, b = (int(v) for v in lib.struct_spec[s])
+                keep = ~np.isin(np.arange(a, b), gone)
                 libs = ix["lib"][a:b]
                 own += int((keep & (libs == r.query_lib)).sum())
                 other += int((keep & (libs != r.query_lib)).sum())
@@ -885,7 +935,7 @@ def _has_generator(cfg: Config) -> bool:
 def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, condition: str,
              cfg: Config, keys: Mapping[str, frozenset], *, db: Any = None, library: Any = None,
              lib_mkeys: Mapping[str, str] | None = None, batch: int | None = None,
-             n_jobs: int = 1, strict: bool = True) -> CellResult:
+             n_jobs: int = 1, strict: bool = True, leak_check: bool = True) -> CellResult:
     """Run ``predict_fn`` on one (set, condition) cell and score it (per-molecule table)."""
     from . import db as cdb
     from .metric import mkeys, reciprocal_ranks
@@ -942,7 +992,7 @@ def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, 
         for m in cell_ids:
             leak[m] = any(gk.get(g) == tk[m] for g in preds[m])
         n_leak = sum(leak.values())
-        if n_leak and not _has_generator(cfg):
+        if n_leak and leak_check and not _has_generator(cfg):
             hooks.violations.append(f"C3: truth among the predictions of {n_leak} molecules "
                                     "without a generator stage")
     rows = []
@@ -998,7 +1048,7 @@ def evaluate(predict_fn: Predictor, cfg: Config, sets: Sequence[str] = SETS,
              conditions: Sequence[str] = CONDITIONS, val_dir: Path | str | None = None,
              library: Any = None, train_dir: Path | str | None = None, batch: int | None = None,
              n_jobs: int = 1, max_molecules: int | None = None, strict: bool = True,
-             db: Any = None) -> tuple[pd.DataFrame, list[CellResult]]:
+             db: Any = None, leak_check: bool = True) -> tuple[pd.DataFrame, list[CellResult]]:
     """Run every (set, condition) cell; returns the per-molecule table and the cells."""
     val_dir = Path(val_dir) if val_dir is not None else validation_dir()
     train_dir = Path(train_dir) if train_dir is not None else None
@@ -1016,7 +1066,8 @@ def evaluate(predict_fn: Predictor, cfg: Config, sets: Sequence[str] = SETS,
         keys = truth_keys(t, cfg, db=db, n_jobs=n_jobs, cache_path=val_dir / "truth_keys.parquet")
         for c in conditions:
             cells.append(run_cell(predict_fn, q, t, c, cfg, keys, db=db, library=library,
-                                  lib_mkeys=lib_mk, batch=batch, n_jobs=n_jobs, strict=strict))
+                                  lib_mkeys=lib_mk, batch=batch, n_jobs=n_jobs, strict=strict,
+                                  leak_check=leak_check))
     table = pd.concat([c.table for c in cells], ignore_index=True) if cells else \
         pd.DataFrame(columns=list(RESULT_COLUMNS))
     return table, cells
@@ -1100,7 +1151,7 @@ def self_check(cfg: Config, sets: Sequence[str] = SETS, conditions: Sequence[str
         _, t = load_queries(s, val_dir)
         for name, fn, want in (("truth", truth_predictor(t), 1.0), ("cco", cco_predictor, 0.0)):
             tab, _ = evaluate(fn, cfg, [s], conditions, val_dir, library, train_dir, None, n_jobs,
-                              max_molecules, True, db)
+                              max_molecules, True, db, leak_check=name != "truth")
             for c, g in tab.groupby("condition"):
                 g = g[g["in_cell"]]
                 if not len(g):

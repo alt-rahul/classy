@@ -432,7 +432,7 @@ class TrainingExclusion:
         ik = pd.Series(np.asarray(ik14, dtype=object))
         m = ik.isin(self.ik14).to_numpy()
         if mkey is not None:
-            m |= pd.Series(np.asarray(mkey, dtype=object)).isin(self.mkey).to_numpy()
+            m = m | pd.Series(np.asarray(mkey, dtype=object)).isin(self.mkey).to_numpy()
         return m
 
     def assert_clean(self, ik14: Sequence[Any], mkey: Sequence[Any] | None = None) -> None:
