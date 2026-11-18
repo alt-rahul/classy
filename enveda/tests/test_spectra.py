@@ -10,8 +10,8 @@ import pytest
 
 from casmi.config import Config
 from casmi.spectra import (SpectrumStore, bin_sparse, clean, clean_flat, list_arrays_to_flat,
-                           merge_consensus, merge_groups, open_n_bins, open_query_vector,
-                           open_vectors)
+                           merge_consensus, merge_groups, open_matrix, open_n_bins,
+                           open_query_vector, open_vectors)
 
 
 @pytest.fixture(scope="module")
@@ -190,6 +190,17 @@ def test_bin_sparse_and_open_vectors():
     assert nl2.nnz == 0 and f2.nnz == 1
     _, nl3 = bin_sparse(store.mz, store.intensity, store.offsets, np.array([np.nan, np.nan]), cfg)
     assert nl3.nnz == 0
+
+
+def test_open_matrix_equals_open_vectors(public_flat):
+    mz, it, off, valid, prec = public_flat
+    cm, ci, co, _, _ = clean_flat(mz, it, off, prec, Config(), valid)
+    a = open_matrix(cm, ci, co, prec)
+    b = open_vectors(*bin_sparse(cm, ci, co, prec))
+    assert a.shape == b.shape and np.array_equal(a.indptr, b.indptr)
+    assert np.array_equal(a.indices, b.indices) and np.allclose(a.data, b.data, atol=1e-6)
+    norms = np.sqrt(np.asarray(a.multiply(a).sum(axis=1))).ravel()
+    assert np.allclose(norms, 1.0, atol=1e-5)
 
 
 def test_store_roundtrip(tmp_path):

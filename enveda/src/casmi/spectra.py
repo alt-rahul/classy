@@ -53,7 +53,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, NamedTuple, Sequence
 
-import numba
 import numpy as np
 from numba import njit
 
@@ -68,6 +67,7 @@ __all__ = [
     "merge_groups",
     "bin_sparse",
     "open_vectors",
+    "open_matrix",
     "open_query_vector",
     "open_n_bins",
     "list_arrays_to_flat",
@@ -527,6 +527,80 @@ def open_query_vector(mz, inten, precursor_mz: float, cfg: Config | None = None)
                                   float(cfg.precursor_window_low_da), nl)
         out[ch * nb + ind] = dat * w
     return out
+
+
+@njit(cache=True)
+def _open_kernel(mz, inten, offsets, prec, bin_da, n_bins, min_loss):
+    """Both channels side by side, each L2-normalised and scaled by 1/sqrt(2), as CSR."""
+    n = offsets.shape[0] - 1
+    total = 2 * (offsets[n] - offsets[0])
+    indptr = np.zeros(n + 1, dtype=np.int64)
+    indices = np.empty(total, dtype=np.int32)
+    data = np.empty(total, dtype=np.float32)
+    w = 1.0 / math.sqrt(2.0)
+    pos = 0
+    for i in range(n):
+        a = offsets[i]
+        b = offsets[i + 1]
+        L = b - a
+        for ch in range(2):
+            cols = np.empty(L, dtype=np.int64)
+            vals = np.empty(L, dtype=np.float64)
+            m = 0
+            for p in range(a, b):
+                if ch == 1:
+                    x = prec[i] - mz[p]
+                    if not (x >= min_loss):
+                        continue
+                else:
+                    x = mz[p]
+                c = int(math.floor(x / bin_da))
+                if c < 0 or c >= n_bins:
+                    continue
+                cols[m] = c
+                vals[m] = math.sqrt(max(inten[p], 0.0))
+                m += 1
+            if m == 0:
+                continue
+            o = np.argsort(cols[:m], kind="mergesort")
+            start = pos
+            last = -1
+            acc = np.empty(m, dtype=np.float64)
+            k = -1
+            for t in range(m):
+                c = cols[o[t]]
+                if c != last:
+                    k += 1
+                    indices[start + k] = c + ch * n_bins
+                    acc[k] = 0.0
+                    last = c
+                acc[k] += vals[o[t]]
+            k += 1
+            ss = 0.0
+            for t in range(k):
+                ss += acc[t] * acc[t]
+            inv = w / math.sqrt(ss) if ss > 0.0 else 0.0
+            for t in range(k):
+                data[start + t] = acc[t] * inv
+            pos = start + k
+        indptr[i + 1] = pos
+    return indptr, indices[:pos].copy(), data[:pos].copy()
+
+
+def open_matrix(mz: np.ndarray, inten: np.ndarray, offsets: np.ndarray,
+                precursor_mz: np.ndarray, cfg: Config | None = None):
+    """Open-search rows (``open_vectors(*bin_sparse(...))``) built in one pass, without
+    scipy intermediates. CSR float32 of shape (n_spectra, 2 x ``open_n_bins(cfg)``)."""
+    import scipy.sparse as sp
+
+    cfg = cfg or Config()
+    nb = open_n_bins(cfg)
+    offsets = np.ascontiguousarray(offsets, dtype=np.int64)
+    indptr, indices, data = _open_kernel(
+        np.ascontiguousarray(mz, dtype=np.float32), np.ascontiguousarray(inten, dtype=np.float32),
+        offsets, np.ascontiguousarray(precursor_mz, dtype=np.float64),
+        float(cfg.analog_bin_da), nb, float(cfg.precursor_window_low_da))
+    return sp.csr_matrix((data, indices, indptr), shape=(len(offsets) - 1, 2 * nb))
 
 
 def open_vectors(frag, nl):

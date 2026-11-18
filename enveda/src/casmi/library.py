@@ -96,9 +96,8 @@ from numba import njit
 from . import paths
 from .config import Config
 from .similarity import modified_cosine_batch, pair_scores_batch
-from .spectra import (STORE_NAMES, Spectrum, SpectrumStore, _take_into_kernel, bin_sparse,
-                      clean_flat, list_arrays_to_flat, merge_groups, open_query_vector,
-                      open_vectors)
+from .spectra import (STORE_NAMES, Spectrum, SpectrumStore, _take_into_kernel, clean_flat,
+                      list_arrays_to_flat, merge_groups, open_matrix, open_query_vector)
 
 __all__ = [
     "Library",
@@ -952,6 +951,20 @@ class Library:
         return cls.load(out, cfg)
 
 
+def _rss_mb() -> tuple[float, float]:
+    """(current RSS, peak RSS) of this process in MB (Linux /proc; NaN elsewhere)."""
+    try:
+        txt = Path("/proc/self/status").read_text()
+    except OSError:
+        return float("nan"), float("nan")
+    vals = {}
+    for line in txt.splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            k, v = line.split(":", 1)
+            vals[k] = float(v.split()[0]) / 1024
+    return vals.get("VmRSS", float("nan")), vals.get("VmHWM", float("nan"))
+
+
 def _clean_cfg_dict(cfg: Config) -> dict:
     keys = ("clean_max_above_precursor_da", "keep_precursor", "precursor_window_low_da",
             "precursor_window_high_da", "intensity_floor", "top_n_peaks",
@@ -974,17 +987,21 @@ class _Builder:
         t1 = time.perf_counter()
         log.info("pass 1 (read + clean): %d spectra, %d peaks, %.1f s", len(meta),
                  n_peaks_total, t1 - t0)
+        log.info("  RSS %.0f MB, peak %.0f MB", *_rss_mb())
         meta, structures = self._index(meta)
         self._write_spectra(meta)
         t2 = time.perf_counter()
         log.info("spectra sorted and written: %d spectra, %d structures, %.1f s", len(meta),
                  len(structures), t2 - t1)
+        log.info("  RSS %.0f MB, peak %.0f MB", *_rss_mb())
         cons_meta = self._consensus(meta, structures)
         t3 = time.perf_counter()
         log.info("consensus: %d spectra, %.1f s", len(cons_meta), t3 - t2)
+        log.info("  RSS %.0f MB, peak %.0f MB", *_rss_mb())
         self._open_index(cons_meta)
         t4 = time.perf_counter()
         log.info("open index: %.1f s", t4 - t3)
+        log.info("  RSS %.0f MB, peak %.0f MB", *_rss_mb())
         meta = meta.rename(columns={"row": "source_row"})
         meta[SPECTRUM_COLUMNS + ["source_row"]].to_parquet(self.out / "meta.parquet",
                                                            index=False)
@@ -1260,10 +1277,11 @@ class _Builder:
         for p, name in ((1, "open_index_pos.npz"), (-1, "open_index_neg.npz")):
             sel = np.flatnonzero(pol == p)
             sub = cons.take(sel)
-            f, nl = bin_sparse(sub.mz, sub.intensity, sub.offsets, prec[sel], self.cfg)
-            m = open_vectors(f, nl)
+            m = open_matrix(sub.mz, sub.intensity, sub.offsets, prec[sel], self.cfg)
+            del sub
             sp.save_npz(self.out / name, m, compressed=False)
             log.info("open index %s: %d rows, %d non-zeros", name, m.shape[0], m.nnz)
+            del m
 
 
 def _mode_per_key(keys: np.ndarray, values: np.ndarray) -> dict:
