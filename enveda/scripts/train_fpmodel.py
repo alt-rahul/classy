@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from casmi import fpmodel, paths
 from casmi.config import load_config
@@ -54,8 +53,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--epochs", type=float, help="number of epochs instead of --hours")
     ap.add_argument("--tag", help="output tag (default v1_holdout / v1_full)")
     ap.add_argument("--max-spectra", type=int, help="random training subset (smoke runs)")
-    ap.add_argument("--source", help="WP5 library dir or train-schema parquet "
-                    "(default: data/processed/library if built, else data/raw/train.parquet)")
+    ap.add_argument("--source", help="train-schema parquet file or dir, or a WP5 library dir "
+                    "(default: data/processed/train/spectra if present, else "
+                    "data/processed/library, else data/raw/train.parquet)")
     ap.add_argument("--synthetic", type=int, metavar="N",
                     help="train on N synthetic spectra instead (no train data needed)")
     ap.add_argument("--holdout-file", default=str(paths.SPLITS / "holdout_v1.csv"))
@@ -105,8 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_benchmark(args, cfg, lg)
     tag = args.tag or ("v1_holdout" if args.exclude_holdout else "v1_full")
     out_dir = paths.ensure_dir(args.out_dir)
+    # smoke runs: load a random 2x superset only (filters and holdout remove some rows)
+    max_rows = 2 * args.max_spectra if args.max_spectra else None
     data = fpmodel.load_training_source(args.source, cfg, n_jobs=args.n_jobs,
-                                        synthetic=args.synthetic)
+                                        synthetic=args.synthetic, max_rows=max_rows)
     train, val, calib, info = fpmodel.split_training_data(
         data, cfg, exclude_holdout=args.exclude_holdout, holdout=args.holdout_file,
         structures=args.structures, max_spectra=args.max_spectra)

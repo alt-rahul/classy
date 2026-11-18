@@ -347,6 +347,11 @@ def test_from_parquet(tmp_path):
     assert np.isfinite(d.label_mass).all()
     d2 = fm.TrainingData.from_parquet(p, cfg, targets_cache=None, max_rows=10)
     assert len(d2) == 10
+    # already-cleaned input (WP6 spectra files) keeps its raw counts and precursor intensity
+    df3 = df.assign(n_peaks_raw=500, prec_intensity=0.25)
+    df3.to_parquet(tmp_path / "cleaned.parquet", index=False)
+    d3 = fm.TrainingData.from_parquet(tmp_path / "cleaned.parquet", cfg, targets_cache=None)
+    assert (d3.meta.n_peaks_raw == 500).all() and (d3.meta.prec_intensity == 0.25).all()
 
 
 def test_from_library_matches_parquet(tmp_path):
@@ -370,6 +375,8 @@ def test_from_library_matches_parquet(tmp_path):
     xa = fm.meta_matrix(a.meta, a.store.n_peaks)
     xb = fm.meta_matrix(b.meta, b.store.n_peaks)
     np.testing.assert_allclose(np.sort(xa, axis=0), np.sort(xb, axis=0), atol=1e-6)
+    c = fm.load_training_source(tmp_path / "lib", cfg, max_rows=5, targets_cache=None)
+    assert len(c) == 5 and set(c.ik14.tolist()) <= set(a.ik14.tolist())
 
 
 # --------------------------------------------------------------------------------------

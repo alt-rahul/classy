@@ -17,5 +17,7 @@ duckdb==2.0.0
 scikit-learn==1.9.1
 # Tests:
 pytest==9.1.1
-# Optional, not installed here yet (WP9): torch CPU build, via pip install -e ".[train]"
-# --extra-index-url https://download.pytorch.org/whl/cpu ; pin it here once installed.
+# Training only (WP9, never imported on the inference path): torch CPU build, installed
+# 2026-11-18 as torch 2.15.0+cpu (it also upgraded setuptools 68.1.2 -> 78.1.0):
+#   pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+# Not listed as a requirement line because plain PyPI would pull the CUDA build.

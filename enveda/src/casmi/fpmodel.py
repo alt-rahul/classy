@@ -13,9 +13,11 @@ Training input interface (what WP6 / WP5 must provide)
 ------------------------------------------------------
 ``TrainingData`` = flat spectrum store + per-spectrum metadata + one target row per
 structure. Build it with ``TrainingData.from_parts(store, meta_df, targets)``, or let a
-loader do it: ``TrainingData.from_library(dir)`` (the WP5 library index, preferred: its
-files are exactly this) or ``TrainingData.from_parquet(path)`` (train.parquet schema,
-streamed and cleaned here).
+loader do it: ``TrainingData.from_parquet(path)`` (train.parquet schema, a file or a
+directory such as WP6's ``data/processed/train/spectra/``, streamed and cleaned here;
+the default source) or ``TrainingData.from_library(dir)`` (the WP5 library index: the
+same arrays, but a library built from already-cleaned spectra has lost ``n_peaks_raw``
+and ``prec_intensity``, which is logged as a warning).
 
 1. ``store``: ``casmi.spectra.SpectrumStore`` (``mz`` float32, ``intensity`` float32,
    ``offsets`` int64 of length n + 1) holding CLEANED spectra (``spectra.clean`` /
@@ -84,6 +86,14 @@ Exported ``.npz`` (``export_npz`` / ``FpModel.load``): arrays ``emb`` (n_in, H),
 ``out_b`` (weights stored as (in, out) for ``x @ W``; float32 or float16), and
 ``spec_json`` (a unicode scalar: ``ModelSpec`` plus training info). No pickles.
 
+Training (``train``, torch): BCE with per-bit positive weights n_neg / n_pos under the
+sampling distribution clipped to [1, fpm_pos_weight_max], plus fpm_cosine_loss_weight x
+(1 - cosine(sigmoid(logits), target)); sampler 1 / sqrt(spectra of the structure), x2 for
+timsTOF test-adduct spectra (``sampling_weights``); augmentation ``augment_batch``; AdamW
+(fused kernel) with linear warm-up and cosine decay; time budget, checkpoints, loss curve.
+The script ``scripts/train_fpmodel.py`` wires ``load_training_source`` ->
+``split_training_data`` -> ``train`` -> ``calibrate``.
+
 Molecule level and candidates
 -----------------------------
 ``molecule_logits``: weighted mean of spectrum logits, weight clip(log10 bpi, 3, 6) / 3
@@ -91,7 +101,12 @@ Molecule level and candidates
 Bernoulli log-likelihood (p clipped to [fp_prob_min, fp_prob_max], optional
 ``BitCalibration``), soft Tanimoto, the same three on MACCS bits only, and the rank under
 the log-likelihood, from one probability vector and candidate fingerprints (packed uint8
-as ``chem`` produces them, or bool).
+as ``chem`` produces them, or bool). Typical use (WP10)::
+
+    model = FpModel.load(paths.MODELS / "fp_v1_holdout.npz")
+    cal = BitCalibration.load(paths.MODELS / "fp_v1_calibration.npz")
+    mp = predict_molecules(model, test_df, cfg)          # all / pos / neg logits
+    s = candidate_scores(mp.proba()[mp.row(mol_id)], morgan_packed, maccs_packed, cfg, cal)
 """
 
 from __future__ import annotations
@@ -148,6 +163,10 @@ __all__ = [
     "sigmoid",
     "synthetic_training_data",
     "synthetic_test_frame",
+    "load_training_source",
+    "split_training_data",
+    "calibrate",
+    "fingerprint_consistency",
     "train",
     "export_npz",
     "torch_predict",
@@ -765,8 +784,15 @@ class TrainingData:
         store = SpectrumStore.load(d, mmap=True)
         cols = ["ik14", "struct_idx", "precursor_mz", "adduct", "polarity",
                 "instrument_family", "collision_energy", "n_energies", "base_peak_intensity",
-                "precursor_error_ppm", "prec_intensity", "n_peaks_raw", "ingest_lib"]
+                "precursor_error_ppm", "prec_intensity", "n_peaks_raw", "n_peaks", "ingest_lib"]
         meta = pd.read_parquet(d / "meta.parquet", columns=cols)
+        same = float((meta["n_peaks_raw"] == meta["n_peaks"]).mean()) if len(meta) else 0.0
+        if same > 0.9 and float(meta["prec_intensity"].fillna(0).abs().max() or 0) == 0.0:
+            log.warning("library %s: n_peaks_raw equals the cleaned count for %.0f%% of spectra "
+                        "and prec_intensity is 0 everywhere, so it was probably built from "
+                        "already-cleaned spectra; these two model inputs will not match test "
+                        "time. Prefer WP6's spectra files as the training source.", d, 100 * same)
+        meta = meta.drop(columns=["n_peaks"])
         st = pd.read_parquet(d / "structures.parquet", columns=["ik14", "smiles", "mono_mass"])
         meta["mono_mass"] = st["mono_mass"].to_numpy()[meta["struct_idx"].to_numpy()]
         if rows is not None:
@@ -788,7 +814,10 @@ class TrainingData:
     def from_parquet(cls, source: Path | str | Sequence[Path | str], cfg: Config | None = None,
                      n_jobs: int = 1, targets_cache: Path | str | None = "default",
                      batch_rows: int = 50000, max_rows: int | None = None) -> "TrainingData":
-        """Stream train-schema parquet file(s) (or a directory of them), clean, build."""
+        """Stream train-schema parquet file(s) (or a directory of them, e.g. WP6's
+        ``data/processed/train/spectra/``), clean (idempotent on cleaned peaks), build.
+        ``n_peaks_raw`` / ``prec_intensity`` columns, when present, win over the values
+        recomputed here."""
         import pyarrow.parquet as pq
 
         cfg = cfg or Config()
@@ -800,7 +829,8 @@ class TrainingData:
         want = ["ms2_mzs", "ms2_normalized_intensities", "precursor_mz", "adduct",
                 "ionization_mode", "instrument_type", "instrument_family", "ingest_lib",
                 "collision_energy_ev", "base_peak_intensity", "precursor_error_ppm",
-                "inchikey14", "ik14", "normalized_smiles", "smiles", "mono_mass"]
+                "inchikey14", "ik14", "normalized_smiles", "smiles", "mono_mass",
+                "n_peaks_raw", "prec_intensity"]
         import pyarrow as pa
 
         stores, metas, smiles_parts = [], [], []
@@ -826,8 +856,11 @@ class TrainingData:
                 key = "ik14" if "ik14" in m.columns else "inchikey14"
                 smi_col = "normalized_smiles" if "normalized_smiles" in m.columns else "smiles"
                 m = m.rename(columns={key: "ik14"})
-                m["n_peaks_raw"] = nraw
-                m["prec_intensity"] = pint
+                # already-cleaned input (WP6 spectra files) carries the raw values
+                if "n_peaks_raw" not in m.columns:
+                    m["n_peaks_raw"] = nraw
+                if "prec_intensity" not in m.columns:
+                    m["prec_intensity"] = pint
                 if "collision_energy_ev" in tab.column_names:
                     m["collision_energy"], m["n_energies"] = _list_mean_count(
                         tab.column("collision_energy_ev"))
@@ -1685,26 +1718,45 @@ def synthetic_training_data(n_structures: int = 64, spectra_per_structure: int =
 
 
 def load_training_source(source: Path | str | None, cfg: Config | None = None, n_jobs: int = 1,
-                         synthetic: int | None = None, max_rows: int | None = None
-                         ) -> TrainingData:
+                         synthetic: int | None = None, max_rows: int | None = None,
+                         targets_cache: Path | str | None = "default") -> TrainingData:
     """TrainingData from a WP5 library directory, train-schema parquet, or synthetic.
 
-    ``source`` None: ``paths.PROCESSED/library`` if built, else ``paths.TRAIN_PARQUET``.
+    ``source`` None: WP6's ``paths.PROCESSED/train/spectra/*.parquet`` if present (they
+    carry the raw peak counts and precursor intensities), else the WP5 library
+    ``paths.PROCESSED/library``, else ``paths.TRAIN_PARQUET``.
     ``synthetic``: number of synthetic spectra (4 per structure, ~100 peaks), no files.
+    ``max_rows``: library - a random row subset (deterministic); parquet - the first rows.
+    ``targets_cache``: "default" = ``default_targets_cache()``, None = no cache.
     """
     cfg = cfg or Config()
     if synthetic:
         return synthetic_training_data(max(1, synthetic // 4), 4, n_peaks=(40, 160),
                                        seed=cfg.seed, cfg=cfg, noise_peaks=20)
     if source is None:
+        wp6 = paths.PROCESSED / "train" / "spectra"
         lib = paths.PROCESSED / "library"
-        source = lib if (lib / "meta.parquet").is_file() else paths.TRAIN_PARQUET
+        if wp6.is_dir() and any(wp6.glob("*.parquet")):
+            source = wp6
+        elif (lib / "meta.parquet").is_file():
+            source = lib
+        else:
+            source = paths.TRAIN_PARQUET
+        log.info("training source: %s", source)
     p = Path(source)
     if p.is_dir() and (p / "meta.parquet").is_file() and (p / "offsets.npy").is_file():
-        return TrainingData.from_library(p, cfg, n_jobs=n_jobs)
+        rows = None
+        if max_rows is not None:
+            n = len(np.load(p / "offsets.npy", mmap_mode="r")) - 1
+            if n > max_rows:
+                rng = np.random.default_rng([cfg.seed, 31])
+                rows = np.sort(rng.choice(n, max_rows, replace=False))
+        return TrainingData.from_library(p, cfg, n_jobs=n_jobs, rows=rows,
+                                         targets_cache=targets_cache)
     if not p.exists():
         raise FileNotFoundError(f"training source {p} not found (train data not ingested?)")
-    return TrainingData.from_parquet(p, cfg, n_jobs=n_jobs, max_rows=max_rows)
+    return TrainingData.from_parquet(p, cfg, n_jobs=n_jobs, max_rows=max_rows,
+                                     targets_cache=targets_cache)
 
 
 def _cap_per_group(keys: np.ndarray, rows: np.ndarray, cap: int, seed: int) -> np.ndarray:
@@ -1812,6 +1864,59 @@ def calibrate(model: "FpModel", data: TrainingData, cfg: Config | None = None
                "mean_ll_calibrated_insample": float(ll(sigmoid(cal.apply_logits(zl))).mean())}
     log.info("calibration on %d holdout molecules: %s", len(rows), metrics)
     return cal, metrics
+
+
+def _inchi_roundtrip_fp(smiles: Sequence[str | None], cfg: Config) -> tuple[np.ndarray, np.ndarray]:
+    """Morgan fingerprints after std_mol + MolFromInchi(MolToInchi(.)) (mobile-H normalised)."""
+    from rdkit import Chem, rdBase
+
+    from .chem import morgan_fp, std_mol
+
+    n = len(smiles)
+    out = np.zeros((n, (cfg.fp_morgan_bits + 7) // 8), np.uint8)
+    ok = np.zeros(n, bool)
+    with rdBase.BlockLogs():
+        for i, s in enumerate(smiles):
+            m = std_mol(s)
+            if m is None:
+                continue
+            try:
+                inchi = Chem.MolToInchi(m)
+                r = Chem.MolFromInchi(inchi) if inchi else None
+            except Exception:  # noqa: BLE001
+                r = None
+            fp = morgan_fp(r if r is not None else m, cfg)
+            if fp is not None:
+                out[i], ok[i] = fp, True
+    return out, ok
+
+
+def fingerprint_consistency(smiles_a: Sequence[str | None], smiles_b: Sequence[str | None],
+                            cfg: Config | None = None, n_jobs: int = 1,
+                            inchi_roundtrip: bool = True) -> pd.DataFrame:
+    """Tanimoto between the target-style Morgan fingerprints (``chem.std_mol``) of two
+    SMILES of the same structure (PLAN 4.4 "known weakness": train SMILES vs PubChem
+    SMILES for the same ik14). Columns: ``tanimoto``, ``identical`` and, with
+    ``inchi_roundtrip``, the same after an InChI round trip (``tanimoto_inchi``,
+    ``identical_inchi``); NaN where a SMILES failed."""
+    from .chem import morgan_fps, tanimoto
+
+    cfg = cfg or Config()
+    a, oka = morgan_fps(list(smiles_a), cfg, n_jobs=n_jobs)
+    b, okb = morgan_fps(list(smiles_b), cfg, n_jobs=n_jobs)
+
+    def pairwise(x: np.ndarray, y: np.ndarray, ok: np.ndarray) -> np.ndarray:
+        t = np.array([tanimoto(x[i], y[i:i + 1])[0] for i in range(len(x))], dtype=np.float64)
+        return np.where(ok, t, np.nan)
+
+    out = pd.DataFrame({"tanimoto": pairwise(a, b, oka & okb)})
+    out["identical"] = np.where(oka & okb, (a == b).all(axis=1), np.nan)
+    if inchi_roundtrip:
+        ai, oai = _inchi_roundtrip_fp(list(smiles_a), cfg)
+        bi, obi = _inchi_roundtrip_fp(list(smiles_b), cfg)
+        out["tanimoto_inchi"] = pairwise(ai, bi, oai & obi)
+        out["identical_inchi"] = np.where(oai & obi, (ai == bi).all(axis=1), np.nan)
+    return out
 
 
 # ======================================================================================
@@ -1993,15 +2098,17 @@ def train(data: TrainingData, cfg: Config | None = None, *, spec: ModelSpec | No
           curve_csv: Path | str | None = None, augment: bool = True,
           threads: int | None = None, log_every: int | None = None,
           extra_info: Mapping[str, Any] | None = None, float16_export: bool = False,
-          return_net: bool = False, measure_steps: int = 60):
+          return_net: bool = False, measure_steps: int = 100):
     """Train on ``data`` (already filtered) with the PLAN 4.4 recipe.
 
     Length: ``steps`` (exact), else ``epochs`` x len(data) / batch, else the ``hours``
-    budget (default ``cfg.fpm_hours``): after ``measure_steps`` steps the throughput fixes
-    the total step count (logged, so ``steps=`` reproduces the schedule), and training
-    also stops at the deadline. LR: linear warm-up then cosine decay over the total.
-    Checkpoints every ``fpm_checkpoint_minutes`` (and at the end) to ``checkpoint``;
-    ``resume`` continues from it. Returns ``TrainResult`` (and the torch net if asked).
+    budget (default ``cfg.fpm_hours``): the throughput over ``measure_steps`` steps
+    (51k spectra at batch 512, after 10 warm-up steps) fixes the total step count (logged,
+    so ``steps=`` reproduces the schedule), and training also stops at the deadline. LR:
+    linear warm-up then cosine decay over the total. Checkpoints (and validation on
+    ``val``) every ``fpm_checkpoint_minutes`` and at the end; ``resume`` continues from
+    ``checkpoint`` (a finished run just re-exports). ``TrainResult.final_loss`` is the
+    mean training loss of the last 20 steps. Returns ``TrainResult`` (and the net if asked).
     """
     import torch
 
