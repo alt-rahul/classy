@@ -40,4 +40,5 @@ def main(puz, sub):
         if err: print(pid, err); bad += 1
         tot += len(prog)
     print('invalid', bad, 'score', tot)
-main(sys.argv[1], sys.argv[2])
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2])
