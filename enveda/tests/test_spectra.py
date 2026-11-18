@@ -171,9 +171,9 @@ def test_bin_sparse_and_open_vectors():
     # s1: 50.01 and 50.04 share bin 1000 -> sqrt(.25) + sqrt(.25) = 1; bin 2000 -> 1.
     r = frag.getrow(0).toarray().ravel()
     assert r[1000] == pytest.approx(1 / math.sqrt(2)) and r[2000] == pytest.approx(1 / math.sqrt(2))
-    # neutral losses: 200 - 100 = 100 -> bin 2000; 200 - 50.01 = 149.99 -> bin 2999
+    # neutral losses: 200 - 100 = 100 -> bin 2000; 149.99 and 149.96 -> bin 2999
     r = nl.getrow(0).toarray().ravel()
-    assert set(np.flatnonzero(r)) == {1999, 2999, 2000}
+    assert set(np.flatnonzero(r)) == {2000, 2999}
     norms = np.sqrt(np.asarray(frag.multiply(frag).sum(axis=1))).ravel()
     assert np.allclose(norms, 1.0)
     ov = open_vectors(frag, nl)

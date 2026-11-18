@@ -201,7 +201,7 @@ def _clean_flat_kernel(mz, inten, offsets, valid, prec, max_above, keep_prec, wi
     for i in range(n):
         a = offsets[i]
         b = offsets[i + 1]
-        if valid[i] and b > a:
+        if valid[i]:
             n_raw[i] = b - a
             k, p = _clean_one(mz[a:b], inten[a:b], prec[i], max_above, keep_prec, win_lo,
                               win_hi, floor, top_n, buf_mz, buf_int)
