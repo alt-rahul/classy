@@ -16,8 +16,10 @@ PY="${PYTHON:-python}"
 
 # Inputs: data/raw/{train.parquet,test.parquet,sample_submission.csv} from Kaggle.
 
-# WP2  NP-tier database           # $PY scripts/build_npdb.py
-# WP3  PubChem tier               # $PY scripts/build_pubchem.py
+# WP2  NP-tier database: downloads 4 sources (600 MB), ~20 min wall, 2 cores, <4 GB RAM
+nice -n 10 $PY -I scripts/build_npdb.py --stage all
+# WP3  PubChem tier: about 15 min wall (downloads at about 20 MB/s), 2 cores, 7 GB RAM; resumable, skips finished stages
+nice -n 10 $PY -I scripts/build_pubchem.py
 # WP6  train ingestion and audit  # $PY scripts/ingest_train.py
 # WP5  library index              # $PY scripts/build_library.py
 # WP7  holdout splits             # $PY scripts/make_splits.py   (splits/ is tracked; normally skipped)

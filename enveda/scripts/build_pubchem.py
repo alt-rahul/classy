@@ -62,16 +62,24 @@ except ImportError:  # pragma: no cover
 
 # ---------------------------------------------------------------- paths
 
-def _root() -> Path:
-    try:  # prefer the package if it exists and is importable
+def _paths() -> tuple:
+    """Directories from casmi.paths when importable, else the same defaults derived
+    from this file's location (the script must also run before casmi is installed)."""
+    here = Path(__file__).resolve().parents[1]
+    try:
+        src = str(here / "src")
+        if src not in sys.path:
+            sys.path.append(src)
         import casmi.paths as cp  # type: ignore
 
-        return Path(cp.ROOT)
+        return (Path(cp.ROOT), Path(cp.EXTERNAL), Path(cp.PROCESSED), Path(cp.LOGS),
+                Path(cp.TEST_PARQUET), Path(cp.DOCS))
     except Exception:
-        return Path(__file__).resolve().parents[1]
+        return (here, here / "data/external", here / "data/processed", here / "logs",
+                here / "data/raw/test.parquet", here / "docs")
 
 
-ROOT = _root()
+ROOT, EXTERNAL, PROCESSED, LOGS, TEST_PARQUET, DOCS = _paths()
 BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pubchem/Compound/Extras"
 
 # name -> (file, column names, pyarrow types, columns kept)
@@ -112,15 +120,15 @@ log = logging.getLogger("build_pubchem")
 class Cfg:
     def __init__(self, args):
         if args.test:
-            base = Path(args.work_dir or (ROOT / "data/external/pubchem_test"))
+            base = Path(args.work_dir or (EXTERNAL / "pubchem_test"))
             self.work = base
             self.out = Path(args.out_dir or (base / "out"))
         else:
-            self.work = Path(args.work_dir or (ROOT / "data/external/pubchem"))
-            self.out = Path(args.out_dir or (ROOT / "data/processed/db/pubchem"))
+            self.work = Path(args.work_dir or (EXTERNAL / "pubchem"))
+            self.out = Path(args.out_dir or (PROCESSED / "db" / "pubchem"))
         self.s1 = self.work / "stage1"
         self.s2 = self.work / "stage2"
-        self.tmp = Path(args.tmp_dir or (ROOT / "data/external/tmp" / ("pubchem_test" if args.test else "pubchem")))
+        self.tmp = Path(args.tmp_dir or (EXTERNAL / "tmp" / ("pubchem_test" if args.test else "pubchem")))
         self.stats_path = self.work / "build_stats.json"
         self.max_bytes = args.max_bytes
         self.chunk_cids = args.chunk_cids
@@ -128,7 +136,7 @@ class Cfg:
         self.threads = args.threads
         self.keep_intermediates = args.keep_intermediates
         self.test = args.test
-        for d in (self.work, self.s1, self.s2, self.tmp, self.out):
+        for d in (self.work, self.out):  # stage dirs are created by the stages that use them
             d.mkdir(parents=True, exist_ok=True)
 
     def marker(self, name: str) -> Path:
@@ -138,7 +146,7 @@ class Cfg:
 # ---------------------------------------------------------------- helpers
 
 def setup_logging(stage: str) -> Path:
-    logs = ROOT / "logs"
+    logs = LOGS
     logs.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = logs / f"build_pubchem_{stage}_{ts}.log"
@@ -215,6 +223,7 @@ def http_text(url: str) -> str:
 
 
 def duck(cfg: Cfg):
+    cfg.tmp.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     con.execute(f"SET memory_limit='{cfg.memory_limit}'")
     con.execute(f"SET threads={cfg.threads}")
@@ -261,18 +270,27 @@ class GzHttpStream:
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       bufsize=self.chunk)
         self._checked_status = False
+        self._status_tries = 0
+        self._resume_offset = self.offset
 
     def _check_status(self):
-        # Last HTTP status line in the dumped headers must be 206 (partial content).
+        # Early detection only: the last HTTP status line in the dumped headers
+        # should be 206 (partial content). curl may not have flushed the header
+        # file yet; then try again on later reads and finally rely on the md5.
+        self._status_tries += 1
         try:
             lines = [ln for ln in self.hdr_path.read_text(errors="replace").splitlines()
                      if ln.startswith("HTTP/")]
         except FileNotFoundError:
             lines = []
-        status = lines[-1].split()[1] if lines else "?"
+        if not lines:
+            if self._status_tries > 50:
+                self._checked_status = True
+            return
+        status = lines[-1].split()[1]
         if status not in ("206", "200"):
             raise RuntimeError(f"unexpected HTTP status {status} for {self.url}")
-        if self.offset > 0 and status != "206":
+        if self._resume_offset > 0 and status != "206":
             raise RuntimeError(f"server ignored Range on resume (status {status})")
         self._checked_status = True
 
@@ -291,12 +309,10 @@ class GzHttpStream:
         out = []
         data = raw
         while data:
-            out.append(self._d.decompress(data))
-            if self._d.eof:  # multi-member gzip
-                data = self._d.unused_data
+            if self._d.eof:  # multi-member gzip: next member starts here
                 self._d = zlib.decompressobj(31)
-            else:
-                data = b""
+            out.append(self._d.decompress(data))
+            data = self._d.unused_data if self._d.eof else b""
         return b"".join(out)
 
     def _fill(self):
@@ -332,6 +348,8 @@ class GzHttpStream:
             err = self._proc.stderr.read().decode(errors="replace")
             if rc == 0 and self.offset >= self.size:
                 tail = self._d.flush()
+                if not self._d.eof:
+                    raise RuntimeError(f"gzip stream of {self.url} is truncated (no end of member)")
                 self._eof = True
                 if tail:
                     self._set_buf(tail)
@@ -494,7 +512,7 @@ def stage1_file(cfg: Cfg, name: str) -> dict:
     log.info("stage1 %s done: %s rows (skipped %s invalid, %s null cid, %s bad keys), sorted=%s, "
              "max cid %s, %.0f s, %.1f MB/s, parquet %.2f GB, restarts %d",
              name, fmt_n(n), fmt_n(n_bad), fmt_n(n_null_cid), fmt_n(n_badkey), sorted_ok,
-             fmt_n(prev_max), el, size / max(el, 1e-9) / 1e6, out.stat().st_size / 1e9, stream.restarts)
+             fmt_n(prev_max), el, stream.offset / max(el, 1e-9) / 1e6, out.stat().st_size / 1e9, stream.restarts)
     if n_bad:
         log.info("  invalid row examples: %s", info["invalid_row_examples"])
     log.info("  first rows: %s", first_rows)
@@ -502,6 +520,8 @@ def stage1_file(cfg: Cfg, name: str) -> dict:
 
 
 def stage1(cfg: Cfg):
+    cfg.s1.mkdir(parents=True, exist_ok=True)
+    cfg.tmp.mkdir(parents=True, exist_ok=True)
     for name in STAGE1_ORDER:
         m = cfg.marker(f"1_{name}")
         if m.exists():
@@ -562,6 +582,7 @@ def stage2(cfg: Cfg):
         log.info("stage2: marker present, skipping")
         return
     t0 = time.time()
+    cfg.s2.mkdir(parents=True, exist_ok=True)
     con = duck(cfg)
     s1 = cfg.s1
     max_cid = con.execute(f"SELECT max(cid) FROM read_parquet('{s1 / 'mass.parquet'}')").fetchone()[0]
@@ -642,11 +663,15 @@ def stage2(cfg: Cfg):
     if not cfg.keep_intermediates:
         n1 = dir_size(cfg.s1)
         shutil.rmtree(cfg.s1)
-        cfg.s1.mkdir(exist_ok=True)
         log.info("deleted stage1 parquet (%.2f GB) to keep the disk peak low", n1 / 1e9)
 
 
 # ---------------------------------------------------------------- stage 3: per-shard dedup
+
+def schema_ok(sch: pa.Schema) -> bool:
+    """Same column names, order and types as OUT_SCHEMA (nullability ignored)."""
+    return [(f.name, f.type) for f in sch] == [(f.name, f.type) for f in OUT_SCHEMA]
+
 
 def shard_name(bucket: int) -> str:
     return f"mass_{bucket * BIN_DA:04d}.parquet"
@@ -660,7 +685,7 @@ def stage3(cfg: Cfg):
     con = duck(cfg)
     b_lo, b_hi = int(MASS_MIN // BIN_DA), int(math.ceil(MASS_MAX / BIN_DA))
     shard_meta_dir = cfg.s2 / "_shards"
-    shard_meta_dir.mkdir(exist_ok=True)
+    shard_meta_dir.mkdir(parents=True, exist_ok=True)
     for b in range(b_lo, b_hi):
         meta_path = shard_meta_dir / f"{b:04d}.json"
         out = cfg.out / shard_name(b)
@@ -687,23 +712,28 @@ def stage3(cfg: Cfg):
                 ORDER BY mono_mass, cid
             ) TO '{tmp}' (FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 100000)
         """)
-        n_in = con.execute(f"SELECT count(*) FROM read_parquet({flist}, hive_partitioning=false)").fetchone()[0]
-        n, n_ik, mn, mx, n_formula_conflict = con.execute(f"""
-            SELECT count(*), count(DISTINCT ik14), min(mono_mass), max(mono_mass), 0
+        n_in, n_conflict = con.execute(f"""
+            SELECT sum(n), count(*) FILTER (WHERE nf > 1) FROM (
+                SELECT count(*) AS n, count(DISTINCT formula) AS nf
+                FROM read_parquet({flist}, hive_partitioning=false) GROUP BY ik14)
+        """).fetchone()
+        n, n_ik, mn, mx = con.execute(f"""
+            SELECT count(*), count(DISTINCT ik14), min(mono_mass), max(mono_mass)
             FROM read_parquet('{tmp}')
         """).fetchone()
         if n != n_ik:
             raise RuntimeError(f"bucket {b}: ik14 not unique ({n} rows, {n_ik} distinct)")
         sch = pq.read_schema(tmp)
-        if not sch.remove_metadata().equals(OUT_SCHEMA):
+        if not schema_ok(sch):
             raise RuntimeError(f"bucket {b}: schema mismatch\n{sch}\nexpected\n{OUT_SCHEMA}")
         tmp.replace(out)
-        meta = {"file": out.name, "rows": n, "rows_before_dedup": n_in, "min_mass": mn, "max_mass": mx,
+        meta = {"file": out.name, "rows": n, "rows_before_dedup": int(n_in), "min_mass": mn, "max_mass": mx,
+                "ik14_with_several_formulas": n_conflict,
                 "bytes": out.stat().st_size, "sha256": sha256_file(out),
                 "row_groups": pq.ParquetFile(out).metadata.num_row_groups}
         meta_path.write_text(json.dumps(meta))
-        log.info("stage3 %s: %s -> %s rows, %.1f MB, %.1f s", out.name, fmt_n(n_in), fmt_n(n),
-                 meta["bytes"] / 1e6, time.time() - ts)
+        log.info("stage3 %s: %s -> %s rows (%d ik14 with >1 formula), %.1f MB, %.1f s", out.name,
+                 fmt_n(int(n_in)), fmt_n(n), n_conflict, meta["bytes"] / 1e6, time.time() - ts)
     con.close()
     shards = [json.loads(p.read_text()) for p in sorted(shard_meta_dir.glob("*.json"))]
     total = sum(s["rows"] for s in shards)
@@ -712,12 +742,19 @@ def stage3(cfg: Cfg):
     stats = load_stats(cfg)
     el = time.time() - t0
     stats["stage3"] = {"seconds": round(el, 1), "rows_before_dedup": total_in, "rows": total,
-                       "n_shards": len(shards), "bytes": size}
+                       "n_shards": len(shards), "bytes": size,
+                       "ik14_with_several_formulas": sum(s.get("ik14_with_several_formulas", 0) for s in shards)}
     save_stats(cfg, stats)
     write_index(cfg, shards, stats)
     log.info("stage3 done: %d shards, %s rows before ik14 dedup, %s after, %.2f GB, %.0f s",
              len(shards), fmt_n(total_in), fmt_n(total), size / 1e9, el)
     cfg.marker("3").write_text(json.dumps({"rows": total, "shards": len(shards)}))
+
+
+def ordered_cascade(casc: dict | None) -> dict:
+    """Filter counts in the order the filters are applied (stats JSON is key-sorted)."""
+    casc = casc or {}
+    return {s: casc[s] for s, _ in FILTER_STEPS if s in casc}
 
 
 def write_index(cfg: Cfg, shards: list, stats: dict):
@@ -737,7 +774,7 @@ def write_index(cfg: Cfg, shards: list, stats: dict):
         "total_rows": sum(s["rows"] for s in shards),
         "total_bytes": sum(s["bytes"] for s in shards),
         "n_shards": len(shards),
-        "filter_cascade": stats.get("stage2", {}).get("filter_cascade"),
+        "filter_cascade": ordered_cascade(stats.get("stage2", {}).get("filter_cascade")),
         "rows_before_ik14_dedup": sum(s["rows_before_dedup"] for s in shards),
         "sources": sources,
         "shards": {s["file"]: {k: s[k] for k in ("rows", "min_mass", "max_mass", "bytes", "sha256")}
@@ -766,7 +803,7 @@ def query_mass(db_dir: Path, mass: float, tol_ppm: float = 10.0) -> pa.Table:
 
 
 def test_masses(n: int = 20, seed: int = SEED) -> list[tuple[str, float]]:
-    t = pq.read_table(ROOT / "data/raw/test.parquet", columns=["molecule_id", "adduct", "precursor_mz"]).to_pylist()
+    t = pq.read_table(TEST_PARQUET, columns=["molecule_id", "adduct", "precursor_mz"]).to_pylist()
     per = {}
     for r in t:
         shift = ADDUCT_SHIFT.get(r["adduct"])
@@ -801,14 +838,12 @@ def stage_check(cfg: Cfg) -> dict:
     con = duck(cfg)
     total = 0
     for p in shards:
-        sch = pq.read_schema(p).remove_metadata()
-        if not sch.equals(OUT_SCHEMA):
+        sch = pq.read_schema(p)
+        if not schema_ok(sch):
             fail(f"{p.name} schema {sch}")
-        n, n_ik, n_unsorted = con.execute(f"""
-            SELECT count(*), count(DISTINCT ik14),
-                   count(*) FILTER (WHERE mono_mass < prev)
-            FROM (SELECT ik14, mono_mass, lag(mono_mass) OVER () AS prev FROM read_parquet('{p}'))
-        """).fetchone()
+        n, n_ik = con.execute(f"SELECT count(*), count(DISTINCT ik14) FROM read_parquet('{p}')").fetchone()
+        mm = pq.read_table(p, columns=["mono_mass"])["mono_mass"].combine_chunks()
+        n_unsorted = pc.sum(pc.less(mm[1:], mm[:-1])).as_py() if len(mm) > 1 else 0
         total += n
         if n != n_ik:
             fail(f"{p.name}: ik14 not unique ({n} vs {n_ik})")
@@ -856,6 +891,9 @@ def stage_check(cfg: Cfg) -> dict:
              res["test_summary"]["max_seconds"], res["test_summary"]["mean_seconds"])
     res["seconds"] = round(time.time() - t0, 1)
     update_stats(cfg, "check", res)
+    idx["self_check"] = {k: res[k] for k in ("ok", "caffeine", "paclitaxel", "test_summary")}
+    idx["filter_cascade"] = ordered_cascade(idx.get("filter_cascade"))
+    (db / "_index.json").write_text(json.dumps(idx, indent=1))
     if res["ok"]:
         cfg.marker("check").write_text(json.dumps({"rows": total}))
         log.info("check: all acceptance checks passed")
@@ -885,12 +923,21 @@ SECTION_END = "<!-- WP3:pubchem:end -->"
 def stage_docs(cfg: Cfg):
     stats = load_stats(cfg)
     idx = json.loads((cfg.out / "_index.json").read_text())
-    casc = idx["filter_cascade"] or {}
+    casc = ordered_cascade(idx["filter_cascade"])
+    timing = stats.get("timing_seconds", {})
+    wall_min = sum(v for k, v in timing.items() if k in ("1", "2", "3")) / 60.0
+    stage_min = ", ".join(f"stage {k} {timing[k] / 60:.1f} min" for k in ("1", "2", "3") if k in timing)
+    peak_disk = (sum(stats.get(f"stage1_{n}", {}).get("parquet_bytes", 0) for n in STAGE1_ORDER)
+                 + stats.get("stage2", {}).get("stage2_bytes", 0))
+    rss = list(stats.get("peak_rss_mb_by_stage", {}).values()) or [stats.get("stage2", {}).get("peak_rss_mb", 0)]
     lines = [SECTION_START, "## PubChem tier (WP3)", ""]
     lines += [
         f"- Built {idx['built_utc']} by `scripts/build_pubchem.py` (git {idx['git_commit']}). "
-        f"Rebuild: `nice -n 10 python3 scripts/build_pubchem.py` (about 1 to 2 hours, 2 cores, under 7 GB RAM, "
-        "about 11 GB peak disk; resumable via `data/external/pubchem/.stage_*`).",
+        f"Rebuild: `nice -n 10 python3 scripts/build_pubchem.py`; measured {wall_min:.0f} min wall "
+        f"({stage_min}; downloads ran at about 20 MB/s), 2 cores, peak RSS {max(rss) / 1024:.1f} GB "
+        f"(DuckDB memory_limit 7GB), peak disk about {peak_disk / 1e9:.0f} GB of intermediates (stage 1 parquet "
+        "is deleted after stage 2, stage 2 after the checks). Resumable via `data/external/pubchem/.stage_*`; "
+        "`--stage 1|2|3|check|cleanup|docs` runs one stage, `--force` rebuilds from scratch.",
         f"- Location: `data/processed/db/pubchem/`, {idx['n_shards']} shards `mass_0100.parquet` ... "
         f"`mass_1290.parquet` (shard XXXX holds 10 * floor(mono_mass / 10) = XXXX), plus `_index.json` "
         "(per shard: rows, min and max mass, bytes, sha256).",
@@ -914,16 +961,19 @@ def stage_docs(cfg: Cfg):
         "CID-SMILES.gz": "CID, isomeric SMILES",
         "CID-Mass.gz": "CID, formula (charged species carry a suffix: `C9H18NO4+`, `C6H5O7-3`), monoisotopic mass, exact mass",
         "CID-InChI-Key.gz": "CID, InChI, InChIKey (27 chars); only CID and key[:14] kept",
-        "CID-PMID.gz": "CID, PMID, type (1 depositor, 2 MeSH, 3 publisher); not sorted by CID; pmid_count = distinct PMIDs per CID over all types",
+        "CID-PMID.gz": "CID, PMID, type (1 depositor, 2 MeSH, 3 publisher, 4 BioAssay); not sorted by CID; pmid_count = distinct PMIDs per CID over all types",
     }
     for f, s in idx["sources"].items():
         lines.append(f"| {f} | {s.get('last_modified')} | {fmt_n(s.get('bytes') or 0)} | "
                      f"{fmt_n(s.get('rows') or 0)} | {fmts.get(f, '')} |")
     lines += ["", "Filter cascade (rows remaining after each filter, applied in this order, then ik14 dedup):", "",
-              "| Step | Rows |", "|---|---|"]
+              "| Step | Rows | Removed |", "|---|---|---|"]
+    prev = None
     for k, v in casc.items():
-        lines.append(f"| {k} | {fmt_n(v)} |")
-    lines.append(f"| dedup on ik14 (lowest CID kept) | {fmt_n(idx['total_rows'])} |")
+        lines.append(f"| {k} | {fmt_n(v)} | {'' if prev is None else fmt_n(prev - v)} |")
+        prev = v
+    lines.append(f"| dedup on ik14 (lowest CID kept) | {fmt_n(idx['total_rows'])} | "
+                 f"{fmt_n((prev or 0) - idx['total_rows'])} |")
     chk = stats.get("check", {})
     if chk:
         ts = chk.get("test_summary", {})
@@ -936,7 +986,13 @@ def stage_docs(cfg: Cfg):
                       f"slowest query {ts.get('max_seconds')} s (pyarrow, one shard file read with row-group pruning)."]
     lines += [SECTION_END, ""]
     section = "\n".join(lines)
-    path = ROOT / "docs/ARTEFACTS.md"
+    dates = ", ".join(f"{f} {(s.get('last_modified') or '')[5:16]}" for f, s in idx["sources"].items())
+    row = (f"| PubChem tier ({idx['n_shards']} shards) | `data/processed/db/pubchem/mass_XXXX.parquet`, "
+           f"`_index.json` | {fmt_n(idx['total_rows'])} | {idx['total_bytes'] / 1e9:.2f} GB | "
+           f"`{sha256_file(cfg.out / '_index.json')}` (`_index.json`) | "
+           f"`nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras ({dates}); "
+           f"about {wall_min:.0f} min wall, 2 cores, 7 GB RAM |")
+    path = DOCS / "ARTEFACTS.md"
     if path.exists():
         text = path.read_text()
         if SECTION_START in text and SECTION_END in text:
@@ -947,11 +1003,59 @@ def stage_docs(cfg: Cfg):
             text = text.rstrip("\n") + "\n\n" + section
     else:
         text = "# Artefacts\n\n" + section
+    text = upsert_table_row(text, row, key="| PubChem tier (")
     path.write_text(text)
-    log.info("docs: wrote WP3 section to %s", path)
+    log.info("docs: wrote WP3 table row and section to %s", path)
+
+
+def upsert_table_row(text: str, row: str, key: str) -> str:
+    """Replace the line starting with key in the artefact table, or append the row
+    to the first table whose header starts with '| artefact'."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.startswith(key):
+            lines[i] = row
+            return "\n".join(lines)
+    for i, ln in enumerate(lines):
+        if ln.lower().startswith("| artefact"):
+            j = i + 1
+            while j < len(lines) and lines[j].startswith("|"):
+                j += 1
+            lines.insert(j, row)
+            return "\n".join(lines)
+    return text
 
 
 # ---------------------------------------------------------------- main
+
+def reconcile_markers(cfg: Cfg) -> None:
+    """Drop stage markers whose outputs are gone, so that a rerun rebuilds instead of
+    skipping (e.g. data/processed was wiped but data/external/pubchem survived)."""
+    idx_path = cfg.out / "_index.json"
+    if cfg.marker("3").exists():
+        ok = idx_path.exists()
+        if ok:
+            idx = json.loads(idx_path.read_text())
+            ok = all((cfg.out / f).exists() for f in idx.get("shards", {}))
+        if ok:
+            return
+        log.warning("stage 3 marker present but shards or _index.json missing: rebuilding from stage 1")
+        for m in cfg.work.glob(".stage_*"):
+            m.unlink()
+        return
+    if cfg.marker("2").exists() and not cfg.s2.exists():
+        log.warning("stage 2 marker present but stage 2 output missing: rebuilding from stage 1")
+        for m in cfg.work.glob(".stage_*"):
+            m.unlink()
+        return
+    if not cfg.marker("2").exists():
+        for name in STAGE1_ORDER:
+            out = cfg.s1 / f"{name}.parquet"
+            if cfg.marker(f"1_{name}").exists() and not out.exists():
+                log.warning("stage 1 marker for %s present but %s missing: redoing it", name, out)
+                cfg.marker(f"1_{name}").unlink()
+                cfg.marker("1").unlink(missing_ok=True)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -980,10 +1084,10 @@ def main():
             m.unlink()
         for d in (cfg.s1, cfg.s2):
             shutil.rmtree(d, ignore_errors=True)
-            d.mkdir(parents=True, exist_ok=True)
         for p in cfg.out.glob("mass_*.parquet"):
             p.unlink()
     t0 = time.time()
+    reconcile_markers(cfg)
     stages = ["1", "2", "3", "check", "cleanup", "docs"] if args.stage == "all" else [args.stage]
     for st in stages:
         ts = time.time()
@@ -1012,10 +1116,16 @@ def main():
                 stage_docs(cfg)
         stats = load_stats(cfg)
         stats.setdefault("timing_seconds", {})[st] = round(time.time() - ts, 1)
+        if st in ("1", "2", "3"):
+            stats.setdefault("peak_rss_mb_by_stage", {})[st] = round(peak_rss_mb())
         save_stats(cfg, stats)
         log.info("stage %s finished in %.0f s (peak rss %.0f MB)", st, time.time() - ts, peak_rss_mb())
     log.info("all requested stages done in %.0f s, peak rss %.0f MB", time.time() - t0, peak_rss_mb())
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("build_pubchem failed")
+        sys.exit(1)
