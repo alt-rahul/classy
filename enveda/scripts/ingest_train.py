@@ -30,6 +30,10 @@ Stages (``--stage``, default ``all`` = ingest + audit; ``mkey`` is a separate ba
             --stage mkey --mkey-jobs 4 > logs/mkey.out 2>&1 &``.
 ``audit``   Writes ``--audit-out`` (default ``docs/DATA_AUDIT.md``) from the files above; rerun
             after the mkey stage to fill the mkey-dependent items.
+``library`` Builds the WP5 library index (``--library-out``, default data/processed/library) from
+            ``spectra/`` with ``Library.build``, working around an all-null-column concat
+            error in ``library._Builder._pass1`` (see ``_permissive_concat``). Equivalent to
+            ``scripts/build_library.py --source data/processed/train/spectra/`` once that is fixed.
 
 Drop reasons (first failing check wins, in this order): null_label (no inchikey14 or no
 normalized_smiles), bad_precursor (null, NaN or <= 0), bad_peak_arrays (null list or the two
@@ -1179,9 +1183,47 @@ def stage_ingest(args, cfg: Config, lg) -> dict:
     return info
 
 
+class _permissive_concat:
+    """Make ``pyarrow.concat_tables`` promote null-typed columns while WP5's library builds.
+
+    ``library._Builder._pass1`` concatenates per-batch metadata tables; a batch whose text
+    column is entirely null (drug_plus has no instrument_type) yields a null-typed column and
+    the default concat refuses it. Workaround until ``_pass1`` passes
+    ``promote_options="permissive"`` itself.
+    """
+
+    def __enter__(self):
+        self._orig = pa.concat_tables
+
+        def concat(tables, *args, **kwargs):
+            kwargs.setdefault("promote_options", "permissive")
+            return self._orig(tables, *args, **kwargs)
+
+        pa.concat_tables = concat
+        return self
+
+    def __exit__(self, *exc):
+        pa.concat_tables = self._orig
+
+
+def stage_library(out: Path, lib_out: Path, cfg: Config, lg) -> dict:
+    """WP5 library index from the WP6 spectra files (``Library.build``)."""
+    from casmi.library import Library
+
+    with _permissive_concat():
+        lib = Library.build(out / "spectra", cfg, out_dir=lib_out)
+    info = lib.info
+    size = sum(f.stat().st_size for f in lib.dir.iterdir() if f.is_file())
+    lg.info("library %s: %d spectra, %d structures, %d consensus, %.1f MB; drops %s", lib.dir,
+            info["n_spectra"], info["n_structures"], info["n_consensus"], size / 1e6, info["drops"])
+    return info
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--stage", choices=("ingest", "mkey", "audit", "all"), default="all")
+    ap.add_argument("--stage", choices=("ingest", "mkey", "audit", "library", "all"), default="all")
+    ap.add_argument("--library-out", type=Path, default=paths.PROCESSED / "library",
+                    help="output of --stage library (WP5 index built from the spectra files)")
     ap.add_argument("--input", type=Path, default=paths.TRAIN_PARQUET)
     ap.add_argument("--out", type=Path, default=paths.PROCESSED / "train")
     ap.add_argument("--test", type=Path, default=paths.TEST_PARQUET,
@@ -1204,6 +1246,8 @@ def main(argv: list[str] | None = None) -> int:
         stage_mkey(Path(args.out), cfg, args.mkey_jobs, lg)
     if args.stage in ("audit", "all"):
         write_audit(Path(args.out), Path(args.audit_out), cfg, lg)
+    if args.stage == "library":
+        stage_library(Path(args.out), Path(args.library_out), cfg, lg)
     return 0
 
 
