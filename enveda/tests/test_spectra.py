@@ -113,6 +113,11 @@ def test_list_arrays_to_flat_handles_nulls_and_slices():
     assert off.tolist() == [0, 2, 2, 2, 5] and mz.tolist() == [1.0, 2.0, 4.0, 5.0, 6.0]
     mz, it, off, valid = list_arrays_to_flat(mzs.slice(2), ints.slice(2))
     assert valid.tolist() == [False, True] and mz.tolist() == [4.0, 5.0, 6.0]
+    # large_list<float32> (e.g. WP6's cleaned float32 lists) and chunked columns
+    big = pa.chunked_array([mzs.cast(pa.large_list(pa.float32()))])
+    mz2, _, off2, valid2 = list_arrays_to_flat(big, ints.cast(pa.large_list(pa.float32())))
+    assert mz2.dtype == np.float64 and off2.tolist() == [0, 2, 2, 2, 5]
+    assert valid2.tolist() == [True, False, False, True]
 
 
 def test_merge_consensus():

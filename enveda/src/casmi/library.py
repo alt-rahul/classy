@@ -722,7 +722,7 @@ class Library:
         present = n_refs > 0
         if isinstance(queries, pd.DataFrame):
             queries = prepare_queries(queries, self.cfg, M=M)
-        q_pols = (set() if queries is None else set(int(p) for p in queries.polarity))
+        q_pols = ({1, -1} if queries is None else set(int(p) for p in queries.polarity))
         if pol_filter is not None:
             q_pols &= {pol_filter}
         ref_pol = self.spec_pol[refs]
