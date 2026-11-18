@@ -53,10 +53,17 @@ class Config:
     consensus_merge_da: float = 0.01         # merge tolerance for consensus spectra
     min_peaks: int = 5                       # min peaks after cleaning (training filter 4.4)
 
+    # --- Library matching and similarity (4.2, WP5) -----------------------------------
+    entropy_weighted: bool = True            # ms_entropy weighted entropy similarity (Li 2021)
+    lib_min_peaks: int = 1                   # library keeps spectra with >= this many clean peaks
+    lib_build_batch_rows: int = 20000        # rows per streamed parquet batch in Library.build
+
     # --- Analog search (4.3) ----------------------------------------------------------
     analog_bin_da: float = 0.05
     analog_coarse_top: int = 200             # exact modified cosine on this many coarse hits
     analog_top_k: int = 20
+    analog_max_mz: float = 2000.0            # binned range (Da) of fragment and loss channels
+    analog_unique_structures: bool = True    # open search keeps the best consensus per structure
 
     # --- Fingerprints (4.4) -----------------------------------------------------------
     fp_morgan_bits: int = 4096
