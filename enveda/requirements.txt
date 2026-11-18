@@ -1,0 +1,21 @@
+# Pinned to the versions installed in the dev container (Python 3.13), 2026-11-18.
+# Install: pip install -r requirements.txt && pip install -e .
+#
+# Inference path (also what the Kaggle notebook may import):
+numpy==2.5.3
+pandas==3.0.5
+pyarrow==26.0.1
+scipy==1.18.1
+numba==0.68.1
+llvmlite==0.50.0
+rdkit==2026.3.3
+lightgbm==4.7.0
+PyYAML==6.0.3
+# Build / training only:
+polars==2.1.0
+duckdb==2.0.0
+scikit-learn==1.9.1
+# Tests:
+pytest==9.1.1
+# Optional, not installed here yet (WP9): torch CPU build, via pip install -e ".[train]"
+# --extra-index-url https://download.pytorch.org/whl/cpu ; pin it here once installed.

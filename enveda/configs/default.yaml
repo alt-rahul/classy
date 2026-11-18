@@ -1,0 +1,15 @@
+# Default configuration: no overrides.
+#
+# All tunables and their defaults live in src/casmi/config.py (dataclass Config).
+# A config file overrides Config fields by name, as flat top-level keys (no nesting).
+# Unknown keys and wrong types are errors. Lists are read as tuples.
+# Write floats with a dot (1.0e-3) or as plain strings; both are accepted.
+#
+# One file per pipeline variant (PLAN.md section 7): b0_npdb.yaml, b1_library.yaml,
+# b2_fp.yaml, r1_ranker.yaml, final.yaml. Example overrides:
+#
+#   mass_tol_ppm: 8.0
+#   top_n_peaks: 150
+#   intensity_floor: 0.01
+#   db_tiers: [np]
+#   gen_enabled: false

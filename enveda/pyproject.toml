@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "casmi"
+version = "0.1.0"
+description = "CASMI 2026 (Kaggle): ranked structure candidates from LC-MS/MS spectra"
+readme = "README.md"
+requires-python = ">=3.10"
+# Inference dependencies only (PLAN.md section 7): numpy, pandas, pyarrow, scipy,
+# numba, rdkit, lightgbm. PyYAML is needed to read configs. Exact pins live in
+# requirements.txt.
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=14",
+    "scipy>=1.11",
+    "numba>=0.59",
+    "rdkit==2026.3.3",
+    "lightgbm>=4.3",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Build and training code may also use these (never imported on the inference path).
+build = ["polars>=1.0", "duckdb>=1.0", "scikit-learn>=1.4"]
+# Fingerprint-model training (WP9). Install the CPU wheel:
+#   pip install -e ".[train]" --extra-index-url https://download.pytorch.org/whl/cpu
+train = ["torch>=2.2"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

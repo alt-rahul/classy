@@ -15,3 +15,11 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .venv/
+
+# Kaggle upload bundle (WP14) and packaging outputs
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Tracked on purpose (PLAN.md section 7), do not ignore: splits/, submissions/, configs/
