@@ -31,9 +31,11 @@ Stages (``--stage``, default ``all`` = ingest + audit; ``mkey`` is a separate ba
 ``audit``   Writes ``--audit-out`` (default ``docs/DATA_AUDIT.md``) from the files above; rerun
             after the mkey stage to fill the mkey-dependent items.
 ``library`` Builds the WP5 library index (``--library-out``, default data/processed/library) from
-            ``spectra/`` with ``Library.build``, working around an all-null-column concat
-            error in ``library._Builder._pass1`` (see ``_permissive_concat``). Equivalent to
-            ``scripts/build_library.py --source data/processed/train/spectra/`` once that is fixed.
+            ``spectra/`` with ``Library.build(..., precleaned=True)`` (the peaks are stored as
+            cleaned here, not cleaned again; ``n_peaks_raw`` / ``prec_intensity`` of the raw
+            spectra are kept) when ``ingest_info.json`` records the same cleaning settings as
+            the config, else it re-cleans with a warning. Equivalent to
+            ``scripts/build_library.py --source data/processed/train/spectra/ --precleaned``.
 
 Drop reasons (first failing check wins, in this order): null_label (no inchikey14 or no
 normalized_smiles), bad_precursor (null, NaN or <= 0), bad_peak_arrays (null list or the two
@@ -1207,12 +1209,29 @@ class _permissive_concat:
         pa.concat_tables = self._orig
 
 
+def _cleaned_with(out: Path, cfg: Config, lg) -> bool:
+    """True if ``out/ingest_info.json`` records the cleaning settings of ``cfg``."""
+    try:
+        done = json.loads((out / "ingest_info.json").read_text()).get("clean_cfg", {})
+    except (OSError, ValueError):
+        lg.warning("library: no readable %s; the spectra are cleaned again",
+                   out / "ingest_info.json")
+        return False
+    diff = {k: (v, getattr(cfg, k)) for k, v in done.items() if v != getattr(cfg, k, v)}
+    if diff or not done:
+        lg.warning("library: spectra were cleaned with other settings (ingest, now) %s; they are "
+                   "cleaned again, n_peaks_raw / prec_intensity are kept as ingested", diff)
+        return False
+    return True
+
+
 def stage_library(out: Path, lib_out: Path, cfg: Config, lg) -> dict:
-    """WP5 library index from the WP6 spectra files (``Library.build``)."""
+    """WP5 library index from the WP6 spectra files (``Library.build``, precleaned)."""
     from casmi.library import Library
 
+    precleaned = _cleaned_with(out, cfg, lg)
     with _permissive_concat():
-        lib = Library.build(out / "spectra", cfg, out_dir=lib_out)
+        lib = Library.build(out / "spectra", cfg, out_dir=lib_out, precleaned=precleaned)
     info = lib.info
     size = sum(f.stat().st_size for f in lib.dir.iterdir() if f.is_file())
     lg.info("library %s: %d spectra, %d structures, %d consensus, %.1f MB; drops %s", lib.dir,

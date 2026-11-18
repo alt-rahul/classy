@@ -15,6 +15,12 @@ Conventions:
   sanitises the result; on the 4,991 parseable NCI molecules shipped with RDKit it gives
   the same canonical SMILES as ``Cleanup`` + ``Uncharger`` + ``RemoveStereochemistry``
   for all but three Fe/Cu complexes (outside the element filter of PLAN 2.2 anyway).
+- ``fp_mol``: the molecule every fingerprint is computed on (targets and candidates):
+  ``std_mol``, then, with ``cfg.fp_inchi_roundtrip`` (default True), an InChI round trip
+  ``MolFromInchi(MolToInchi(mol))`` that maps tautomers (amide/imidic acid, keto/enol,
+  lactam/lactim) to one mobile-H form; the ``std_mol`` result is kept when the round trip
+  fails or changes the heavy-atom formula. Fingerprints only: SMILES output
+  (``std_smiles``, ``canonical_smiles``), formula, mass and NP-likeness stay on ``std_mol``.
 - Fingerprints are returned PACKED by default: ``np.packbits`` of the 0/1 bit vector,
   dtype uint8, ``bitorder="big"`` (numpy default), so bit ``i`` is
   ``(fp[i // 8] >> (7 - i % 8)) & 1``. Morgan: 4096 bits -> 512 bytes (radius 2,
@@ -48,6 +54,7 @@ __all__ = [
     "MACCS_BITS",
     "mol_from_smiles",
     "std_mol",
+    "fp_mol",
     "std_smiles",
     "canonical_smiles",
     "formula",
@@ -142,6 +149,43 @@ def std_mol(m: Chem.Mol | str | None) -> Chem.Mol | None:
     return out if out is not None and out.GetNumAtoms() > 0 else None
 
 
+def _heavy_formula(mol: Chem.Mol) -> tuple:
+    counts: dict[int, int] = {}
+    for a in mol.GetAtoms():
+        z = a.GetAtomicNum()
+        if z > 1:
+            counts[z] = counts.get(z, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _inchi_roundtrip(mol: Chem.Mol) -> Chem.Mol:
+    """``MolFromInchi(MolToInchi(mol))`` without stereo; ``mol`` itself when the round
+    trip fails or changes the heavy-atom formula."""
+    with rdBase.BlockLogs():
+        try:
+            inchi = Chem.MolToInchi(mol)
+            out = Chem.MolFromInchi(inchi) if inchi else None
+            if out is None or out.GetNumAtoms() == 0:
+                return mol
+            if _heavy_formula(out) != _heavy_formula(mol):
+                return mol
+            Chem.RemoveStereochemistry(out)
+        except Exception:  # noqa: BLE001
+            return mol
+    return out
+
+
+def fp_mol(m: Chem.Mol | str | None, cfg: Config | None = None) -> Chem.Mol | None:
+    """Molecule that fingerprints are computed on: ``std_mol``, then (with
+    ``cfg.fp_inchi_roundtrip``) the InChI round trip (module docstring). None when
+    ``std_mol`` fails. For fingerprints only, never for emitted SMILES."""
+    mol = std_mol(m)
+    if mol is None:
+        return None
+    cfg = cfg or _default_cfg()
+    return _inchi_roundtrip(mol) if cfg.fp_inchi_roundtrip else mol
+
+
 def std_smiles(m: Chem.Mol | str | None) -> str | None:
     """Canonical SMILES of ``std_mol(m)`` (no stereo), or None."""
     mol = std_mol(m)
@@ -202,7 +246,7 @@ def morgan_fp(m: Chem.Mol | str | None, cfg: Config | None = None,
     """Morgan fingerprint, ``cfg.fp_morgan_bits`` bits (4096), radius ``cfg.fp_morgan_radius``
     (2), chirality off. Packed uint8 (512,) by default, bool (4096,) with ``packed=False``.
 
-    Computed on the molecule as given: call ``std_mol`` first (the batch helpers do).
+    Computed on the molecule as given: call ``fp_mol`` first (the batch helpers do).
     """
     mol = _as_mol(m)
     if mol is None:
@@ -293,8 +337,9 @@ FEATURE_FIELDS: tuple[str, ...] = ("std_smiles", "formula", "mono_mass", "charge
                                    "n_components", "morgan", "maccs", "np_score")
 
 
-def _featurize_chunk(args: tuple[list, tuple, bool, int, int]) -> dict[str, Any]:
-    smiles, fields, standardize, radius, n_bits = args
+def _featurize_chunk(args: tuple) -> dict[str, Any]:
+    smiles, fields, standardize, radius, n_bits = args[:5]
+    roundtrip = bool(args[5]) if len(args) > 5 else _default_cfg().fp_inchi_roundtrip
     n = len(smiles)
     cfg = _default_cfg()
     if (radius, n_bits) != (cfg.fp_morgan_radius, cfg.fp_morgan_bits):
@@ -329,6 +374,9 @@ def _featurize_chunk(args: tuple[list, tuple, bool, int, int]) -> dict[str, Any]
         if mol is None:
             continue
         out["ok"][i] = True
+        fpm = mol  # fingerprints on fp_mol (std_mol + InChI round trip), the rest on std_mol
+        if standardize and roundtrip and ("morgan" in out or "maccs" in out):
+            fpm = _inchi_roundtrip(mol)
         with rdBase.BlockLogs():
             if "std_smiles" in out:
                 out["std_smiles"][i] = Chem.MolToSmiles(mol)
@@ -337,9 +385,9 @@ def _featurize_chunk(args: tuple[list, tuple, bool, int, int]) -> dict[str, Any]
             if "mono_mass" in out:
                 out["mono_mass"][i] = rdMolDescriptors.CalcExactMolWt(mol)
             if "morgan" in out:
-                out["morgan"][i] = morgan_fp(mol, cfg, packed=True)
+                out["morgan"][i] = morgan_fp(fpm, cfg, packed=True)
             if "maccs" in out:
-                out["maccs"][i] = maccs_fp(mol, packed=True)
+                out["maccs"][i] = maccs_fp(fpm, packed=True)
             if "np_score" in out:
                 out["np_score"][i] = np_score(mol)
     return out
@@ -382,7 +430,9 @@ def featurize(smiles: Iterable[str | Chem.Mol], cfg: Config | None = None, n_job
     (float64, NaN), ``charge``/``n_components`` (int16, of the molecule as parsed, before
     standardisation, for the filters of PLAN 2.2), ``morgan`` (uint8 (n, 512) packed)
     and ``maccs`` (uint8 (n, 21) packed), zero rows on failure. Everything except
-    ``charge`` and ``n_components`` is computed on ``std_mol`` when ``standardize``.
+    ``charge`` and ``n_components`` is computed on ``std_mol`` when ``standardize``;
+    ``morgan`` and ``maccs`` on ``fp_mol`` (also the InChI round trip when
+    ``cfg.fp_inchi_roundtrip``).
     """
     cfg = cfg or _default_cfg()
     fields = tuple(fields)
@@ -393,11 +443,12 @@ def featurize(smiles: Iterable[str | Chem.Mol], cfg: Config | None = None, n_job
     chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
     if any(isinstance(x, Chem.Mol) for x in items) and n_jobs > 1:
         n_jobs = 1  # keep Mol objects in-process (pickling them loses properties)
-    args = [(c, fields, standardize, cfg.fp_morgan_radius, cfg.fp_morgan_bits) for c in chunks]
+    args = [(c, fields, standardize, cfg.fp_morgan_radius, cfg.fp_morgan_bits,
+             cfg.fp_inchi_roundtrip) for c in chunks]
     parts = parallel_map(_featurize_chunk, args, n_jobs) if args else []
     if not parts:
         parts = [_featurize_chunk(([], fields, standardize, cfg.fp_morgan_radius,
-                                   cfg.fp_morgan_bits))]
+                                   cfg.fp_morgan_bits, cfg.fp_inchi_roundtrip))]
     out: dict[str, Any] = {}
     for key in parts[0]:
         if isinstance(parts[0][key], list):
@@ -422,9 +473,10 @@ def morgan_fps(smiles: Iterable[str], cfg: Config | None = None, n_jobs: int = 1
 
 
 def maccs_fps(smiles: Iterable[str], n_jobs: int = 1, standardize: bool = True,
-              packed: bool = True) -> tuple[np.ndarray, np.ndarray]:
-    """(fingerprints, ok): packed uint8 (n, 21) or bool (n, 167); zero rows where not ok."""
-    res = featurize(smiles, n_jobs=n_jobs, standardize=standardize, fields=("maccs",))
+              packed: bool = True, cfg: Config | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """(fingerprints, ok): packed uint8 (n, 21) or bool (n, 167); zero rows where not ok.
+    ``cfg``: only ``fp_inchi_roundtrip`` is read (default Config)."""
+    res = featurize(smiles, cfg, n_jobs=n_jobs, standardize=standardize, fields=("maccs",))
     fps = res["maccs"] if packed else unpack_fp(res["maccs"], MACCS_BITS)
     return fps, res["ok"]
 

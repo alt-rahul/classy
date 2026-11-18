@@ -646,3 +646,25 @@ def test_train_script_synthetic_smoke(tmp_path):
     assert (tmp_path / "logs" / "fp_t_holdout_curve.csv").is_file()
     model = fm.FpModel.load(m / "fp_t_holdout.npz")
     assert model.extra["steps"] == 6 and model.spec.hidden == 32
+
+
+def test_build_targets_inchi_roundtrip_and_cache_version(tmp_path):
+    """Targets use chem.fp_mol (InChI round trip); the cache records the flag, so targets
+    cached without the round trip (or by a cache without the flag) are not reused."""
+    on, off = Config(), Config().replace(fp_inchi_roundtrip=False)
+    ik, imidic, amide = ["AMIDE000000001"], ["CC(O)=N"], ["CC(N)=O"]
+    cache = tmp_path / "t.npz"
+    t_off = fm.build_targets(ik, amide, off, cache=cache)
+    t_on = fm.build_targets(ik, amide, on, cache=cache)
+    ref = fm.build_targets(ik, imidic, on, cache=None)
+    assert (t_on.morgan == ref.morgan).all() and (t_on.maccs == ref.maccs).all()
+    assert not (t_off.morgan == t_on.morgan).all()
+    with np.load(cache) as z:
+        assert int(z["inchi_roundtrip"]) == 1 and len(z["ik14"]) == 1
+        legacy = {k: z[k] for k in z.files if k != "inchi_roundtrip"}
+    legacy["morgan"] = t_off.morgan
+    np.savez(tmp_path / "legacy.npz", **legacy)     # pre-flag cache holding std_mol targets
+    again = fm.build_targets(ik, amide, on, cache=tmp_path / "legacy.npz")
+    assert (again.morgan == t_on.morgan).all()
+    # mass stays on std_mol: identical with and without the round trip
+    assert t_on.mono_mass[0] == t_off.mono_mass[0]

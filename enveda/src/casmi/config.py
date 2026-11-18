@@ -74,6 +74,7 @@ class Config:
     fp_use_maccs: bool = True                # append 167 MACCS keys
     fp_prob_min: float = 0.01                # clip for the Bernoulli log-likelihood
     fp_prob_max: float = 0.99
+    fp_inchi_roundtrip: bool = True          # fingerprints on chem.fp_mol (std_mol + InChI round trip)
 
     # --- Fingerprint model (4.4) ------------------------------------------------------
     fpm_mz_bin_da: float = 0.1

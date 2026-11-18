@@ -148,7 +148,8 @@ def test_featurize_parallel_equals_serial_and_keeps_order():
     j = smis.index(_nci(1)[0])
     std = chem.std_mol(smis[j])
     assert one["std_smiles"][j] == Chem.MolToSmiles(std)
-    assert np.array_equal(one["morgan"][j], chem.morgan_fp(std))
+    assert np.array_equal(one["morgan"][j], chem.morgan_fp(chem.fp_mol(smis[j])))
+    assert np.array_equal(one["maccs"][j], chem.maccs_fp(chem.fp_mol(smis[j])))
     assert one["np_score"][j] == chem.np_score(std)
     # thin wrappers
     fps, ok = chem.morgan_fps(_nci(5), packed=False)
@@ -161,3 +162,46 @@ def test_featurize_parallel_equals_serial_and_keeps_order():
     assert empty["morgan"].shape == (0, 512) and empty["formula"] == []
     with pytest.raises(ValueError):
         chem.featurize(["C"], fields=("nope",))
+
+
+def test_fp_mol_inchi_roundtrip_tautomers(monkeypatch):
+    """Fingerprints go through std_mol + InChI round trip (fp_inchi_roundtrip); SMILES
+    outputs do not."""
+    pairs = [("CC(N)=O", "CC(O)=N"),                      # amide / imidic acid
+             ("O=c1cccc[nH]1", "Oc1ccccn1"),               # lactam / lactim
+             ("NC(=O)c1ccccc1O", "N=C(O)c1ccccc1O")]
+    off = Config().replace(fp_inchi_roundtrip=False)
+    flat = [s for p in pairs for s in p]
+    mf, ok = chem.morgan_fps(flat)
+    kf, _ = chem.maccs_fps(flat)
+    mf0, _ = chem.morgan_fps(flat, off)
+    assert ok.all()
+    for i in range(0, len(flat), 2):
+        assert np.array_equal(mf[i], mf[i + 1]) and np.array_equal(kf[i], kf[i + 1]), flat[i]
+        assert not np.array_equal(mf0[i], mf0[i + 1]), flat[i]
+        a, b = chem.fp_mol(flat[i]), chem.fp_mol(flat[i + 1])
+        assert Chem.MolToSmiles(a) == Chem.MolToSmiles(b)
+        assert np.array_equal(chem.morgan_fp(a), mf[i])
+        assert Chem.MolToSmiles(chem.fp_mol(flat[i], off)) == chem.std_smiles(flat[i])
+    # parallel featurize sees the flag too
+    two = chem.featurize(flat, off, n_jobs=2, chunk_size=2, fields=("morgan",))
+    assert np.array_equal(two["morgan"], mf0)
+    # emitted SMILES keep the tautomer as given
+    assert chem.std_smiles("CC(O)=N") == "CC(=N)O" and chem.std_smiles("CC(N)=O") == "CC(N)=O"
+    assert chem.canonical_smiles("Oc1ccccn1") == "Oc1ccccn1"
+    assert chem.std_smiles_batch(["CC(O)=N"]) == ["CC(=N)O"]
+    # no tautomer: same fingerprint as plain std_mol; failures and stereo
+    assert np.array_equal(chem.morgan_fp(chem.fp_mol(QUERCETIN)),
+                          chem.morgan_fp(chem.std_mol(QUERCETIN)))
+    assert chem.fp_mol("bad") is None and chem.fp_mol(None) is None
+    assert Chem.MolToSmiles(chem.fp_mol("C[C@H](O)CC")) == "CCC(C)O"
+    # fallback to std_mol when the round trip fails or changes the heavy-atom formula
+    assert Chem.MolToSmiles(chem.fp_mol("CC(N)=O")) == "CC(=N)O"   # InChI's form
+    monkeypatch.setattr(Chem, "MolFromInchi", lambda *a, **k: Chem.MolFromSmiles("CCCC"))
+    assert Chem.MolToSmiles(chem.fp_mol("CC(N)=O")) == "CC(N)=O"
+
+    def boom(*a, **k):
+        raise RuntimeError("inchi")
+
+    monkeypatch.setattr(Chem, "MolToInchi", boom)
+    assert Chem.MolToSmiles(chem.fp_mol("CC(N)=O")) == "CC(N)=O"

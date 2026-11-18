@@ -51,7 +51,7 @@ and ``prec_intensity``, which is logged as a warning).
 
 3. ``targets``: ``FpTargets`` - sorted unique ``ik14`` (object array), ``morgan`` uint8
    (n, 512) and ``maccs`` uint8 (n, 21), packed exactly like ``chem.morgan_fp`` /
-   ``chem.maccs_fp`` (big bit order), computed on ``chem.std_mol`` of the label SMILES
+   ``chem.maccs_fp`` (big bit order), computed on ``chem.fp_mol`` of the label SMILES
    (``build_targets(ik14, smiles)`` does it, with a disk cache). ``ok`` False rows (SMILES
    that failed) are excluded from training.
 
@@ -659,10 +659,13 @@ def _smiles_hash(smiles: Sequence[str | None]) -> np.ndarray:
 
 def build_targets(ik14: Sequence[str], smiles: Sequence[str | None], cfg: Config | None = None,
                   n_jobs: int = 1, cache: Path | str | None = None) -> FpTargets:
-    """Fingerprint targets (``chem.featurize`` on ``std_mol``) for unique structures.
+    """Fingerprint targets (``chem.featurize``: Morgan and MACCS on ``chem.fp_mol``, mass
+    on ``std_mol``) for unique structures.
 
     ``cache``: an ``.npz`` reused for (ik14, SMILES) pairs already computed and extended
-    with the new ones (None: no cache).
+    with the new ones (None: no cache). It records the Morgan size and radius and
+    ``fp_inchi_roundtrip`` (absent in caches written before that field existed: read as
+    False); a cache built with other settings is ignored and overwritten.
     """
     from .chem import featurize
 
@@ -684,7 +687,9 @@ def build_targets(ik14: Sequence[str], smiles: Sequence[str | None], cfg: Config
     if cache_p is not None and cache_p.is_file():
         with np.load(cache_p, allow_pickle=False) as z:
             old = {k: z[k] for k in z.files}
-        if int(old["n_morgan"]) == cfg.fp_morgan_bits and int(old["radius"]) == cfg.fp_morgan_radius:
+        old_rt = bool(int(old["inchi_roundtrip"])) if "inchi_roundtrip" in old else False
+        if (int(old["n_morgan"]) == cfg.fp_morgan_bits and int(old["radius"]) == cfg.fp_morgan_radius
+                and old_rt == bool(cfg.fp_inchi_roundtrip)):
             key_old = pd.Index([f"{a}|{b}" for a, b in zip(old["ik14"], old["smiles_hash"])])
             pos = key_old.get_indexer([f"{a}|{b}" for a, b in zip(ik, h)])
             hit = pos >= 0
@@ -719,7 +724,8 @@ def build_targets(ik14: Sequence[str], smiles: Sequence[str | None], cfg: Config
             np.savez(tmp, ik14=np.asarray(all_ik, dtype=str), smiles_hash=all_h, morgan=all_m,
                      maccs=all_k, ok=all_ok, mono_mass=all_mass,
                      n_morgan=np.int64(cfg.fp_morgan_bits),
-                     radius=np.int64(cfg.fp_morgan_radius))
+                     radius=np.int64(cfg.fp_morgan_radius),
+                     inchi_roundtrip=np.int64(bool(cfg.fp_inchi_roundtrip)))
             os.replace(tmp, cache_p)
     log.info("targets: %d ok, %d failed", int(ok.sum()), int((~ok).sum()))
     return FpTargets.from_arrays(ik, morgan, maccs, ok, mass, cfg.fp_morgan_bits,
@@ -815,7 +821,9 @@ class TrainingData:
                      n_jobs: int = 1, targets_cache: Path | str | None = "default",
                      batch_rows: int = 50000, max_rows: int | None = None) -> "TrainingData":
         """Stream train-schema parquet file(s) (or a directory of them, e.g. WP6's
-        ``data/processed/train/spectra/``), clean (idempotent on cleaned peaks), build.
+        ``data/processed/train/spectra/``), clean, build. Cleaned input is cleaned again,
+        which is not exactly idempotent (a float32 peak at the intensity floor can drop: 1 of
+        4,134 synthetic spectra); ``from_library`` on a ``precleaned`` library is exact.
         ``n_peaks_raw`` / ``prec_intensity`` columns, when present, win over the values
         recomputed here."""
         import pyarrow.parquet as pq
@@ -1894,11 +1902,13 @@ def _inchi_roundtrip_fp(smiles: Sequence[str | None], cfg: Config) -> tuple[np.n
 def fingerprint_consistency(smiles_a: Sequence[str | None], smiles_b: Sequence[str | None],
                             cfg: Config | None = None, n_jobs: int = 1,
                             inchi_roundtrip: bool = True) -> pd.DataFrame:
-    """Tanimoto between the target-style Morgan fingerprints (``chem.std_mol``) of two
-    SMILES of the same structure (PLAN 4.4 "known weakness": train SMILES vs PubChem
+    """Tanimoto between the target-style Morgan fingerprints (``chem.morgan_fps``, i.e.
+    ``chem.fp_mol``: ``std_mol`` plus the InChI round trip when ``cfg.fp_inchi_roundtrip``)
+    of two SMILES of the same structure (PLAN 4.4 "known weakness": train SMILES vs PubChem
     SMILES for the same ik14). Columns: ``tanimoto``, ``identical`` and, with
-    ``inchi_roundtrip``, the same after an InChI round trip (``tanimoto_inchi``,
-    ``identical_inchi``); NaN where a SMILES failed."""
+    ``inchi_roundtrip``, the same after an InChI round trip of ``std_mol`` (``tanimoto_inchi``,
+    ``identical_inchi``); NaN where a SMILES failed. Pass
+    ``cfg.replace(fp_inchi_roundtrip=False)`` for the plain ``std_mol`` numbers."""
     from .chem import morgan_fps, tanimoto
 
     cfg = cfg or Config()

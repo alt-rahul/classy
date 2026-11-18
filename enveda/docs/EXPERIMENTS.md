@@ -75,6 +75,31 @@ trigger, but the round trip removes the problem entirely here and costs 0.98 ms 
 the shared standardisation for both targets and candidates (then rebuild `np_fp.npy` and
 retrain), unless the train-vs-PubChem measurement after WP6 says otherwise.
 
+### 2026-11-18 InChI round trip adopted for fingerprints (tautomer proxy re-measured)
+
+Follow-up to the WP9 entry above. `chem.fp_mol` = `std_mol` + `MolFromInchi(MolToInchi(m))`
+(stereo removed; the `std_mol` molecule is kept if the round trip fails or changes the heavy-atom
+formula), behind `Config.fp_inchi_roundtrip` (default True). It feeds every fingerprint path:
+`chem.morgan_fps` / `maccs_fps` / `featurize` (morgan, maccs), `fpmodel.build_targets` (target
+cache now records the flag) and `build_npdb.py --stage fp` (`np_fp.npy` rebuilt, sha256
+`a526ef20...20f9a9`). Emitted SMILES, `std_smiles`, `canonical_smiles`, `metric.mkey`, formula,
+mass and NP-likeness are unchanged (Baseline 0 still reproduces `20261118_b0_npdb_prior.csv`
+byte for byte). Same 10,000 NP-tier (COCONUT/LOTUS SMILES) vs PubChem-tier pairs as WP9:
+
+| fingerprints on | mean Morgan Tanimoto | identical Morgan | Tanimoto < 0.9 | identical MACCS | ms per molecule (parse, standardise, Morgan; 1 process) |
+|---|---|---|---|---|---|
+| `std_mol` (before) | 0.9925 | 97.96 % | 2.01 % | 98.49 % | 0.41 |
+| `fp_mol` (after) | 1.0000 | 100.00 % | 0.00 % | 100.00 % | 1.09 |
+
+Round-trip fallbacks: 0 of 20,000 SMILES. The rebuilt `np_fp.npy` rows of these 10,000 structures
+equal `morgan_fps` of the NP SMILES (100 %) and of the PubChem SMILES (100 %), so a target built
+from a PubChem-style train SMILES now matches the stored candidate fingerprint exactly. Cost: the
+NP-tier fingerprint stage takes 11.3 min instead of 5.5 min on 2 cores; targets for about 275k
+train structures add about 3 min on one process. Standard InChI does not cover plain keto/enol
+(`CC(=O)C` vs `CC(O)=C` still differ); every pair of this sample became identical, so its
+differences were all of the heteroatom mobile-H kind InChI covers. Rerun with
+`casmi.fpmodel.fingerprint_consistency` on train SMILES vs PubChem SMILES once train exists.
+
 ### 2026-11-18 WP13 DreaMS embeddings on CPU: not adopted (throughput just below 150/s, no gain over plain cosine where mass is controlled)
 
 `DreaMS_embedding_model_torchscript.pt` (HF `roman-bushuiev/DreaMS`, 468,475,544 bytes, sha256

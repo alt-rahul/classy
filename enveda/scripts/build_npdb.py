@@ -482,18 +482,22 @@ def _chem():
 def fp_chunk(args):
     """Packed fingerprints of a chunk of stored SMILES.
 
-    With WP1's ``casmi.chem``: ``chem.morgan_fp(chem.std_mol(smiles), cfg)`` (the same
-    as ``chem.morgan_fps(..., standardize=True)``), falling back to the unstandardised
+    With WP1's ``casmi.chem``: ``chem.morgan_fp(chem.fp_mol(smiles, cfg), cfg)`` (std_mol
+    plus the InChI round trip when ``fp_inchi_roundtrip``; the same as
+    ``chem.morgan_fps(..., standardize=True)``), falling back to the unstandardised
     molecule where ``std_mol`` fails. Without it: ``morgan_packed`` on the parsed SMILES.
     Returns (packed array, rows that failed to parse, rows where std_mol failed).
     """
-    smiles, radius, n_bits, use_chem = args
+    smiles, radius, n_bits, use_chem = args[:4]
+    roundtrip = bool(args[4]) if len(args) > 4 else True
     from rdkit import Chem
 
     chem = _chem() if use_chem else None
     cfg = None
     if chem is not None:
         cfg = Config().replace(fp_morgan_radius=radius, fp_morgan_bits=n_bits)
+        if hasattr(cfg, "fp_inchi_roundtrip"):
+            cfg = cfg.replace(fp_inchi_roundtrip=roundtrip)
     out = np.zeros((len(smiles), n_bits // 8), dtype=np.uint8)
     bad, std_fail = [], []
     for i, smi in enumerate(smiles):
@@ -502,7 +506,7 @@ def fp_chunk(args):
             bad.append(i)
             continue
         if chem is not None:
-            sm = chem.std_mol(mol)
+            sm = chem.fp_mol(mol, cfg) if hasattr(chem, "fp_mol") else chem.std_mol(mol)
             if sm is None:
                 std_fail.append(i)
                 sm = mol
@@ -767,7 +771,10 @@ def stage_table(ctx: Ctx) -> None:
 
 # ----------------------------------------------------------------------------- fingerprints
 
-def _fp_backend_note(use_chem: bool) -> str:
+def _fp_backend_note(use_chem: bool, roundtrip: bool = False) -> str:
+    if use_chem and roundtrip:
+        return ("casmi.chem: morgan_fp(fp_mol(smiles)) = std_mol + InChI round trip "
+                "(= chem.morgan_fps(standardize=True))")
     if use_chem:
         return "casmi.chem: morgan_fp(std_mol(smiles)) (= chem.morgan_fps(standardize=True))"
     return "RDKit direct: morgan_packed(MolFromSmiles(smiles)), no standardisation"
@@ -782,12 +789,13 @@ def stage_fp(ctx: Ctx) -> None:
     if n_bits % 8:
         raise SystemExit("fp_morgan_bits must be a multiple of 8")
     use_chem = _chem() is not None and not ctx.args.fp_raw
-    note = _fp_backend_note(use_chem)
+    roundtrip = bool(getattr(cfg, "fp_inchi_roundtrip", False)) and use_chem
+    note = _fp_backend_note(use_chem, roundtrip)
     log.info("fp: %d rows, Morgan r=%d %d bits, %d workers (%s)", n, radius, n_bits, ctx.workers, note)
     tmp = ctx.np_fp.with_name("np_fp.part.npy")
     arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, n_bits // 8))
     chunk = 5000
-    tasks = [(c, radius, n_bits, use_chem) for _, c in _chunks(smiles, chunk)]
+    tasks = [(c, radius, n_bits, use_chem, roundtrip) for _, c in _chunks(smiles, chunk)]
     bad_total, std_fail_total = [], []
     with _pool(ctx) as pool:
         for j, (out, bad, std_fail) in enumerate(pool.imap(fp_chunk, tasks)):
@@ -809,7 +817,7 @@ def stage_fp(ctx: Ctx) -> None:
     rep["np_fp"] = {"shape": [n, n_bits // 8], "dtype": "uint8", "bitorder": "big",
                     "radius": radius, "n_bits": n_bits, "bytes": ctx.np_fp.stat().st_size,
                     "sha256": sha256_file(ctx.np_fp), "seconds": round(time.time() - t0, 1),
-                    "backend": note, "standardized": use_chem,
+                    "backend": note, "standardized": use_chem, "inchi_roundtrip": roundtrip,
                     "std_mol_failures": len(std_fail_total),
                     "std_mol_failure_rows": std_fail_total[:1000]}
     ctx.save_report(rep)

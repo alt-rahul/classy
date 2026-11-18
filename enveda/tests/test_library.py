@@ -296,3 +296,106 @@ def test_train_sample_build_and_self_search(train_parquet, tmp_path):
         assert r.best_ref_idx.iloc[0] == i or lib.store.n_peaks[i] == lib.store.n_peaks[r.best_ref_idx.iloc[0]]
     print(f"\ntrain sample: {lib.n_spectra} spectra, {len(idx)} self-searches in "
           f"{time.perf_counter() - t0:.1f} s")
+
+
+# --- raw-spectrum metadata and precleaned input (integration fix) -----------------------
+
+
+def _by_id(lib: Library) -> pd.DataFrame:
+    m = lib.meta.copy()
+    m["mz"] = [lib.store[i][0] for i in range(lib.n_spectra)]
+    m["it"] = [lib.store[i][1] for i in range(lib.n_spectra)]
+    return m.set_index("spectrum_id").sort_index()
+
+
+def _cleaned_like_wp6(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, str]:
+    """Clean every row as scripts/ingest_train.py does (float32 peaks, raw n_peaks_raw and
+    prec_intensity columns) and add a peak at float32(0.005) relative intensity to one
+    spectrum: a valid cleaned peak that a second cleaning drops (0.0049999999 < 0.005)."""
+    from casmi.spectra import clean
+
+    out = df.copy()
+    mzs, its, nraw, pint = [], [], [], []
+    for r in df.itertuples(index=False):
+        m, x, p = clean(r.ms2_mzs, r.ms2_normalized_intensities, r.precursor_mz, cfg)
+        mzs.append(m), its.append(x), nraw.append(len(r.ms2_mzs)), pint.append(p)
+    k = next(i for i, m in enumerate(mzs) if len(m) >= 2 and df["inchikey14"].iloc[i])
+    mid = np.float32((float(mzs[k][0]) + float(mzs[k][1])) / 2)
+    mzs[k] = np.insert(mzs[k], 1, mid)
+    its[k] = np.insert(its[k], 1, np.float32(0.005))
+    out["ms2_mzs"], out["ms2_normalized_intensities"] = mzs, its
+    out["n_peaks_raw"] = np.asarray(nraw, np.int32)
+    out["prec_intensity"] = np.asarray(pint, np.float32)
+    return out, str(df["spectrum_id"].iloc[k])
+
+
+def test_build_from_raw_computes_raw_metadata(tmp_path):
+    from casmi.spectra import clean
+
+    df = _synthetic_train()
+    lib = Library.build(df, Config(), out_dir=tmp_path / "raw")
+    assert lib.info["precleaned"] is False
+    m = _by_id(lib)
+    src = df.set_index("spectrum_id")
+    for sid, row in m.iterrows():
+        r = src.loc[sid]
+        assert row.n_peaks_raw == len(r.ms2_mzs)
+        p = clean(r.ms2_mzs, r.ms2_normalized_intensities, r.precursor_mz)[2]
+        assert row.prec_intensity == pytest.approx(p, abs=1e-6)
+    assert (m["n_peaks_raw"] > m["n_peaks"]).all() and (m["prec_intensity"] > 0).any()
+
+
+def test_build_from_cleaned_keeps_raw_metadata(tmp_path):
+    cfg = Config()
+    df = _synthetic_train()
+    raw = _by_id(Library.build(df, cfg, out_dir=tmp_path / "raw"))
+    cleaned, sid = _cleaned_like_wp6(df, cfg)
+    pre_lib = Library.build(cleaned, cfg, out_dir=tmp_path / "pre", batch_rows=11, precleaned=True)
+    assert pre_lib.info["precleaned"] is True
+    pre = _by_id(pre_lib)
+    assert pre.index.equals(raw.index)
+    # raw-spectrum metadata survive (they equal a build from the raw spectra)
+    np.testing.assert_array_equal(pre["n_peaks_raw"], raw["n_peaks_raw"])
+    np.testing.assert_array_equal(pre["prec_intensity"], raw["prec_intensity"])
+    # stored peaks are used as given: identical to the raw build, plus the floor peak
+    src = cleaned.set_index("spectrum_id")
+    for s in pre.index:
+        assert np.array_equal(pre.at[s, "mz"], np.asarray(src.at[s, "ms2_mzs"], np.float32))
+        assert np.array_equal(pre.at[s, "it"], np.asarray(src.at[s, "ms2_normalized_intensities"],
+                                                        np.float32))
+        if s != sid:
+            assert np.array_equal(pre.at[s, "mz"], raw.at[s, "mz"])
+    assert pre.at[sid, "n_peaks"] == raw.at[sid, "n_peaks"] + 1
+    # cleaning the cleaned peaks again is not idempotent (the floor peak goes), but the
+    # raw-spectrum columns are still kept
+    again = _by_id(Library.build(cleaned, cfg, out_dir=tmp_path / "again"))
+    assert again.at[sid, "n_peaks"] == raw.at[sid, "n_peaks"]
+    np.testing.assert_array_equal(again["n_peaks_raw"], raw["n_peaks_raw"])
+    np.testing.assert_array_equal(again["prec_intensity"], raw["prec_intensity"])
+    # precleaned input without the two columns: stored count and NaN
+    bare = _by_id(Library.build(cleaned.drop(columns=["n_peaks_raw", "prec_intensity"]), cfg,
+                                out_dir=tmp_path / "bare", precleaned=True))
+    assert (bare["n_peaks_raw"] == bare["n_peaks"]).all() and bare["prec_intensity"].isna().all()
+    # raw spectra declared precleaned are refused
+    with pytest.raises(ValueError, match="precleaned"):
+        Library.build(df, cfg, out_dir=tmp_path / "bad", precleaned=True)
+
+
+def test_ingest_library_stage_keeps_raw_metadata(synthetic_train, caplog):
+    """scripts/ingest_train.py --stage library builds from WP6's cleaned files without
+    re-cleaning, so the library carries the ingested n_peaks_raw / prec_intensity and
+    the fingerprint-model loader does not warn about lost raw metadata."""
+    import logging
+
+    import casmi.fpmodel as fm
+
+    lib = synthetic_train["library"]
+    assert lib.info["precleaned"] is True
+    meta = pd.read_parquet(synthetic_train["out"] / "meta.parquet").set_index("spectrum_id")
+    m = lib.meta.set_index("spectrum_id").loc[meta.index]
+    np.testing.assert_array_equal(m["n_peaks_raw"], meta["n_peaks_raw"])
+    np.testing.assert_array_equal(m["prec_intensity"], meta["prec_intensity"])
+    np.testing.assert_array_equal(m["n_peaks"], meta["n_peaks"])
+    with caplog.at_level(logging.WARNING, logger="casmi.fpmodel"):
+        fm.TrainingData.from_library(lib.dir, synthetic_train["cfg"], targets_cache=None)
+    assert not [r for r in caplog.records if "already-cleaned" in r.getMessage()]

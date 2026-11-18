@@ -21,7 +21,9 @@ Definitions (the plan leaves these details open; they are fixed here):
   4. Keep the ``top_n_peaks`` most intense peaks (ties: lower m/z first), output sorted
      by m/z.
   5. Renormalise to base peak 1.0. Output arrays are float32 (PLAN.md section 7).
-  ``clean`` is idempotent: cleaning a cleaned spectrum returns it unchanged.
+  ``clean`` is nearly but not exactly idempotent: after float32 storage a peak at the
+  intensity floor can fall just below it and be dropped on a second pass. Do not
+  re-clean stored spectra; ``Library.build(precleaned=True)`` exists for that.
 
 ``merge_consensus(spectra, cfg, precursor_mz=None)``
   Pools the peaks of the (cleaned, base-peak-1) member spectra, sorts them by m/z and

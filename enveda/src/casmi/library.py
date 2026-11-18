@@ -4,9 +4,12 @@ PLAN.md sections 4.2 and 4.3 (WP5).
 
 Input schema (``Library.build``)
 --------------------------------
-One row per spectrum, the columns of ``train.parquet`` (docs/COMPETITION.md); WP6's
-``data/processed/train/spectra_<lib>.parquet`` (same columns, peaks already cleaned) works
-too, because ``spectra.clean`` is idempotent. Columns read:
+One row per spectrum, the columns of ``train.parquet`` (docs/COMPETITION.md), or WP6's
+``data/processed/train/spectra/spectra_<lib>.parquet`` (same columns, peaks already cleaned
+with ``spectra.clean``) built with ``precleaned=True``: the stored peaks are then used as
+they are, because cleaning cleaned peaks again is not exactly idempotent (a relative
+intensity stored as float32 can round to just below the ``intensity_floor`` and be
+dropped). Columns read:
 
 =============================  =========================  =================================
 column                         type                       use
@@ -28,7 +31,14 @@ precursor_error_ppm            double                     carried (label-quality
 mono_mass                      double, optional           overrides the formula mass
 instrument_family              string, optional           overrides the mapping below
 molecule_id                    string, optional           carried (test-derived libraries)
+n_peaks_raw                    int, optional              kept (else counted before cleaning)
+prec_intensity                 float, optional            kept (else from ``clean_flat``)
 =============================  =========================  =================================
+
+``n_peaks_raw`` and ``prec_intensity`` describe the RAW spectrum (WP6 computes them before
+cleaning); recomputing them from cleaned peaks would give the cleaned count and 0, so input
+values win wherever they are not null. Without them, cleaning computes them; precleaned
+input without them gets the stored peak count and NaN.
 
 Structure mass: ``mono_mass`` (median per structure) if present, else the monoisotopic
 mass of the most frequent ``molecular_formula`` (charge suffix stripped), else the median
@@ -308,7 +318,7 @@ _SOURCE_COLUMNS = [
     "ionization_mode", "instrument_type", "ingest_lib", "collision_energy_ev",
     "base_peak_intensity", "precursor_error_ppm", "inchikey14", "ik14",
     "normalized_smiles", "smiles", "molecular_formula", "mono_mass", "instrument_family",
-    "molecule_id",
+    "molecule_id", "n_peaks_raw", "prec_intensity",
 ]
 
 
@@ -924,7 +934,7 @@ class Library:
 
     @classmethod
     def build(cls, source: Any, cfg: Config | None = None, out_dir: Path | str | None = None,
-              batch_rows: int | None = None) -> "Library":
+              batch_rows: int | None = None, precleaned: bool = False) -> "Library":
         """Build the library from a spectra table and return it loaded.
 
         ``source``: a parquet file, a directory of parquet files, a list of files, a
@@ -934,6 +944,14 @@ class Library:
         per-spectrum metadata (about 0.5 KB per spectrum) plus one batch. The library is
         written to ``out_dir`` (default ``paths.PROCESSED / "library"``) via a temporary
         sibling directory that replaces it at the end.
+
+        ``precleaned``: the source peaks were already cleaned with ``spectra.clean`` and
+        this ``cfg`` (WP6's spectra files; ``scripts/ingest_train.py --stage library``
+        passes it): they are stored as given instead of being cleaned again. Each batch is
+        checked (finite positive values, m/z sorted, base peak 1, at most ``top_n_peaks``
+        peaks, none inside the precursor window or above the precursor cut) and a
+        ValueError is raised if a spectrum fails, e.g. for raw input. Recorded in
+        library_info.json as ``precleaned``.
         """
         cfg = cfg or Config()
         batch_rows = int(batch_rows or cfg.lib_build_batch_rows)
@@ -943,7 +961,7 @@ class Library:
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True)
         t0 = time.perf_counter()
-        _Builder(cfg, tmp, batch_rows).run(source)
+        _Builder(cfg, tmp, batch_rows, precleaned).run(source)
         if out.exists():
             shutil.rmtree(out)
         tmp.rename(out)
@@ -965,6 +983,42 @@ def _rss_mb() -> tuple[float, float]:
     return vals.get("VmRSS", float("nan")), vals.get("VmHWM", float("nan"))
 
 
+def _check_precleaned(mz: np.ndarray, it: np.ndarray, off: np.ndarray, prec: np.ndarray,
+                      cfg: Config, row0: int) -> None:
+    """Raise ValueError if flat peaks do not look like ``spectra.clean`` output (see
+    ``Library.build(precleaned=True)``). The window checks allow 1e-3 Da for float32
+    rounding of stored m/z."""
+    n = len(off) - 1
+    cnt = np.diff(off)
+    bad = cnt > int(cfg.top_n_peaks)
+    pk = np.repeat(np.arange(n), cnt)
+    bad_pk = ~(np.isfinite(mz) & np.isfinite(it) & (mz > 0) & (it > 0))
+    if len(mz) > 1:
+        unsorted = np.flatnonzero(np.diff(mz) < 0)
+        unsorted = unsorted[pk[unsorted] == pk[unsorted + 1]]
+        bad_pk[unsorted + 1] = True
+    p = prec[pk]
+    has_p = np.isfinite(p)
+    tol = 1e-3
+    above = has_p & (mz > p + cfg.clean_max_above_precursor_da + tol)
+    inside = (has_p & (mz > p - cfg.precursor_window_low_da + tol)
+              & (mz < p + cfg.precursor_window_high_da - tol))
+    bad_pk |= above | (inside if not cfg.keep_precursor else False)
+    if bad_pk.any():
+        bad[pk[bad_pk]] = True
+    ne = np.flatnonzero(cnt > 0)
+    if len(ne):
+        top = np.maximum.reduceat(np.where(np.isfinite(it), it, 0.0), off[:-1][ne])
+        bad[ne[np.abs(top - 1.0) > 1e-6]] = True
+    if bad.any():
+        i = int(np.flatnonzero(bad)[0])
+        raise ValueError(
+            f"precleaned=True but source row {row0 + i} does not look cleaned with this config "
+            f"({int(bad.sum())} such rows in this batch): {cnt[i]} peaks, m/z "
+            f"{mz[off[i]:off[i + 1]][:5].tolist()}..., precursor {prec[i]}; build without "
+            "precleaned or with the config the peaks were cleaned with")
+
+
 def _clean_cfg_dict(cfg: Config) -> dict:
     keys = ("clean_max_above_precursor_da", "keep_precursor", "precursor_window_low_da",
             "precursor_window_high_da", "intensity_floor", "top_n_peaks",
@@ -975,10 +1029,11 @@ def _clean_cfg_dict(cfg: Config) -> dict:
 class _Builder:
     """Streaming library build (see Library.build)."""
 
-    def __init__(self, cfg: Config, out: Path, batch_rows: int):
+    def __init__(self, cfg: Config, out: Path, batch_rows: int, precleaned: bool = False):
         self.cfg = cfg
         self.out = out
         self.batch_rows = batch_rows
+        self.precleaned = bool(precleaned)
         self.drops: dict[str, int] = {}
 
     def run(self, source: Any) -> None:
@@ -1016,6 +1071,7 @@ class _Builder:
             "n_consensus_peaks": int(np.load(self.out / CONSENSUS_NAMES[2], mmap_mode="r")[-1]),
             "n_input_rows": int(self.n_input),
             "drops": self.drops,
+            "precleaned": self.precleaned,
             "clean_cfg": _clean_cfg_dict(self.cfg),
             "build_seconds": round(time.perf_counter() - t0, 1),
             "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1040,7 +1096,18 @@ class _Builder:
                 mz, it, off, valid = list_arrays_to_flat(batch.column("ms2_mzs"),
                                                          batch.column("ms2_normalized_intensities"))
                 prec = _np_col(batch, n, "precursor_mz")
-                cm, ci, co, pint, nraw = clean_flat(mz, it, off, prec, cfg, valid)
+                if self.precleaned:
+                    _check_precleaned(mz, it, off, prec, cfg, n_rows)
+                    cm, ci, co = mz.astype(np.float32), it.astype(np.float32), off
+                    pint = np.full(n, np.nan)
+                    nraw = np.diff(off).astype(np.int32)
+                else:
+                    cm, ci, co, pint, nraw = clean_flat(mz, it, off, prec, cfg, valid)
+                # raw-spectrum values from the input (WP6 computed them before cleaning) win
+                nraw_in = _np_col(batch, n, "n_peaks_raw")
+                pint_in = _np_col(batch, n, "prec_intensity")
+                nraw = np.where(np.isfinite(nraw_in), nraw_in, nraw).astype(np.int32)
+                pint = np.where(np.isfinite(pint_in), pint_in, pint)
                 fm.write(cm.tobytes())
                 fi.write(ci.tobytes())
                 ce, nce = (_list_mean(batch.column("collision_energy_ev"))

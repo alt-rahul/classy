@@ -16,7 +16,7 @@ Columns:
 |---|---|---|---|---|---|
 | PubChem tier (120 shards) | `data/processed/db/pubchem/mass_XXXX.parquet`, `_index.json` | 90,719,171 | 2.19 GB | `f08bdde0be1c814797f3f16cbf6c4e764aba72ca84cafff9f5cbaf5ed9c96346` (`_index.json`) | `nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras (CID-Mass.gz 16 Nov 2026, CID-SMILES.gz 17 Nov 2026, CID-PMID.gz 29 Aug 2025, CID-InChI-Key.gz 17 Nov 2026); about 14 min wall, 2 cores, 7 GB RAM |
 | NP tier table | `data/processed/db/np/np.parquet` | 854,475 | 32.5 MB | `ba9fe19ddda93a5bc473d387f279bd1e1829fcbd430baa5859884157a477513f` | `nice -n 10 python -I scripts/build_npdb.py` (stages download, headers, table, fp, check); inputs: the 4 raw NP files below, downloaded 2026-11-18; about 10 min wall after downloads, 2 cores, 2.4 GB RAM peak |
-| NP tier fingerprints | `data/processed/db/np/np_fp.npy` | (854,475, 512) uint8 | 437.5 MB | `c14c99ba09e191255ea43ea404f4474d978963cea2c0d532d0d56d7fa4d603a9` | same command (`--stage fp` alone redoes it, 5.5 min on 2 cores); row-aligned to np.parquet, recipe in the WP2 section |
+| NP tier fingerprints | `data/processed/db/np/np_fp.npy` | (854,475, 512) uint8 | 437.5 MB | `a526ef2081ad323e26960db128e5902f21785bf6eeb882cd5197e3ad5920f9a9` | same command (`nice -n 10 python -I scripts/build_npdb.py --stage fp` alone redoes it, 11.3 min on 2 cores since the InChI round trip, rebuilt 2026-11-18); row-aligned to np.parquet, recipe in the WP2 section |
 | NP raw: COCONUT | `data/external/coconut/coconut_csv-11-2026.zip` | 738,793 | 248.0 MB | `74582c17f34ce33ea8ff27ba721a7bcfb654e2521aa94d6d3caf53f19159187a` | `https://coconut.s3.uni-jena.de/prod/downloads/2026-11/coconut_csv-11-2026.zip` (2026-11 release), `build_npdb.py --stage download` |
 | NP raw: NPAtlas | `data/external/npatlas/NPAtlas_download.tsv` | 36,454 | 33.7 MB | `4fa5ce93cf5e271d65649f7f5c40e031b1e3d59144cb50c12c5fc9ee041cc72b` | `https://www.npatlas.org/static/downloads/NPAtlas_download.tsv` (no version in the URL: a later download may differ) |
 | NP raw: LOTUS | `data/external/lotus/structure_metadata.tsv.gz` | 555,952 | 95.8 MB | `ceab19657fa362bf72937c92b6a709e13a2377782a2ac705afa1c0f7c037b51a` | Zenodo record 7534077 (2022-09-16), md5 `a791309a82df1d7ac538624f8f7856dc` |
@@ -164,16 +164,22 @@ RDKit mass vs the source mass of the supplying row: 854,475 of 854,475 within 0.
 ### np_fp.npy recipe (for `casmi.chem.morgan_fp` users)
 
 `np.load(..., mmap_mode="r")`, shape (854,475, 512), uint8, row i = np.parquet row i. Row i is
-`casmi.chem.morgan_fp(casmi.chem.std_mol(Chem.MolFromSmiles(smiles_i)))`, which equals
+`casmi.chem.morgan_fp(casmi.chem.fp_mol(Chem.MolFromSmiles(smiles_i)))`, which equals
 `casmi.chem.morgan_fps([smiles_i], standardize=True)[0][0]`: WP1 `std_mol` (RemoveHs, metal
-disconnection, normalise, reionise, uncharge, remove stereo), then
+disconnection, normalise, reionise, uncharge, remove stereo), then the InChI round trip
+`Chem.MolFromInchi(Chem.MolToInchi(mol))` without stereo (`Config.fp_inchi_roundtrip`, default
+True; the `std_mol` molecule is kept when the round trip fails or changes the heavy-atom formula,
+which happened for none of the 20,000 SMILES of the tautomer proxy in docs/EXPERIMENTS.md), then
 `rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=4096, includeChirality=False)`
 (other options at RDKit defaults), `GetFingerprintAsNumPy`, `np.packbits` with bit order "big"
 (bit j is `(row[j // 8] >> (7 - j % 8)) & 1`; unpack with
 `np.unpackbits(row, count=4096)` or `casmi.db.unpack_fp`). `std_mol` failed on 0 rows (the
 build would fingerprint the parsed molecule instead and list the rows in build_report.json).
 Spot check in `--stage check`: 1,000 sampled rows recomputed with `chem.morgan_fps`, 0
-mismatches. If WP1 changes `std_mol` or `morgan_fp`, rerun `build_npdb.py --stage fp`.
+mismatches (rerun after the InChI round-trip rebuild: all checks passed). If WP1 changes
+`std_mol`, `fp_mol` or `morgan_fp`, or a config flips `fp_inchi_roundtrip`, rerun
+`build_npdb.py --stage fp`. Before the round trip (std_mol only) the sha256 was
+`c14c99ba09e191255ea43ea404f4474d978963cea2c0d532d0d56d7fa4d603a9`.
 
 ### Lookup (casmi.db) on this build
 
@@ -202,8 +208,16 @@ Not built yet: `data/raw/train.parquet` has not arrived. Add the table row (size
 `library_info.json`) when `python scripts/build_library.py` has run on train.
 
 Command: `nice -n 10 python scripts/build_library.py` (default source `data/raw/train.parquet`;
-`--source data/processed/train/` reads WP6's parquet files instead, same columns; `--fake-test`
+`--source data/processed/train/spectra/ --precleaned` reads WP6's already-cleaned files instead,
+as `scripts/ingest_train.py --stage library` does: peaks are stored as given, not cleaned again,
+and their `n_peaks_raw` / `prec_intensity` (computed from the raw spectra) are kept; `--fake-test`
 builds a smoke-test library from `test.parquet` with one fake structure per molecule_id).
+`library_info.json` records `precleaned`. Input `n_peaks_raw` / `prec_intensity` columns win
+over recomputed values in either mode, because a second cleaning would give the cleaned count
+and 0, and `fpmodel` uses both as inputs (test time computes them from raw test spectra).
+Cleaning cleaned peaks again is not exactly idempotent: on the synthetic train 1 of 4,134
+spectra loses a peak whose relative intensity, stored as float32(0.005) = 0.0049999999, falls
+below the 0.5 percent floor.
 Output `data/processed/library/` (written to `library.building/`, renamed at the end):
 
 | file | format |
@@ -261,7 +275,7 @@ outputs of `scripts/train_fpmodel.py` (sizes measured on synthetic runs of the f
 | full refit | `models/fp_v1_full.npz` | as above | 108 MB | not built | `... --all --hours 4` |
 | per-bit calibration | `models/fp_v1_calibration.npz` | a, b (4263 each) + info_json | 70 KB | not built | written by the `--exclude-holdout` run (holdout molecules, test adducts, at most 16 spectra each) |
 | checkpoints | `models/fp_v1_*_ckpt.pt` | model + AdamW state | 324 MB each | not needed for inference | written every 20 min; `--resume` continues |
-| target cache | `data/processed/fp/targets_cache.npz` | one row per (ik14, SMILES hash) | about 170 MB for 275k structures | not built | built on first use (std_mol, Morgan 4096 + MACCS, about 1 ms per structure) |
+| target cache | `data/processed/fp/targets_cache.npz` | one row per (ik14, SMILES hash) | about 170 MB for 275k structures | not built | built on first use (`chem.fp_mol` = std_mol + InChI round trip, Morgan 4096 + MACCS, about 1.5 ms per structure); records `n_morgan`, `radius`, `inchi_roundtrip` and is ignored and rewritten when they differ from the config (caches without `inchi_roundtrip` count as no round trip) |
 | loss curves | `logs/fp_<tag>_curve.csv` | one row per 100 steps | small | - | written by every run |
 
 The `.npz` holds float arrays plus `spec_json` (bins, widths, metadata field names, cleaning
@@ -287,6 +301,11 @@ sha256 of `ingest_info.json`, `splits/holdout_v1.csv`, `queries_info.json`) afte
 | `structure_lib_counts.parquet` | (ik14, ingest_lib): n_spectra, n_test_adduct, n_query_ok, n_query_ok_pos / _neg / _qtof |
 | `public_test_matches.parquet`, `public_test_truth.parquet` | public test spectra found in train (by spectrum_id, else precursor within 1e-4 Da plus 90 percent of test peaks within 1e-5 Da) and the label per test molecule (PLAN 5.7; WP8's plumbing check uses the latter as truth) |
 | `ingest_info.json`, `tolerance.json` | counts, drop reasons and flags per library, timings; the 3.3 tolerance numbers |
+
+`--stage library` (`--library-out`, default `data/processed/library/`) builds the WP5 index from
+`spectra/` with `Library.build(..., precleaned=True)` when `ingest_info.json` records the
+config's cleaning settings (otherwise it cleans again, with a warning): the stored peaks are used
+as cleaned here and the raw-spectrum `n_peaks_raw` / `prec_intensity` are kept (see WP5 section).
 
 `data/processed/validation/` (`python scripts/make_splits.py`): `queries_<set>.parquet` (the 12
 test columns and Arrow types, nothing else), `truth_<set>.parquet`, `queries_info.json` (holdout

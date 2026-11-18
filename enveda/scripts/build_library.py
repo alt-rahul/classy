@@ -2,7 +2,7 @@
 
 Usage:
     python scripts/build_library.py                       # from data/raw/train.parquet
-    python scripts/build_library.py --source data/processed/train/   # WP6 parquet files
+    python scripts/build_library.py --source data/processed/train/spectra/ --precleaned  # WP6 files
     python scripts/build_library.py --fake-test --out <dir>   # smoke test from test.parquet
 
 Thin wrapper around ``casmi.library.Library.build``; see that module for the file formats.
@@ -29,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", type=Path, default=None, help="YAML config overrides")
     ap.add_argument("--batch-rows", type=int, default=None,
                     help="rows per streamed batch (default: Config.lib_build_batch_rows)")
+    ap.add_argument("--precleaned", action="store_true",
+                    help="source peaks are already cleaned with this config (WP6's "
+                         "data/processed/train/spectra/): store them as given")
     ap.add_argument("--fake-test", action="store_true",
                     help="build from test.parquet with fake labels (one structure per "
                          "molecule_id); for smoke tests before train exists")
@@ -51,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         if not Path(source).exists():
             lg.error("source not found: %s", source)
             return 2
-    lib = Library.build(source, cfg, out_dir=args.out, batch_rows=args.batch_rows)
+    lib = Library.build(source, cfg, out_dir=args.out, batch_rows=args.batch_rows,
+                        precleaned=args.precleaned)
     info = lib.info
     lg.info("library %s: %d spectra, %d structures, %d consensus, %d peaks; drops %s",
             lib.dir, info["n_spectra"], info["n_structures"], info["n_consensus"],
