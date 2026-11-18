@@ -16,6 +16,8 @@ Columns:
 
 | date | tag | config | git commit | cells | notes |
 |---|---|---|---|---|---|
+| 2026-11-18 | b0_npdb_prior | `configs/b0_npdb.yaml` | 42be57fd1474-dirty | none: no local validation exists yet (train not available, WP7 not built) | WP4 Baseline 0, NP tier only, prior-only fusion (PLAN 4.6) + assembly (4.8). `submissions/20261118_b0_npdb_prior.csv`, sha256 `5355da5c...3fcb8a`, 400 rows x 25 guesses. Public LB not meaningful (public test is drawn from train). Pool at 10 ppm: median 44.5, p05 10, p95 138, max 702; empty NP pool 1/400 (0.0025, m_2c2340); 94 molecules padded (89 from the 20 ppm window, 22 from nearest NP rows); 27 mkey duplicates skipped. 46 s cold mkey cache, 4.6 s warm, peak RSS 0.77 GB, 2 mkey workers. Cold and warm runs byte-identical. |
+| 2026-11-18 | b0b_pubchem_prior | `configs/b0b_pubchem.yaml` | 42be57fd1474-dirty | none: no local validation exists yet (train not available, WP7 not built) | WP4 Baseline 0b, NP + PubChem tiers, same fusion: every NP-tier candidate ranks above every PubChem-only one; NP rows also use PubChem pmid_count in the literature prior. `submissions/20261118_b0b_pubchem_prior.csv`, sha256 `b29a3a54...ad515f`, 400 x 25. Public LB not meaningful. Pool at 10 ppm: median 10,470, p05 3,289, p95 21,180, max 33,523; no empty pool; no padding; first guess equals b0's on 84.8 percent of molecules. 78 s with mkey cache off (50 s warm), peak RSS 1.66 GB, 8 batches of 50. Cache-off and cached runs byte-identical. |
 
 ## Notes and spikes
 

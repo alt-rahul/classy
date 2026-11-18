@@ -1,0 +1,8 @@
+# Baseline 0 (WP4): NP tier only, prior-only fallback fusion (PLAN.md 4.6, 4.8).
+# python scripts/predict.py --config configs/b0_npdb.yaml
+#   -> submissions/YYYYMMDD_b0_npdb_prior.csv
+# Overrides only; every other tunable keeps its default from src/casmi/config.py.
+submission_tag: b0_npdb_prior
+db_tiers: [np]
+n_jobs: 2                 # mkey worker processes (WP4 runs on at most 2 cores)
+batch_molecules: 400      # the NP tier is small in memory: one batch, fewer mkey rounds

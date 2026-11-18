@@ -26,6 +26,9 @@ class Config:
     seed: int = 20261118
     n_jobs: int = 4                          # worker processes / threads for heavy steps
     batch_molecules: int = 50                # molecules per inference batch (risk 14)
+    pipeline_stages: tuple = ("mass", "pool", "features", "score", "assemble")  # WP4: stage order (7)
+    pipeline_plugins: tuple = ()             # WP4: modules imported before a run; they register stages
+    submission_tag: str = ""                 # WP4: predict.py default name submissions/YYYYMMDD_<tag>.csv
 
     # --- Neutral mass and tolerances (3.2, 3.3) --------------------------------------
     mass_tol_ppm: float = 10.0               # window: |m - M| <= max(ppm * M * 1e-6, min_da)
@@ -96,6 +99,24 @@ class Config:
     fpm_aug_consensus_prob: float = 0.3
     fpm_bpi_log_min: float = 3.0             # molecule-level weight: clip(log10 bpi) / 3
     fpm_bpi_log_max: float = 6.0
+    # WP9 additions (4.4; values not fixed by the plan are marked "initial")
+    fpm_mass_min: float = 100.0              # training filter on label mass (4.4)
+    fpm_mass_max: float = 1300.0
+    fpm_aug_consensus_members_max: int = 3   # consensus of 2 to this many spectra (4.4)
+    fpm_aug_noise_mz_min: float = 20.0       # noise peaks m/z lower bound (test starts at 20)
+    fpm_weight_decay: float = 0.01           # AdamW (initial: torch default)
+    fpm_warmup_steps: int = 500              # linear LR warm-up (initial)
+    fpm_lr_min_frac: float = 0.0             # cosine decays to lr * this
+    fpm_epoch_size: int = 0                  # spectra drawn per epoch; 0 = n training spectra
+    fpm_checkpoint_minutes: float = 20.0     # checkpoint (and validation) interval
+    fpm_log_every_steps: int = 100           # loss-curve row interval
+    fpm_bf16: bool = False                   # bfloat16 autocast for the matmuls (AMX CPUs)
+    fpm_sparse_embedding: bool = False       # sparse embedding grads + SparseAdam for it
+    fpm_fused_adamw: bool = True             # torch fused AdamW kernel (same maths, faster)
+    fpm_prefetch: bool = True                # build the next batch in a background thread
+    fpm_val_max_spectra: int = 4096          # holdout spectra monitored during training
+    fpm_calib_l2: float = 1.0                # per-bit Platt scaling ridge toward identity
+    fpm_calib_max_spectra_per_molecule: int = 16   # holdout queries per molecule (5.2)
 
     # --- Pool and ranker (4.5) --------------------------------------------------------
     pool_cap: int = 30000
@@ -116,6 +137,17 @@ class Config:
     fusion_prior_coef: float = 0.1           # x log1p(pubmed_count)
     fusion_prior_cap: float = 0.3
     fusion_gen_factor: float = 0.5
+    # Baseline 0 prior (fusion.prior_score, WP4): monotone weighted sum, weights >= 0.
+    # NP-tier and LIB rows: the first seven; PubChem-only rows: the last two.
+    fusion_w_np_sources: float = 1.0         # x number of NP sources (coconut, npatlas, lotus, pubchemlite)
+    fusion_w_annotation: float = 0.5         # x coconut_annotation_level (0 to 5, missing 0)
+    fusion_w_literature: float = 1.0         # x log1p(max(pubmed_count, pmid_count) + n_citations)
+    fusion_w_organisms: float = 0.5          # x log1p(n_organisms)
+    fusion_w_patents: float = 0.1            # x log1p(patent_count)
+    fusion_w_anno_types: float = 0.5         # x log1p(anno_type_count)
+    fusion_w_collections: float = 0.25       # x log1p(n_collections)
+    fusion_w_pmid: float = 1.0               # PubChem-only: x log1p(pmid_count)
+    fusion_w_n_cids: float = 0.25            # PubChem-only: x log1p(n_cids)
 
     # --- Formula enumeration (3.4) ----------------------------------------------------
     formula_hc_min: float = 0.2
@@ -125,6 +157,10 @@ class Config:
     formula_p_max: int = 2
     formula_s_max: int = 3
     formula_halogen_max: int = 4
+    formula_c_min: int = 1                   # WP12: at least this many carbons (>= 1 always)
+    formula_expl_max: int = 2000             # WP12: formulas per molecule that get expl_frac
+    formula_strict_tol_da: float = 0.002     # WP12: expl_frac_strict tolerance, max(da, ppm)
+    formula_strict_tol_ppm: float = 10.0
 
     # --- Class 3 generator (4.7) ------------------------------------------------------
     gen_enabled: bool = True
@@ -135,10 +171,16 @@ class Config:
     gen_max_edits: int = 2
     gen_max_products: int = 3000
     gen_skip_lib_cos: float = 0.9
+    gen_max_raw_per_seed: int = 3000         # WP12: two-edit raw products explored per seed
+    gen_inverse_pairs: bool = False          # WP12: allow two edits whose deltas cancel
+    gen_move_second: bool = False            # WP12: allow a zero-delta move as second edit
 
     # --- Final list assembly (4.8, risk 13) -------------------------------------------
     top_k: int = 25
     mkey_timeout_s: float = 10.0             # not fixed by the plan; initial guess
+    mkey_cache: bool = True                  # WP4: read/write the disk mkey cache at inference
+    assemble_mkey_margin: int = 5            # WP4: candidates keyed per round beyond those still needed
+    pad_nearest_n: int = 100                 # WP4: NP-tier rows nearest in mass used as last padding
 
     # --- Validation (5) ---------------------------------------------------------------
     val_n_folds: int = 5
@@ -152,6 +194,16 @@ class Config:
                               (0.34, 0.33, 0.33))
     val_bootstrap_ci: float = 0.9
     val_bootstrap_n: int = 1000              # not fixed by the plan
+    # WP7 additions (5.2; values not fixed by the plan are marked "initial")
+    val_syn_np_fraction: float = 0.5         # SYN-TIMS share picked by highest NP-likeness
+    val_target_mass_min: float = 157.0       # hidden test mass range and median (COMPETITION.md)
+    val_target_mass_median: float = 348.0
+    val_target_mass_max: float = 1159.0
+    val_np_other_libs: tuple = ("riken", "gnps", "msdial", "massbank", "mona")
+    val_np_other_min_spectra: int = 2        # query-usable test-adduct spectra in the query library
+    val_np_other_mass_match: bool = True     # initial: NP-OTHER also follows the mass target (risk 17)
+    val_query_max_abs_ppm: float = 20.0      # initial: organisers' precursor cut (set from DATA_AUDIT)
+    val_query_peak_cut_da: float = 2.0       # test cleaning: drop peaks above precursor + this
 
     def __post_init__(self) -> None:
         for f in dataclasses.fields(self):

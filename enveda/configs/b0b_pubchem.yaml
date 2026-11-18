@@ -1,0 +1,8 @@
+# Baseline 0b (WP4): NP tier plus PubChem tier, prior-only fallback fusion (PLAN.md 4.6, 4.8).
+# NP-tier candidates always rank above PubChem-only candidates (fusion rules 2 and 3).
+# python scripts/predict.py --config configs/b0b_pubchem.yaml
+#   -> submissions/YYYYMMDD_b0b_pubchem_prior.csv
+submission_tag: b0b_pubchem_prior
+db_tiers: [np, pubchem]
+n_jobs: 2                 # mkey worker processes (WP4 runs on at most 2 cores)
+batch_molecules: 50       # about 10k candidates per molecule (PLAN risk 14)

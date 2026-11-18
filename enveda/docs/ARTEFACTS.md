@@ -230,3 +230,21 @@ file, about 3.5 GB peak RSS, about 2.3 GB on disk (more if train keeps more peak
 after cleaning: the cap is 100). Loaded 1M library: 1.1 GB RSS; 400 public-test molecules,
 mass search 0.4 s (0.9 s with an exclusion mask); open search 38 ms per consensus query.
 <!-- WP5:library:end -->
+
+<!-- WP4:submissions:start -->
+## Baseline 0 submissions and inference runs (WP4)
+
+Submissions are tracked in git (`submissions/`), produced by `scripts/predict.py` from
+`data/raw/test.parquet` (public test, 1,213 spectra, 400 molecules) on 2026-11-18, 2 mkey worker
+processes, under `nice -n 10` with other agents busy (load average about 4):
+
+| file | rows x guesses | bytes | sha256 | command | wall | peak RSS |
+|---|---|---|---|---|---|---|
+| `submissions/20261118_b0_npdb_prior.csv` | 400 x 25 | 409,015 | `5355da5cfdbeded78ad5e55892a0d03a332791e263bd3fe726510269ef3fcb8a` | `python scripts/predict.py --config configs/b0_npdb.yaml` | 46 s with an empty mkey cache, 4.6 s warm | 0.77 GB |
+| `submissions/20261118_b0b_pubchem_prior.csv` | 400 x 25 | 406,945 | `b29a3a540ecb3b6d1649e51cf0e473f0cf31d13c4059c49dc27ae5c756ad515f` | `python scripts/predict.py --config configs/b0b_pubchem.yaml` | 78 s with `mkey_cache: false`, 50 s warm | 1.66 GB |
+
+Each run writes `logs/predict_<tag>_<timestamp>.log` and the per-molecule report
+`logs/<file stem>_molecules.csv` (M, M_pool, pool_attempt, pool sizes, guesses by origin, skips,
+errors). Runs extend the mkey cache `data/processed/cache/mkey.parquet` (WP1 section); about
+12.5k entries after both runs. Cold, warm and cache-off runs give byte-identical files.
+<!-- WP4:submissions:end -->
