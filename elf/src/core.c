@@ -1,0 +1,640 @@
+// Core search engine for the elf calculator puzzles.
+// Level sets L0..L3 of values reachable from a pool with exact (tree) cost k.
+// L0..L2 keep witnesses; L3 keeps values only, witnesses are re-derived on demand.
+// Searches: pair (meet in the middle), window (t = X*Y +- Z), Horner candidates.
+// Build: gcc -O3 -march=native -shared -fPIC -o core.so core.c
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+typedef uint64_t u64;
+typedef int64_t i64;
+typedef unsigned __int128 u128;
+
+#define MAXLEV 8
+static u64 LIM = 0;
+static u64 *LV[MAXLEV];   // sorted values
+static u64 *LW[MAXLEV];   // witnesses (levels 1,2)
+static i64 LN[MAXLEV];
+static i64 LCAP[MAXLEV];
+static int NLEV = 0;
+
+// witness: op(3) la(2) ia(29) lb(2) ib(28)
+#define MKW(op, la, ia, lb, ib) (((u64)(op) << 61) | ((u64)(la) << 59) | ((u64)(ia) << 30) | ((u64)(lb) << 28) | (u64)(ib))
+#define W_OP(w) ((int)((w) >> 61))
+#define W_LA(w) ((int)(((w) >> 59) & 3))
+#define W_IA(w) ((i64)(((w) >> 30) & ((1ULL << 29) - 1)))
+#define W_LB(w) ((int)(((w) >> 28) & 3))
+#define W_IB(w) ((i64)((w) & ((1ULL << 28) - 1)))
+enum { OP_ADD = 0, OP_SUB = 1, OP_MUL = 2, OP_DIV = 3 };
+
+typedef struct { u64 v, w; } VW;
+static VW *TMP = NULL, *TMP2 = NULL; static i64 TMPCAP = 0;
+static u64 *K1 = NULL, *K2 = NULL; static i64 KCAP = 0;
+
+static void ensure_tmp(i64 n) {
+    if (n > TMPCAP) {
+        free(TMP); free(TMP2);
+        TMPCAP = n + n / 4 + 1024;
+        TMP = (VW *)malloc(sizeof(VW) * TMPCAP);
+        TMP2 = (VW *)malloc(sizeof(VW) * TMPCAP);
+    }
+}
+static void ensure_k(i64 n) {
+    if (n > KCAP) {
+        free(K1); free(K2);
+        KCAP = n + n / 4 + 1024;
+        K1 = (u64 *)malloc(8 * KCAP);
+        K2 = (u64 *)malloc(8 * KCAP);
+    }
+}
+static void ensure_level(int k, i64 n, int wit) {
+    if (n > LCAP[k]) {
+        free(LV[k]); free(LW[k]);
+        LCAP[k] = n + n / 4 + 1024;
+        LV[k] = (u64 *)malloc(8 * LCAP[k]);
+        LW[k] = wit ? (u64 *)malloc(8 * LCAP[k]) : NULL;
+    }
+}
+
+#define RB 12
+#define RMASK ((1 << RB) - 1)
+static i64 CNT[1 << 16];
+static void radix_vw(VW *a, i64 n) {
+    if (n < 2) return;
+    VW *src = a, *dst = TMP2;
+    u64 maxv = 0;
+    for (i64 i = 0; i < n; i++) if (a[i].v > maxv) maxv = a[i].v;
+    for (int sh = 0; sh == 0 || (sh < 64 && (maxv >> sh)); sh += RB) {
+        memset(CNT, 0, sizeof(i64) << RB);
+        for (i64 i = 0; i < n; i++) CNT[(src[i].v >> sh) & RMASK]++;
+        i64 s = 0;
+        for (int b = 0; b <= RMASK; b++) { i64 c = CNT[b]; CNT[b] = s; s += c; }
+        for (i64 i = 0; i < n; i++) dst[CNT[(src[i].v >> sh) & RMASK]++] = src[i];
+        VW *t = src; src = dst; dst = t;
+    }
+    if (src != a) memcpy(a, src, sizeof(VW) * n);
+}
+static void radix_u64(u64 *a, i64 n) {
+    if (n < 2) return;
+    u64 *src = a, *dst = K2;
+    u64 maxv = 0;
+    for (i64 i = 0; i < n; i++) if (a[i] > maxv) maxv = a[i];
+    for (int sh = 0; sh == 0 || (sh < 64 && (maxv >> sh)); sh += RB) {
+        memset(CNT, 0, sizeof(i64) << RB);
+        for (i64 i = 0; i < n; i++) CNT[(src[i] >> sh) & RMASK]++;
+        i64 s = 0;
+        for (int b = 0; b <= RMASK; b++) { i64 c = CNT[b]; CNT[b] = s; s += c; }
+        for (i64 i = 0; i < n; i++) dst[CNT[(src[i] >> sh) & RMASK]++] = src[i];
+        u64 *t = src; src = dst; dst = t;
+    }
+    if (src != a) memcpy(a, src, 8 * n);
+}
+
+static inline i64 bsearch_u64(const u64 *a, i64 n, u64 x) {
+    i64 lo = 0, hi = n;
+    while (lo < hi) { i64 m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; }
+    return (lo < n && a[lo] == x) ? lo : -1;
+}
+static inline i64 lower_bound(const u64 *a, i64 n, u64 x) {
+    i64 lo = 0, hi = n;
+    while (lo < hi) { i64 m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; }
+    return lo;
+}
+
+// ---- fast membership filter for all levels: bitset keyed by hash ----
+#define HBITS 27
+static u64 *HSET = NULL;  // 2^HBITS bits
+static inline u64 hmix(u64 x) { x ^= x >> 31; x *= 0x9E3779B97F4A7C15ULL; x ^= x >> 29; return x >> (64 - HBITS); }
+static void hset_build(void) {
+    if (!HSET) HSET = (u64 *)malloc((1ULL << HBITS) / 8);
+    memset(HSET, 0, (1ULL << HBITS) / 8);
+    for (int k = 0; k < NLEV; k++)
+        for (i64 i = 0; i < LN[k]; i++) { u64 h = hmix(LV[k][i]); HSET[h >> 6] |= 1ULL << (h & 63); }
+}
+static inline int hset_maybe(u64 x) { u64 h = hmix(x); return (HSET[h >> 6] >> (h & 63)) & 1; }
+// per-level filters: blocked Bloom filter, one 64-bit word per probe, 2 bits per element
+static u64 *LF[8]; static int LFB[8]; static i64 LFCAP[8];
+static inline u64 lfh(u64 x) { x ^= x >> 31; x *= 0x9E3779B97F4A7C15ULL; x ^= x >> 29; x *= 0xBF58476D1CE4E5B9ULL; x ^= x >> 32; return x; }
+static void lf_build(int k) {
+    int b = 10;  // log2 words
+    while ((1LL << b) * 64 < LN[k] * 16 && b < 28) b++;
+    i64 words = 1LL << b;
+    if (words > LFCAP[k]) { free(LF[k]); LF[k] = (u64 *)malloc(8 * words); LFCAP[k] = words; }
+    memset(LF[k], 0, 8 * words);
+    LFB[k] = b;
+    for (i64 i = 0; i < LN[k]; i++) { u64 h = lfh(LV[k][i]); LF[k][h >> (64 - b)] |= (1ULL << (h & 63)) | (1ULL << ((h >> 6) & 63)); }
+}
+static inline int lf_maybe(int k, u64 x) { u64 h = lfh(x); u64 m = (1ULL << (h & 63)) | (1ULL << ((h >> 6) & 63)); return (LF[k][h >> (64 - LFB[k])] & m) == m; }
+static inline int lookup(u64 x, int maxlev, i64 *idx) {
+    if (maxlev >= NLEV) maxlev = NLEV - 1;
+    for (int k = 0; k <= maxlev; k++) {
+        i64 i = bsearch_u64(LV[k], LN[k], x);
+        if (i >= 0) { *idx = i; return k; }
+    }
+    return -1;
+}
+static inline int lookup_fast(u64 x, int maxlev, i64 *idx) {
+    if (!hset_maybe(x)) return -1;
+    return lookup(x, maxlev, idx);
+}
+
+static void finalize_vw(int k, i64 n) {
+    radix_vw(TMP, n);
+    i64 m = 0;
+    for (i64 i = 0; i < n; i++) {
+        if (m > 0 && TMP[m - 1].v == TMP[i].v) continue;
+        TMP[m++] = TMP[i];
+    }
+    i64 ptr[MAXLEV] = {0};
+    i64 r = 0;
+    for (i64 i = 0; i < m; i++) {
+        u64 v = TMP[i].v; int dup = 0;
+        for (int j = 0; j < k; j++) {
+            while (ptr[j] < LN[j] && LV[j][ptr[j]] < v) ptr[j]++;
+            if (ptr[j] < LN[j] && LV[j][ptr[j]] == v) { dup = 1; break; }
+        }
+        if (!dup) TMP[r++] = TMP[i];
+    }
+    ensure_level(k, r, 1);
+    for (i64 i = 0; i < r; i++) { LV[k][i] = TMP[i].v; LW[k][i] = TMP[i].w; }
+    LN[k] = r;
+}
+static void finalize_k(int k, i64 n) {
+    radix_u64(K1, n);
+    i64 m = 0;
+    for (i64 i = 0; i < n; i++) {
+        if (m > 0 && K1[m - 1] == K1[i]) continue;
+        K1[m++] = K1[i];
+    }
+    i64 ptr[MAXLEV] = {0};
+    i64 r = 0;
+    for (i64 i = 0; i < m; i++) {
+        u64 v = K1[i]; int dup = 0;
+        for (int j = 0; j < k; j++) {
+            while (ptr[j] < LN[j] && LV[j][ptr[j]] < v) ptr[j]++;
+            if (ptr[j] < LN[j] && LV[j][ptr[j]] == v) { dup = 1; break; }
+        }
+        if (!dup) K1[r++] = v;
+    }
+    ensure_level(k, r, 0);
+    memcpy(LV[k], K1, 8 * r);
+    LN[k] = r;
+}
+
+static inline i64 emit_vw(i64 n, u64 x, int la, i64 ia, u64 y, int lb, i64 ib) {
+    u64 s = x + y;
+    if (s <= LIM) { TMP[n].v = s; TMP[n].w = MKW(OP_ADD, la, ia, lb, ib); n++; }
+    u128 p = (u128)x * y;
+    if (p <= LIM) { TMP[n].v = (u64)p; TMP[n].w = MKW(OP_MUL, la, ia, lb, ib); n++; }
+    if (x > y) {
+        TMP[n].v = x - y; TMP[n].w = MKW(OP_SUB, la, ia, lb, ib); n++;
+        if (y > 1 && x % y == 0) { TMP[n].v = x / y; TMP[n].w = MKW(OP_DIV, la, ia, lb, ib); n++; }
+    } else if (y > x) {
+        TMP[n].v = y - x; TMP[n].w = MKW(OP_SUB, lb, ib, la, ia); n++;
+        if (x > 1 && y % x == 0) { TMP[n].v = y / x; TMP[n].w = MKW(OP_DIV, lb, ib, la, ia); n++; }
+    } else {
+        TMP[n].v = 1; TMP[n].w = MKW(OP_DIV, la, ia, lb, ib); n++;
+    }
+    return n;
+}
+static inline i64 emit_k(i64 n, u64 x, u64 y) {
+    u64 s = x + y;
+    if (s <= LIM) K1[n++] = s;
+    u128 p = (u128)x * y;
+    if (p <= LIM) K1[n++] = (u64)p;
+    if (x > y) {
+        K1[n++] = x - y;
+        if (y > 1 && x % y == 0) K1[n++] = x / y;
+    } else if (y > x) {
+        K1[n++] = y - x;
+        if (x > 1 && y % x == 0) K1[n++] = y / x;
+    }
+    return n;
+}
+
+static int POOLN = 0;
+static u64 POOL[256];
+
+// divisibility test by precomputed constants: d = 2^k * o (o odd)
+typedef struct { u64 inv, lim; int k; } DivC;
+static inline DivC divc_make(u64 d) {
+    DivC c; c.k = __builtin_ctzll(d); u64 o = d >> c.k;
+    u64 inv = o; for (int i = 0; i < 6; i++) inv *= 2 - o * inv;
+    c.inv = inv; c.lim = ~0ULL / o; return c;
+}
+static inline int divc_test(u64 x, DivC c) {
+    if (x & ((1ULL << c.k) - 1)) return 0;
+    return ((x >> c.k) * c.inv) <= c.lim;
+}
+// emit x op y where y has precomputed divisor constants dc (y >= 1)
+static inline i64 emit_kd(i64 n, u64 x, u64 y, DivC dc) {
+    u64 s = x + y;
+    if (s <= LIM) K1[n++] = s;
+    u128 p = (u128)x * y;
+    if (p <= LIM) K1[n++] = (u64)p;
+    if (x > y) {
+        K1[n++] = x - y;
+        if (y > 1 && divc_test(x, dc)) K1[n++] = x / y;
+    } else if (y > x) {
+        K1[n++] = y - x;
+        if (x > 1 && y % x == 0) K1[n++] = y / x;
+    }
+    return n;
+}
+
+// Build levels 0..maxlev (maxlev < MAXLEV). L0..L2 keep witnesses. L3 is always complete
+// (all (2,0) and (1,1) combinations). Level k >= 4 is built from pairs (k-1-j, j), j = 0, 1, ...
+// while the cumulative candidate estimate stays <= cap (so deep levels are partial).
+// keep: if nonzero and deep levels exist, only L0..L2 are rebuilt and deep levels are kept (stale).
+static int HAVEDEEP = 0, DEEPN = 0;
+static unsigned PAIRMASK[MAXLEV];
+i64 build_levels(const u64 *pool, int n, u64 lim, int maxlev, int keep, i64 cap, i64 *out) {
+    LIM = lim;
+    if (maxlev >= MAXLEV) maxlev = MAXLEV - 1;
+    int keepdeep = keep && HAVEDEEP;
+    if (!keep) HAVEDEEP = 0;
+    POOLN = n;
+    for (int i = 0; i < n; i++) POOL[i] = pool[i];
+    ensure_tmp((i64)n * n * 4 + 64);
+    for (int i = 0; i < n; i++) { TMP[i].v = pool[i]; TMP[i].w = 0; }
+    finalize_vw(0, n);
+    NLEV = 1;
+    if (maxlev >= 1) {
+        i64 m = 0;
+        for (i64 i = 0; i < LN[0]; i++)
+            for (i64 j = i; j < LN[0]; j++)
+                m = emit_vw(m, LV[0][i], 0, i, LV[0][j], 0, j);
+        finalize_vw(1, m);
+        NLEV = 2;
+    }
+    if (maxlev >= 2) {
+        ensure_tmp(LN[1] * LN[0] * 4 + 64);
+        i64 m = 0;
+        for (i64 a = 0; a < LN[1]; a++) {
+            u64 x = LV[1][a];
+            for (i64 j = 0; j < LN[0]; j++) m = emit_vw(m, x, 1, a, LV[0][j], 0, j);
+        }
+        finalize_vw(2, m);
+        NLEV = 3;
+    }
+    if (keepdeep) {
+        NLEV = DEEPN;
+    } else if (maxlev >= 3) {
+        for (int k = 3; k <= maxlev; k++) {
+            unsigned mask = 0; double need = 0;
+            for (int j = 0; j <= (k - 1) / 2; j++) {
+                int i = k - 1 - j;
+                double c = (i == j) ? 2.0 * LN[i] * (LN[i] + 1) : 4.0 * LN[i] * LN[j];
+                if (k == 3 || need + c <= (double)cap) { mask |= 1u << j; need += c; }
+                else break;
+            }
+            if (!mask) break;
+            ensure_k((i64)need + 64);
+            i64 m = 0;
+            for (int j = 0; j <= (k - 1) / 2; j++) {
+                if (!(mask >> j & 1)) continue;
+                int i = k - 1 - j;
+                for (i64 b = 0; b < LN[j]; b++) {
+                    u64 y = LV[j][b];
+                    DivC dc = divc_make(y);
+                    i64 a0 = (i == j) ? b : 0;
+                    const u64 *X = LV[i];
+                    for (i64 a = a0; a < LN[i]; a++) m = emit_kd(m, X[a], y, dc);
+                }
+            }
+            finalize_k(k, m);
+            PAIRMASK[k] = mask;
+            NLEV = k + 1;
+            if (LN[k] == 0) { NLEV = k; break; }
+        }
+        HAVEDEEP = (NLEV > 3);
+        DEEPN = NLEV;
+    }
+    hset_build();
+    for (int k = 0; k < NLEV; k++) lf_build(k);
+    i64 tot = 0;
+    for (int k = 0; k < MAXLEV; k++) { out[k] = (k < NLEV) ? LN[k] : 0; tot += out[k]; }
+    return tot;
+}
+
+// ---------------- output of plans ----------------
+static u64 *OUT; static int OUTN; static int OUTCAP;
+static void emit_step(int op, u64 a, u64 b, u64 r) {
+    if (OUTN + 4 > OUTCAP) return;
+    OUT[OUTN++] = (u64)op; OUT[OUTN++] = a; OUT[OUTN++] = b; OUT[OUTN++] = r;
+}
+static int expand(int lev, i64 idx);
+// derive witness for v in L3: v = x op a (x in L2, a in L0) or x op y (x, y in L1)
+static int DERIVE_FAIL = 0;
+static inline int lk(u64 x, int maxlev, int *lev, i64 *idx) {
+    if (!hset_maybe(x)) return 0;
+    int k = lookup(x, maxlev, idx);
+    if (k < 0) return 0;
+    *lev = k; return 1;
+}
+static int derive_deep(u64 v, int k) {
+    i64 jx; int lj;
+    for (int j = 0; j <= (k - 1) / 2; j++) {
+        if (!(PAIRMASK[k] >> j & 1)) continue;
+        int lxm = k - 1 - j;
+        int ly = j;
+        for (i64 i = 0; i < LN[ly]; i++) {
+            u64 a = LV[ly][i];
+            if (a < v && lk(v - a, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_ADD, v - a, a, v); return 1; }
+            if (v + a <= LIM && lk(v + a, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_SUB, v + a, a, v); return 1; }
+            if (a > v && lk(a - v, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_SUB, a, a - v, v); return 1; }
+            if (a >= 2 && v % a == 0 && lk(v / a, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_MUL, v / a, a, v); return 1; }
+            if (a >= 2 && (u128)v * a <= LIM && lk(v * a, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_DIV, v * a, a, v); return 1; }
+            if (a > v && a % v == 0 && lk(a / v, lxm, &lj, &jx)) { expand(lj, jx); expand(ly, i); emit_step(OP_DIV, a, a / v, v); return 1; }
+        }
+    }
+    DERIVE_FAIL = 1;
+    return 0;
+}
+int derive_failed(void) { int f = DERIVE_FAIL; DERIVE_FAIL = 0; return f; }
+static int expand(int lev, i64 idx) {
+    if (lev == 0) return 1;
+    if (lev >= 3) return derive_deep(LV[lev][idx], lev);
+    u64 w = LW[lev][idx];
+    int la = W_LA(w), lb = W_LB(w);
+    i64 ia = W_IA(w), ib = W_IB(w);
+    expand(la, ia);
+    expand(lb, ib);
+    emit_step(W_OP(w), LV[la][ia], LV[lb][ib], LV[lev][idx]);
+    return 1;
+}
+int get_outn(void) { return OUTN; }
+
+int expand_value(u64 v, int maxlev, u64 *out, int outcap) {
+    OUT = out; OUTN = 0; OUTCAP = outcap;
+    i64 idx; int k = lookup(v, maxlev, &idx);
+    if (k < 0) return -1;
+    expand(k, idx);
+    return OUTN;
+}
+int level_of(u64 v, int maxlev) { i64 idx; return lookup(v, maxlev, &idx); }
+i64 level_size(int k) { return (k < NLEV) ? LN[k] : 0; }
+
+// ---------------- pair search ----------------
+#define SMALL 50000
+typedef struct { int op; int la; i64 ia; int lb; i64 ib; } PairRes;
+
+// t = u op w with u in level a, w in level b (either order for - and /)
+static int pair_search(u64 t, int a, int b, PairRes *res) {
+    const u64 *A = LV[a], *B = LV[b];
+    i64 na = LN[a], nb = LN[b];
+    if (nb <= SMALL || na <= SMALL) {
+        int sw = (nb > na);
+        const u64 *S = sw ? A : B; i64 ns = sw ? na : nb; int ls = sw ? a : b;
+        const u64 *G = sw ? B : A; i64 ng = sw ? nb : na; int lg = sw ? b : a;
+        i64 j;
+#define hset_maybe(x) lf_maybe(lg, (x))
+        for (i64 i = 0; i < ns; i++) {
+            u64 w = S[i];
+            if (w < t) {
+                u64 x = t - w;
+                if (hset_maybe(x) && (j = bsearch_u64(G, ng, x)) >= 0) { res->op = OP_ADD; res->la = lg; res->ia = j; res->lb = ls; res->ib = i; return 1; }
+            }
+            if (w + t <= LIM) {
+                u64 x = w + t;
+                if (hset_maybe(x) && (j = bsearch_u64(G, ng, x)) >= 0) { res->op = OP_SUB; res->la = lg; res->ia = j; res->lb = ls; res->ib = i; return 1; }
+            }
+            if (w > t) {
+                u64 x = w - t;
+                if (hset_maybe(x) && (j = bsearch_u64(G, ng, x)) >= 0) { res->op = OP_SUB; res->la = ls; res->ia = i; res->lb = lg; res->ib = j; return 1; }
+            }
+            if (w >= 2 && w < t && t % w == 0) {
+                u64 x = t / w;
+                if (hset_maybe(x) && (j = bsearch_u64(G, ng, x)) >= 0) { res->op = OP_MUL; res->la = lg; res->ia = j; res->lb = ls; res->ib = i; return 1; }
+            }
+            if (w >= 2) {
+                u128 p = (u128)t * w;
+                if (p <= LIM && hset_maybe((u64)p) && (j = bsearch_u64(G, ng, (u64)p)) >= 0) { res->op = OP_DIV; res->la = lg; res->ia = j; res->lb = ls; res->ib = i; return 1; }
+                if (w > t && w % t == 0) {
+                    u64 x = w / t;
+                    if (x >= 2 && hset_maybe(x) && (j = bsearch_u64(G, ng, x)) >= 0) { res->op = OP_DIV; res->la = ls; res->ia = i; res->lb = lg; res->ib = j; return 1; }
+                }
+            }
+        }
+        return 0;
+#undef hset_maybe
+    }
+    // both large: two-pointer for + and -
+    {
+        i64 i = 0, j = lower_bound(B, nb, t) - 1;
+        while (i < na && j >= 0) {
+            u64 u = A[i];
+            if (u >= t) break;
+            u64 s = u + B[j];
+            if (s == t) { res->op = OP_ADD; res->la = a; res->ia = i; res->lb = b; res->ib = j; return 1; }
+            if (s < t) i++; else j--;
+        }
+    }
+    for (int dir = 0; dir < 2; dir++) {
+        const u64 *X = dir ? B : A; i64 nx = dir ? nb : na; int lx = dir ? b : a;
+        const u64 *Y = dir ? A : B; i64 ny = dir ? na : nb; int ly = dir ? a : b;
+        i64 i = lower_bound(X, nx, t + 1), j = 0;
+        while (i < nx && j < ny) {
+            if (X[i] <= Y[j]) { i++; continue; }
+            u64 d = X[i] - Y[j];
+            if (d == t) { res->op = OP_SUB; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+            if (d < t) i++; else j++;
+        }
+        if (a == b) break;
+    }
+    for (int dir = 0; dir < 2; dir++) {
+        const u64 *X = dir ? B : A; i64 nx = dir ? nb : na; int lx = dir ? b : a;
+        const u64 *Y = dir ? A : B; i64 ny = dir ? na : nb; int ly = dir ? a : b;
+        for (i64 i = 0; i < nx; i++) {
+            u64 u = X[i];
+            if ((u128)u * u > t) break;
+            if (u >= 2 && t % u == 0) {
+                i64 j = bsearch_u64(Y, ny, t / u);
+                if (j >= 0) { res->op = OP_MUL; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+            }
+        }
+        for (i64 j = 0; j < ny; j++) {
+            u64 w = Y[j];
+            u128 p = (u128)t * w;
+            if (p > LIM) break;
+            if (w >= 2) {
+                i64 i = bsearch_u64(X, nx, (u64)p);
+                if (i >= 0) { res->op = OP_DIV; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+            }
+        }
+    }
+    return 0;
+}
+
+// cheapest (direct or pair) cost for t with cost <= maxcost. Returns cost or -1.
+int find_pair(u64 t, int maxcost, u64 *out, int outcap) {
+    OUT = out; OUTN = 0; OUTCAP = outcap;
+    i64 idx;
+    int k = lookup(t, NLEV - 1, &idx);
+    if (k >= 0) { if (k <= maxcost) { expand(k, idx); return k; } return -1; }
+    for (int c = (NLEV < 4 ? NLEV : 4); c <= maxcost; c++) {
+        for (int b = 0; b <= (c - 1) / 2; b++) {
+            int a = c - 1 - b;
+            if (a >= NLEV) continue;
+            PairRes r;
+            if (pair_search(t, a, b, &r)) {
+                expand(r.la, r.ia); expand(r.lb, r.ib);
+                emit_step(r.op, LV[r.la][r.ia], LV[r.lb][r.ib], t);
+                return c;
+            }
+        }
+    }
+    return -1;
+}
+
+// ---------------- window search: t = X*Y +- Z ----------------
+static u64 rng_state = 88172645463325252ULL;
+static inline u64 xrand(void) { rng_state ^= rng_state << 13; rng_state ^= rng_state >> 7; rng_state ^= rng_state << 17; return rng_state; }
+void set_seed(u64 s) { rng_state = s * 2654435761ULL + 88172645463325252ULL; if (!rng_state) rng_state = 1; }
+
+static double est_cands(u64 t, int lx, int ly, u64 zmax) {
+    const u64 *X = LV[lx]; i64 nx = LN[lx];
+    const u64 *Y = LV[ly]; i64 ny = LN[ly];
+    i64 hi = lower_bound(X, nx, t + zmax + 1);
+    i64 lo = lower_bound(X, nx, 2);
+    if (hi <= lo) return 0;
+    i64 cnt = hi - lo;
+    int ns = cnt < 256 ? (int)cnt : 256;
+    double tot = 0;
+    for (int s = 0; s < ns; s++) {
+        i64 i = (cnt <= 256) ? lo + s : lo + (i64)(xrand() % (u64)cnt);
+        u64 x = X[i];
+        u64 l = (t > zmax) ? t - zmax : 1;
+        u64 ylo = (l + x - 1) / x, yhi = (t + zmax) / x;
+        if (yhi < ylo) continue;
+        tot += (double)(lower_bound(Y, ny, yhi + 1) - lower_bound(Y, ny, ylo));
+    }
+    return tot * (double)cnt / ns;
+}
+
+static i64 WCAND = 0;
+i64 window_cands(void) { return WCAND; }
+
+// Tries costs c = 4 .. bestcost-1; for each (lx <= ly, lz = c-2-lx-ly) combo the window
+// half-width is the largest power of two whose estimated candidate count <= budget.
+static double WEMIN = 0.02;
+void set_wemin(double e) { WEMIN = e; }
+int find_window(u64 t, int bestcost, double budget, u64 *out, int outcap) {
+    OUT = out; OUTN = 0; OUTCAP = outcap;
+    int best = bestcost;
+    int bxl = -1, byl = -1, bzl = -1; i64 bxi = 0, byi = 0, bzi = 0; int bsign = 0;
+    int L = NLEV - 1;
+    WCAND = 0;
+    for (int c = 4; c < best; c++) {
+        for (int lx = 0; lx <= L; lx++) {
+            for (int ly = lx; ly <= L; ly++) {
+                int lz = c - 2 - lx - ly;
+                if (lz < 0 || lz > L) continue;
+                u64 zmax = t;
+                int bits = 64 - __builtin_clzll(t);
+                double e = est_cands(t, lx, ly, zmax);
+                while (e > budget && bits > 1) { bits--; zmax = 1ULL << bits; e = est_cands(t, lx, ly, zmax); }
+                {
+                    // expected hits: candidates * density of level lz below zmax
+                    double nzb = (double)lower_bound(LV[lz], LN[lz], zmax + 1);
+                    double eh = e * nzb / (double)zmax;
+                    if (eh < WEMIN) continue;
+                }
+                const u64 *X = LV[lx]; i64 nx = LN[lx];
+                const u64 *Y = LV[ly]; i64 ny = LN[ly];
+                const u64 *Z = LV[lz]; i64 nz = LN[lz];
+                u64 l = (t > zmax) ? t - zmax : 1;
+                u64 hiv = t + zmax;
+                double dl = (double)l, dh = (double)hiv;
+                i64 jp = ny;
+                // ring buffer of pending candidates for prefetching filter words
+                enum { WRB = 16 };
+                u64 rz[WRB]; i64 ri[WRB], rj[WRB]; int rs[WRB]; int rn = 0, rh = 0;
+                int fb = LFB[lz]; const u64 *F = LF[lz];
+#define FH(z) lfh(z)
+#define PROCESS_ONE() do { \
+                    u64 _z = rz[rh]; u64 _h = FH(_z); u64 _m = (1ULL << (_h & 63)) | (1ULL << ((_h >> 6) & 63)); \
+                    if ((F[_h >> (64 - fb)] & _m) == _m) { \
+                        i64 zi = bsearch_u64(Z, nz, _z); \
+                        if (zi >= 0) { best = c; bxl = lx; bxi = ri[rh]; byl = ly; byi = rj[rh]; bzl = lz; bzi = zi; bsign = rs[rh]; goto found; } \
+                    } \
+                    rh = (rh + 1) % WRB; rn--; } while (0)
+                for (i64 i = lower_bound(X, nx, 2); i < nx; i++) {
+                    u64 x = X[i];
+                    if (x > hiv) break;
+                    double dx = (double)x;
+                    u64 ylo = (u64)(dl / dx), yhi = (u64)(dh / dx);
+                    // exact correction: ylo = ceil(l/x), yhi = floor(hiv/x)
+                    while ((u128)ylo * x < l) ylo++;
+                    while (ylo > 1 && (u128)(ylo - 1) * x >= l) ylo--;
+                    while ((u128)yhi * x > hiv) yhi--;
+                    while ((u128)(yhi + 1) * x <= hiv) yhi++;
+                    if (ylo < 1) ylo = 1;
+                    while (jp > 0 && Y[jp - 1] >= ylo) jp--;
+                    if (yhi < ylo) continue;
+                    for (i64 j = jp; j < ny && Y[j] <= yhi; j++) {
+                        u128 p128 = (u128)x * Y[j];
+                        if (p128 > LIM) break;
+                        WCAND++;
+                        u64 p = (u64)p128;
+                        u64 z = (p < t) ? (t - p) : (p - t);
+                        if (z == 0) continue;
+                        if (rn == WRB) PROCESS_ONE();
+                        int slot = (rh + rn) % WRB;
+                        rz[slot] = z; ri[slot] = i; rj[slot] = j; rs[slot] = (p < t) ? 1 : -1; rn++;
+                        u64 h = FH(z);
+                        __builtin_prefetch(&F[h >> (64 - fb)]);
+                    }
+                }
+                while (rn > 0) PROCESS_ONE();
+#undef PROCESS_ONE
+#undef FH
+            }
+        }
+    }
+found:
+    if (bxl < 0) return -1;
+    {
+        expand(bxl, bxi); expand(byl, byi);
+        u64 x = LV[bxl][bxi], y = LV[byl][byi];
+        u64 p = x * y;
+        emit_step(OP_MUL, x, y, p);
+        expand(bzl, bzi);
+        u64 z = LV[bzl][bzi];
+        if (bsign > 0) emit_step(OP_ADD, p, z, t);
+        else emit_step(OP_SUB, p, z, t);
+    }
+    return best;
+}
+
+// Horner candidates: X in levels <= ax (X >= 2), Z = t mod X (variant +) or X - t mod X (variant -),
+// Z == 0 or Z in levels <= cz. Writes quads (X, Z, cx | (minus<<8), cz).
+int horner_candidates(u64 t, int ax, int cz, u64 *out, int maxq) {
+    if (ax >= NLEV) ax = NLEV - 1;
+    if (cz >= NLEV) cz = NLEV - 1;
+    int q = 0;
+    for (int lx = 0; lx <= ax; lx++) {
+        for (i64 i = 0; i < LN[lx]; i++) {
+            u64 x = LV[lx][i];
+            if (x < 2 || x > t / 2) continue;
+            u64 z = t % x;
+            i64 idx; int lz;
+            if (z == 0) {
+                if (q < maxq) { out[4*q] = x; out[4*q+1] = 0; out[4*q+2] = lx; out[4*q+3] = 0; q++; }
+                continue;
+            }
+            if ((lz = lookup_fast(z, cz, &idx)) >= 0 && q < maxq) { out[4*q] = x; out[4*q+1] = z; out[4*q+2] = lx; out[4*q+3] = lz; q++; }
+            u64 z2 = x - z;
+            u128 up = (u128)x * (t / x + 1);
+            if (up <= LIM && (lz = lookup_fast(z2, cz, &idx)) >= 0 && q < maxq) { out[4*q] = x; out[4*q+1] = z2; out[4*q+2] = lx | 256; out[4*q+3] = lz; q++; }
+        }
+    }
+    return q;
+}
+
+void level_hist(int k, i64 *h) {
+    for (int b = 0; b < 65; b++) h[b] = 0;
+    for (i64 i = 0; i < LN[k]; i++) h[64 - __builtin_clzll(LV[k][i])]++;
+}

@@ -1,0 +1,16 @@
+tag s3 todo 610
+10/610 scored_0391 len 265 old 2247 48.7s elapsed 49s improved 10 gain 9226
+14/610 scored_0407 len 196 old 1641 25.7s elapsed 85s improved 14 gain 14404
+20/610 scored_0405 len 415 old 2718 66.4s elapsed 116s improved 20 gain 23358
+26/610 scored_0419 len 28 old 168 1.8s elapsed 147s improved 26 gain 30642
+30/610 scored_0416 len 238 old 2023 60.7s elapsed 186s improved 30 gain 36432
+35/610 scored_0426 len 172 old 1389 20.0s elapsed 210s improved 35 gain 41817
+40/610 scored_0424 len 288 old 2361 68.2s elapsed 255s improved 40 gain 48119
+43/610 scored_0432 len 178 old 1484 40.4s elapsed 279s improved 43 gain 52382
+48/610 scored_0439 len 205 old 2110 43.0s elapsed 356s improved 48 gain 60638
+50/610 scored_0443 len 34 old 225 0.9s elapsed 362s improved 50 gain 62642
+54/610 scored_0445 len 340 old 2335 58.6s elapsed 424s improved 54 gain 69608
+60/610 scored_0448 len 286 old 2074 49.0s elapsed 473s improved 60 gain 79536
+61/610 scored_0452 len 280 old 2040 53.5s elapsed 503s improved 61 gain 81296
+70/610 scored_0458 len 179 old 1521 38.1s elapsed 552s improved 70 gain 92091
+76/610 scored_0469 len 112 old 896 8.3s elapsed 573s improved 76 gain 97943
