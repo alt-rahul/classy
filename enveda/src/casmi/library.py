@@ -1080,7 +1080,9 @@ class _Builder:
         self.n_input = n_rows
         if not parts:
             raise ValueError("empty source")
-        meta = pa.concat_tables(parts).to_pandas()
+        # permissive: a batch whose text column is all null (e.g. drug_plus
+        # instrument_type) arrives typed as null and must unify with string.
+        meta = pa.concat_tables(parts, promote_options="permissive").to_pandas()
         off = np.zeros(n_rows + 1, dtype=np.int64)
         np.cumsum(meta["n_peaks"].to_numpy(np.int64), out=off[1:])
         np.save(self.out / "_tmp_offsets.npy", off)
