@@ -50,12 +50,17 @@ Rules fixed here (the plan leaves them open):
   ``H + X + Na + K <= 2C + N + P + 3``. A formula that the adduct cannot be applied to
   (negative ion counts, e.g. no O for [M-H2O+H]+) explains nothing for that adduct's
   spectra and gets ``adduct_ok = False``.
-- Sub-formula masses are generated on the fly inside the numba kernel (heteroatoms outer,
-  then C, then H, pruned by the peak mass range, early exit once every peak is
-  explained) and looked up in a per-molecule bin table of the peaks. Generating them this
-  way costs less than sorting and caching per-formula mass lists (a C54H90O24 ion has
-  about 77k sub-formulas), so nothing is cached across formulas; the per-molecule
-  ``PeakSet`` is the reusable part.
+- Sub-formulas are never materialised. The numba kernel enumerates heteroatom
+  sub-counts (pruned by the largest peak mass) and, for each combination and each still
+  unexplained peak, solves for C and H directly (about U_H x 1.008 / 12 carbon values per
+  peak), with an early exit once every peak is explained. This replaced a first version
+  that walked all (heteroatoms, C, H) sub-formulas against a peak bin table: same
+  results, 16 to 20 times slower above 1,000 Da. Precomputing and caching sorted
+  sub-formula mass lists per formula (as PLAN.md 3.4 suggests) would cost more still: a
+  C54H90O24 ion has about 77k sub-formulas and an N-rich peptide formula millions. The
+  reusable per-molecule part is the ``PeakSet``. Measured: about 0.1 ms per formula at
+  450 Da and 0.6 ms at 1,100 Da, so ``formula_features`` explains at most
+  ``cfg.formula_expl_max`` formulas per molecule (see there).
 """
 
 from __future__ import annotations
@@ -401,8 +406,12 @@ def enumerate_formulas(mass: float, cfg: Config | None = None, tol_ppm: float | 
     cfg = cfg or Config()
     tol_ppm = cfg.mass_tol_ppm if tol_ppm is None else float(tol_ppm)
     min_tol_da = cfg.mass_tol_min_da if min_tol_da is None else float(min_tol_da)
-    empty = FormulaSet(np.zeros((0, 10), np.int16), np.zeros(0), np.zeros(0), float(mass))
-    if not (isinstance(mass, (int, float, np.floating)) and math.isfinite(mass) and mass > 0):
+    try:
+        mass = float(mass)
+    except (TypeError, ValueError):
+        mass = float("nan")
+    empty = FormulaSet(np.zeros((0, 10), np.int16), np.zeros(0), np.zeros(0), mass)
+    if not (math.isfinite(mass) and mass > 0):
         return empty
     lo, hi = _window(float(mass), tol_ppm, min_tol_da)
     em = _em10()

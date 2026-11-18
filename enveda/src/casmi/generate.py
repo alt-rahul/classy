@@ -447,11 +447,9 @@ def _paths(need: Sequence[tuple[int, ...]], max_edits: int, inverse_pairs: bool 
         if max_edits >= 1:
             for r in by.get(D, ()):
                 one.setdefault(r, set()).add(t)
-        if max_edits >= 2:
+        if max_edits >= 2 and (inverse_pairs or any(D)):
             for r1, rule in enumerate(RULES):
                 rest = tuple(a - b for a, b in zip(D, rule.delta))
-                if not inverse_pairs and not any(D):
-                    continue
                 for r2 in by.get(rest, ()):
                     if not move_second and not any(RULES[r2].delta):
                         continue
