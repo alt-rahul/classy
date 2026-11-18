@@ -20,12 +20,24 @@ PY="${PYTHON:-python}"
 nice -n 10 $PY -I scripts/build_npdb.py --stage all
 # WP3  PubChem tier: about 15 min wall (downloads at about 20 MB/s), 2 cores, 7 GB RAM; resumable, skips finished stages
 nice -n 10 $PY -I scripts/build_pubchem.py
-# WP6  train ingestion and audit  # $PY scripts/ingest_train.py
+# WP6  train ingestion + structure table + public test join + audit: estimate 10-15 min wall
+#      (streaming pass 3-5 min, RDKit structure pass about 3 min on 3 jobs, PubChem scan 1 min),
+#      3 cores, peak RSS about 4 GB (projected from synthetic runs, docs/ARTEFACTS.md WP6)
+nice -n 10 $PY scripts/ingest_train.py --stage all --n-jobs 3
+# WP6  metric keys of all structures: 1-2 h on 4 processes (normally a background job; resumable
+#      through data/processed/cache/mkey.parquet), then the audit again for the mkey items
+nice -n 10 $PY scripts/ingest_train.py --stage mkey --mkey-jobs 4
+nice -n 10 $PY scripts/ingest_train.py --stage audit
 # WP5  library index: streams train.parquet by row groups (or WP6's data/processed/train/
 #      via --source); estimate 10-20 min wall, 1 core, under 4 GB RAM (see docs/ARTEFACTS.md)
 $PY scripts/build_library.py
-# WP7  holdout splits             # $PY scripts/make_splits.py   (splits/ is tracked; normally skipped)
-# WP9  fingerprint model          # $PY scripts/train_fpmodel.py --exclude-holdout ; --all
+# WP7  query tables and truth keys from the tracked splits/holdout_v1.csv (drop --queries-only
+#      to redraw the split): estimate 20-40 min, mostly truth keys, 2 cores, under 3 GB RAM
+nice -n 10 $PY scripts/make_splits.py --queries-only --n-jobs 2
+# WP9  fingerprint model: each run --hours of training (default 4) plus about 10 min of loading
+#      and target fingerprints, 3 cores, <10 GB RAM; needs the WP5 library and WP7 splits
+nice -n 10 $PY -I scripts/train_fpmodel.py --exclude-holdout --resume
+nice -n 10 $PY -I scripts/train_fpmodel.py --all --resume
 # WP10 candidate features         # $PY scripts/build_features.py
 # WP11 ranker                     # $PY scripts/train_ranker.py
 # WP14 Kaggle bundle              # $PY scripts/package_kaggle.py

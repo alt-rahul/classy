@@ -23,3 +23,101 @@ Columns:
 
 Free-text results that do not fit a row (WP9 tautomer-consistency report, WP13 DreaMS spike,
 feature importance, mix-sensitivity tables) go below, each under a dated heading.
+
+### 2026-11-18 WP9 code phase: fingerprint-model throughput (synthetic data, no train yet)
+
+`python scripts/train_fpmodel.py --benchmark --bench-seconds 30 --threads 3 [--bench-peaks 32]`
+(results in `logs/fp_benchmark_{100,32}peaks.json`). Full training steps (augmentation,
+featurisation, forward, backward, AdamW) on synthetic batches of 512, 3 torch threads, machine
+shared with other agents (load average 1 to 3 during the runs). "Overlapped" = data preparation
+hidden by the prefetch thread (`fpm_prefetch`, the default in `train`).
+
+| variant | params | peaks / entries per spectrum | spectra/s (sync) | spectra/s (overlapped) | epoch of 2.3M |
+|---|---|---|---|---|---|
+| plan model (1024 wide, 2 blocks, 0.1 Da), fused AdamW | 27.0M | 100 / 181 | 3,656 | 3,934 | 10.5 min |
+| same, torch default (foreach) AdamW | 27.0M | 100 / 181 | 2,388 | 2,505 | 16.1 min |
+| plan model + bf16 autocast | 27.0M | 100 / 181 | 3,711 | 4,001 | 10.3 min |
+| plan model + bf16 + batch 1024 | 27.0M | 100 / 181 | 5,805 | 6,480 | 6.6 min |
+| width 512 (risk 8 fallback) | 13.0M | 100 / 181 | 6,957 | 8,050 | 5.5 min |
+| 0.2 Da bins (risk 8 fallback) | 16.8M | 100 / 181 | 4,216 | 4,597 | 9.1 min |
+| plan model, fused AdamW | 27.0M | 46 / 86 | 4,200 | 4,411 | 9.1 min |
+| plan model + bf16 + batch 1024 | 27.0M | 46 / 86 | 6,453 | 6,947 | 5.9 min |
+| width 512 | 13.0M | 46 / 86 | 6,300 | 6,850 | 6.1 min |
+
+Findings: the cost is dominated by the 20,000 x 1024 embedding (dense gradient fill, embedding-bag
+backward, AdamW update of 20.5M rows), not by the matmuls, so bf16 alone gains little. torch's
+fused AdamW kernel (`fpm_fused_adamw`, default True) makes the optimiser step 6x faster (94 ms to
+14 ms per step) and brings the plan model to about 4k spectra/s. Sparse embedding gradients with
+SparseAdam were slower (1,300 spectra/s). After cleaning, public test spectra have a mean of 32
+peaks (median 24): 27 fragment and 28 loss bins, 65 embedding entries per spectrum, so the
+100-peak benchmark is pessimistic. With the plan recipe a 4 h budget gives about 22 to 26 epochs
+of 2.3M spectra; no fallback is needed. Numpy inference of the full-size model on all 1,213
+public spectra: 1.4 s; `candidate_scores` on 30k packed candidates: 0.24 s.
+
+### 2026-11-18 WP9 tautomer consistency, proxy before train (NP tier vs PubChem tier)
+
+PLAN 4.4 asks for train SMILES vs PubChem SMILES of the same ik14 (needs train; rerun then with
+`casmi.fpmodel.fingerprint_consistency`). Proxy measured now: 10,000 random NP-tier structures
+whose SMILES come from COCONUT or LOTUS (not PubChemLite), matched by ik14 to the PubChem tier,
+Morgan 4096 on `chem.std_mol` of each SMILES (script kept in the WP9 scratchpad, 45 s).
+
+| comparison | mean Tanimoto | identical fingerprints | pairs with Tanimoto < 0.9 |
+|---|---|---|---|
+| `std_mol` (current) | 0.9925 | 97.96 % | 2.01 % |
+| `std_mol` + InChI round trip (`MolFromInchi(MolToInchi(m))`) | 1.0000 | 100.00 % | 0.00 % |
+
+The SMILES strings differ for 98 % of pairs, yet the fingerprints agree for 98 %. The failures are
+tautomers: COCONUT writes many amides as imidic acids (`N=C(O)`), plus lactam/lactim and
+keto/enol forms; their Tanimoto to the PubChem form is often 0.23 to 0.30, so the true candidate
+would get a wrecked fingerprint score in about 2 % of cases. The mean is above the plan's 0.95
+trigger, but the round trip removes the problem entirely here and costs 0.98 ms instead of
+0.44 ms per molecule (std_mol + Morgan). Recommendation for WP1/WP10: add the InChI round trip to
+the shared standardisation for both targets and candidates (then rebuild `np_fp.npy` and
+retrain), unless the train-vs-PubChem measurement after WP6 says otherwise.
+
+### 2026-11-18 WP13 DreaMS embeddings on CPU: not adopted (throughput just below 150/s, no gain over plain cosine where mass is controlled)
+
+`DreaMS_embedding_model_torchscript.pt` (HF `roman-bushuiev/DreaMS`, 468,475,544 bytes, sha256
+`df69866990b194b27d5497e440f87f6ceca568ee512e7c22cb1f278721376f0c`, in `data/external/dreams/`)
+loads with plain `torch.jit.load` on torch 2.15.0+cpu without the `dreams` package (0.4 s, 117.1M
+parameters, output 1024-d, finite for all 1,213 public test spectra). Input format (read from
+`dreams.utils.data.SpectrumPreprocessor` and the scripted graph): float32 `(batch, 101, 2)`; row 0
+is `(precursor_mz, 1.1)`; rows 1-100 are the 100 most intense peaks of the raw spectrum in
+ascending m/z with intensity divided by the base peak, raw m/z (the model divides m/z by 1000
+itself and builds Fourier features from raw m/z), zero rows (m/z 0) as padding at the end. Always
+pad to exactly 100 peaks: the model masks padded query rows but not padded keys, so trimming the
+padding changes the embedding (cosine 0.76 to 0.99 to the padded one, measured). As shipped it
+runs at 5.8 spectra/s on 1 thread with 2.4 GB peak RSS (it materialises a batch x 101 x 101 x 980
+graphormer tensor that is only ever summed over its last axis). A probe wrapper around the scripted
+submodules (pre-reduced bias, exact; bf16 weights with AMX; Fourier features kept in fp32; first
+Fourier linear split into cos and sin halves) reaches 34 to 39 spectra/s per thread at 0.84 GB
+with cosine >= 0.99993 to fp32. Plain bf16 autocast is wrong: the Fourier features (frequencies up
+to 5000 per Da) lose precision and embeddings end up at median cosine 0.31 to fp32. Scaling: 2
+torch threads in one process give only 43/s; 2 single-thread processes give 72.8/s together while
+other agents occupied the other 2 cores. 4-core extrapolation, assuming 4 independent
+single-thread processes with the per-process rate measured with all 4 cores busy (about 36/s):
+about 145/s (range 135 to 155), so 600k consensus spectra would take about 70 minutes and the
+fast path needs AMX-bf16 (fp32 gives about 6/s per core, about 24/s on 4 cores). Sanity
+check (fp32 embeddings; bf16 agrees to 3 decimals): embeddings separate molecules, but the gain
+over plain cosine comes from the precursor token. Precursor m/z alone finds a same-molecule
+nearest neighbour for 0.972 of spectra (same polarity). Inside a precursor window, where library
+search operates, plain cosine is as good or better: 0.02 Da window, 491 spectra that have both a
+same-molecule and an isobaric other-molecule candidate: plain 1.000, DreaMS 0.994, precursor-only
+0.965 (5 Da window, 1,073 spectra: 0.990 vs 0.993). Isobaric other-molecule pairs score a median
+0.396 with DreaMS against 0.016 with plain cosine. Feeding `casmi.spectra.clean`ed peaks instead
+of raw top 100 changes nothing material. Decision (PLAN WP13 rule, 150/s on 4 cores): drop. Other
+costs if revisited: 600k x 1024 fp16 embeddings are a 1.26 GB artefact on top of the 469 MB
+model. The open question (does DreaMS retrieve structurally closer analogs for classes 2 and 3,
+by hit Tanimoto) needs train and is untested. Probe scripts live only in the WP13 scratchpad.
+
+| measure (1,213 public test spectra, `nice -n 10`, shared machine) | DreaMS | plain cosine 0.01 Da on cleaned spectra |
+|---|---|---|
+| spectra/s, 1 thread, TorchScript as shipped, fp32 | 5.8 (2.36 GB RSS) | - |
+| spectra/s, 1 thread, bf16 probe wrapper, batch 8-16 | 34-39 (0.84 GB RSS) | - |
+| spectra/s, 4 cores (extrapolated from 1 process and 2 processes) | about 145 (135-155) | - |
+| median similarity, same vs different molecule, all pairs | 0.756 vs 0.195 | 0.695 vs 0.000 |
+| same, same-polarity pairs only | 0.820 vs 0.207 | 0.788 vs 0.006 |
+| NN is same molecule, any polarity (1,158 spectra with a partner) | 0.919 | 0.863 |
+| NN same molecule, same polarity (1,090; pos 916 / neg 174) | 0.975 (0.976 / 0.971) | 0.925 (0.921 / 0.943) |
+| same, precursor m/z alone as the similarity | 0.972 | 0.972 |
+| NN same molecule within 0.02 Da precursor window (491) | 0.994 | 1.000 |

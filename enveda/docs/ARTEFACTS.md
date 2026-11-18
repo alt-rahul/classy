@@ -248,3 +248,71 @@ Each run writes `logs/predict_<tag>_<timestamp>.log` and the per-molecule report
 errors). Runs extend the mkey cache `data/processed/cache/mkey.parquet` (WP1 section); about
 12.5k entries after both runs. Cold, warm and cache-off runs give byte-identical files.
 <!-- WP4:submissions:end -->
+
+<!-- WP9:fpmodel:start -->
+## Fingerprint model (WP9)
+
+Code phase only (2026-11-18): nothing below is built yet, because train has not arrived. Expected
+outputs of `scripts/train_fpmodel.py` (sizes measured on synthetic runs of the full-size model):
+
+| artefact | path | rows | size | sha256 | how to rebuild |
+|---|---|---|---|---|---|
+| holdout model | `models/fp_v1_holdout.npz` | 27.0M params (20000 x 1024 embedding, 2 x 1024 blocks, 4263 outputs) | 108 MB float32 (54 MB with `--float16`) | not built | `nice -n 10 python scripts/train_fpmodel.py --exclude-holdout --hours 4`; needs WP5 library + `splits/holdout_v1.csv`; 3 cores, under 10 GB RAM |
+| full refit | `models/fp_v1_full.npz` | as above | 108 MB | not built | `... --all --hours 4` |
+| per-bit calibration | `models/fp_v1_calibration.npz` | a, b (4263 each) + info_json | 70 KB | not built | written by the `--exclude-holdout` run (holdout molecules, test adducts, at most 16 spectra each) |
+| checkpoints | `models/fp_v1_*_ckpt.pt` | model + AdamW state | 324 MB each | not needed for inference | written every 20 min; `--resume` continues |
+| target cache | `data/processed/fp/targets_cache.npz` | one row per (ik14, SMILES hash) | about 170 MB for 275k structures | not built | built on first use (std_mol, Morgan 4096 + MACCS, about 1 ms per structure) |
+| loss curves | `logs/fp_<tag>_curve.csv` | one row per 100 steps | small | - | written by every run |
+
+The `.npz` holds float arrays plus `spec_json` (bins, widths, metadata field names, cleaning
+settings, training info); load with `casmi.fpmodel.FpModel.load` (numpy only, `allow_pickle=False`).
+Only the `.npz` files and the calibration go into the Kaggle bundle.
+<!-- WP9:fpmodel:end -->
+
+<!-- WP6:train:start -->
+## Train ingestion (WP6) and validation tables (WP7)
+
+Not built yet on the real data: `data/raw/train.parquet` has not arrived. Every format below was
+exercised end to end on the synthetic train file (`scripts/make_synthetic_train.py`, 4,145 rows,
+9 row groups, 543 structures, 11 libraries, 21 planted bad rows). Add the table rows (size,
+sha256 of `ingest_info.json`, `splits/holdout_v1.csv`, `queries_info.json`) after the real run.
+
+`data/processed/train/` (`nice -n 10 python scripts/ingest_train.py --stage all --n-jobs 3`):
+
+| file | content |
+|---|---|
+| `spectra/spectra_<lib>.parquet` | one file per ingest_lib (`lib_file_name`), the 20 train columns with `ms2_mzs` / `ms2_normalized_intensities` replaced by the cleaned peaks (`spectra.clean`, list<float32>), plus `source_row, polarity, adduct_test, adduct_known, instrument_family, mono_mass` (formula mass of `molecular_formula`), `m_spec` (neutral mass from precursor and adduct), `m_err_ppm`, `collision_energy` (mean eV), `n_energies, n_peaks_raw, n_peaks, n_above_precursor, prec_intensity, query_ok`. Own subdirectory so that `Library.build(data/processed/train/spectra/)` reads only spectra |
+| `meta.parquet` | one row per kept spectrum, no peaks (`META_COLUMNS` in the script), with `file_row` (row in its spectra file) and `source_row` (row in train.parquet) |
+| `structures.parquet` | one row per ik14, sorted by ik14: `smiles` (most frequent normalized_smiles), `formula` / `mono_mass` (RDKit on `chem.std_mol`), `formula_given` / `mass_given`, `charge`, `n_components`, `has_isotope`, `elements`, `elements_ok`, `n_carbon`, `db_filter_ok` (PLAN 2.2), `np_score`, `n_spectra`, `n_lib_<lib>`, `n_inst_<family>`, `n_add_<test adduct>` / `n_add_other` / `n_add_unparsed`, `n_pos`, `n_neg`, `n_query_ok`, `libs`, `n_libs`, `in_np`, `in_coconut`, `in_npatlas`, `in_lotus`, `in_pubchemlite`, `coconut_annotation_level`, `pubmed_count`, `n_citations`, `in_pubchem`, `pmid_count`, `mkey`, `mkey_status` (null until `--stage mkey`) |
+| `structure_lib_counts.parquet` | (ik14, ingest_lib): n_spectra, n_test_adduct, n_query_ok, n_query_ok_pos / _neg / _qtof |
+| `public_test_matches.parquet`, `public_test_truth.parquet` | public test spectra found in train (by spectrum_id, else precursor within 1e-4 Da plus 90 percent of test peaks within 1e-5 Da) and the label per test molecule (PLAN 5.7; WP8's plumbing check uses the latter as truth) |
+| `ingest_info.json`, `tolerance.json` | counts, drop reasons and flags per library, timings; the 3.3 tolerance numbers |
+
+`data/processed/validation/` (`python scripts/make_splits.py`): `queries_<set>.parquet` (the 12
+test columns and Arrow types, nothing else), `truth_<set>.parquet`, `queries_info.json` (holdout
+sha256, reference distributions), `truth_keys.parquet` (per holdout mkey the NP / PubChem ik14
+with that mkey, by tier set), and after each evaluation `results_<tag>.parquet` (per molecule
+and condition) and `summary_<tag>.json`. `splits/holdout_v1.csv` (tracked): ik14, mkey, set,
+fold, eligible_c1, query_lib, primary, mono_mass, formula.
+
+Measured on synthetic data (1 core, nice 10, machine load 7 to 10 from other agents):
+
+| step | input | wall | peak RSS | throughput |
+|---|---|---|---|---|
+| ingest pass 1, 20k-row batches, with public test join | 107,245 rows, 3 row groups, 411 MB | 13.1 s | 1.03 GB | 8,167 rows/s |
+| same, one 107k-row group, no test join | 107,245 rows, 1 row group | 5.5 s | 0.96 GB | 19,402 rows/s |
+| RDKit structure pass (formula, mass, NP score) | 543 structures | 0.7 s | | 808 /s per process |
+| PubChem membership scan (ik14 column of 120 shards) | 543 structures | 48 s | 1.9 GB (with NP tier) | fixed cost |
+| truth keys (PubChem 1 ppm window, formula, ring count, skeleton, mkey) | 40 NP-OTHER molecules | 13.2 s on 2 processes | | 0.33 s per molecule |
+| evaluate b0b (NP + PubChem tiers), 9 cells | 130 molecules x 3 conditions | 48 s | 1.8 GB | 0.12 s per molecule-cell |
+| evaluate b0 (NP tier) | same | 7.4 s | 1.2 GB | 0.019 s per molecule-cell |
+
+Projection for the real file (2.5M rows, about 275k structures): pass 1 2.5M / 8-19k rows/s =
+2.5 to 5 min; structures 275k / (3 x 800/s) = 2 min; PubChem scan 1 min; aggregation and
+audit about 1 min: **ingest about 10 min, peak RSS about 4 GB** (cumulative state measured at
+240 B per row: metadata 0.6 GB in Arrow plus 0.6 GB in pandas at the end, 0.2 GB of spectrum
+ids; per-batch memory stays flat, also with a single large row group). On disk: spectra files
+about 0.9 GB (373 B per row), meta.parquet about 0.1 GB. mkey pass: PLAN estimate 1 to 2 h on 4
+processes. Truth keys for about 6,250 holdout molecules: 15 to 35 min on 2 processes, cached.
+Evaluation of 6,250 molecules x 3 conditions: b0 about 6 min, b0b about 40 min.
+<!-- WP6:train:end -->
