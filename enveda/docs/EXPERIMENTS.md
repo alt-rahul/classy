@@ -119,5 +119,5 @@ by hit Tanimoto) needs train and is untested. Probe scripts live only in the WP1
 | same, same-polarity pairs only | 0.820 vs 0.207 | 0.788 vs 0.006 |
 | NN is same molecule, any polarity (1,158 spectra with a partner) | 0.919 | 0.863 |
 | NN same molecule, same polarity (1,090; pos 916 / neg 174) | 0.975 (0.976 / 0.971) | 0.925 (0.921 / 0.943) |
-| same, precursor m/z alone as the similarity | 0.972 | 0.972 |
+| control, no peaks used: NN by closest precursor m/z, same polarity (1,090) = 0.972 | - | - |
 | NN same molecule within 0.02 Da precursor window (491) | 0.994 | 1.000 |
