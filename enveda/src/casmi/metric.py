@@ -310,7 +310,13 @@ class _Cache:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with _FileLock(self.path.with_name(self.path.name + ".lock")):
-                merged = self._read_file()
+                try:
+                    merged = self._read_file()
+                except OSError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - corrupt file: rebuild it
+                    log.warning("mkey cache %s unreadable (%s); rewriting it", self.path, exc)
+                    merged = {}
                 for s, entry in self.pending.items():
                     old = merged.get(s)
                     if old is None or _better(entry, old):

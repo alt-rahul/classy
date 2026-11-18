@@ -56,3 +56,16 @@ Filter cascade (rows remaining after each filter, applied in this order, then ik
 
 Self-check: caffeine found=True (2,495 candidates at 10 ppm), paclitaxel found=True (849 candidates); 20 public-test masses at 10 ppm: candidates min 1,338, median 10,072, max 19,527, slowest query 0.032 s (pyarrow, one shard file read with row-group pruning).
 <!-- WP3:pubchem:end -->
+
+<!-- WP1:mkey-cache:start -->
+## mkey cache (WP1)
+
+`data/processed/cache/mkey.parquet` (`casmi.metric.default_cache_path()`): not a fixed artefact,
+created and extended on demand by `casmi.metric.mkeys(..., cache=True)`; delete it to start over.
+Columns: `smiles` (key, unique, file sorted by it), `mkey` (null if none), `status`
+(`ok` / `fail` = does not parse / `error` = canonicalisation or InChI failed / `timeout` = plain
+InChIKey first block used), `timeout_s` (limit in force when computed, `inf` = none), `rdkit`
+(version; rows from another RDKit version are ignored). Written under an fcntl lock via temp file
+and rename, so several processes may share it. Timeout rows are recomputed when a later call
+allows a longer timeout. On Kaggle (read-only artefacts) it is read if shipped and never written.
+<!-- WP1:mkey-cache:end -->

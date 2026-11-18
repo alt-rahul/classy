@@ -216,7 +216,7 @@ def _parse_body(body: str) -> tuple[int, float] | None:
 @lru_cache(maxsize=4096)
 def _parse(s: str, mode_sign: int) -> Adduct | None:
     text = re.sub(r"\s+", "", s)
-    text = text.rstrip("*.•")          # radical markers: [M]+*, [M]+.
+    text = text.rstrip("*.\u2022")          # radical markers: [M]+*, [M]+.
     if not text:
         return None
     if text.startswith("["):
