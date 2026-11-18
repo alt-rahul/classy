@@ -23,3 +23,6 @@ build/
 .pytest_cache/
 
 # Tracked on purpose (PLAN.md section 7), do not ignore: splits/, submissions/, configs/
+
+# Downloaded wheels (Kaggle wheels live in dist/)
+*.whl
