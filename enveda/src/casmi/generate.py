@@ -46,7 +46,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -496,10 +496,10 @@ def generate(seeds: Sequence[str | Chem.Mol] | pd.DataFrame,
     cap = int(cfg.gen_max_products if max_products is None else max_products)
     if isinstance(target_formulas, str):
         target_formulas = [target_formulas]
-    targets: list[tuple[int, ...]] = []
+    targets: list[tuple[int, ...] | None] = []
     for f in target_formulas:
         c = formula_counts(f)
-        targets.append(tuple(int(v) for v in c) if c is not None else None)  # type: ignore[arg-type]
+        targets.append(tuple(int(v) for v in c) if c is not None else None)
     seed_list = _as_seed_list(seeds)
     if seed_scores is None and isinstance(seeds, pd.DataFrame) and "score" in seeds.columns:
         seed_scores = list(seeds["score"])
