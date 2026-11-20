@@ -66,10 +66,40 @@ def store_total(st):
 def engine_files():
     out = [os.path.join(ENGDIR, 'elfopt.cpp')]
     out += sorted(glob_files(os.path.join(ENGDIR, 'wj')))
-    extra = os.path.join(ENGDIR, 'extra')
-    if os.path.isdir(extra):
-        out += sorted(glob_files(extra))
+    for sub in ('extra', 'leverB'):
+        d = os.path.join(ENGDIR, sub)
+        if os.path.isdir(d):
+            out += sorted(glob_files(d))
     return out
+
+
+# lever B (research/round4/beyond deep group rebuild): repo-relative files the kernel rebuilds as a tree
+LEVERB_FILES = ['src/common.py', 'src/validate.py', 'src/solver.py', 'src/engine.py', 'src/core.c'] + \
+    ['research/round4/beyond/' + f for f in ('wlib.py', 'dagutil.py', 'gcone.py', 'gcone2.py', 'jcone.py', 'grun.py',
+                                             'jrun.py', 'wrun.py', 'fam.json', 'wide2.cpp', 'sched.cpp')]
+
+
+def leverb_tree():
+    return {os.path.basename(f): f for f in LEVERB_FILES}
+
+
+def cmd_snapshot_leverb():
+    """Copy the current lever B sources into kaggle/engines/leverB (after a compile check), so the dataset only
+    changes when this is run deliberately."""
+    import py_compile
+    d = os.path.join(ENGDIR, 'leverB'); tmp = d + '.new'
+    if os.path.isdir(tmp): shutil.rmtree(tmp)
+    os.makedirs(tmp)
+    for f in LEVERB_FILES:
+        src = os.path.join(ROOT, f)
+        if f.endswith('.py'):
+            py_compile.compile(src, cfile=os.path.join(tmp, '.pyc_check'), doraise=True)
+        shutil.copy(src, os.path.join(tmp, os.path.basename(f)))
+    try: os.remove(os.path.join(tmp, '.pyc_check'))
+    except OSError: pass
+    if os.path.isdir(d): shutil.rmtree(d)
+    os.replace(tmp, d)
+    mlog('lever B sources snapshot into kaggle/engines/leverB (%d files)' % len(LEVERB_FILES))
 
 
 def glob_files(d):
@@ -142,11 +172,25 @@ def engine_fingerprint():
 
 
 # ------------------------------------------------------------------ kernels
+def profile_cfg(cfg, name):
+    pc = dict(cfg)
+    pc.update((cfg.get('profiles') or {}).get(name, {}))
+    pc['_profile'] = name
+    return pc
+
+
+def slot_profile(cfg, slot):
+    return (cfg.get('slot_profiles') or {}).get(slot, cfg.get('default_profile', 'public'))
+
+
 def kernel_text(cfg, ids, st, tag, seed):
     kc = {'ids': ids, 'budget_s': cfg['budget_s'], 'workers': cfg.get('workers', 4), 'engines': cfg['engines'],
           'seed': seed, 'tag': tag, 'write_every_s': cfg.get('write_every_s', 300),
           'random_engine': cfg.get('random_engine', True),
           'programs': {k: st[k]['prog'] for k in ids}}
+    if cfg.get('mode') == 'pydriver':
+        kc.update({'mode': 'pydriver', 'tree': leverb_tree(), 'builds': cfg['builds'], 'driver': cfg['driver'],
+                   'driver_tag': 'k', 'engines': []})
     src = open(os.path.join(HERE, 'runner.py')).read()
     return 'CONFIG = __import__("json").loads(%r)\n' % json.dumps(kc, separators=(',', ':')) + src
 
@@ -181,12 +225,47 @@ def choose_shard(cfg, s, st, n, exclude):
     return cand[:n]
 
 
+def lever_done(cfg, s):
+    done = set(s.get('lever_done', {}).get(cfg['lever_key'], []))
+    for f in cfg.get('skip_runs', []):
+        try:
+            for l in open(os.path.join(ROOT, f)):
+                try: done.add(json.loads(l)[0])
+                except (ValueError, IndexError): pass
+        except OSError:
+            pass
+    return done
+
+
+def choose_lever_shard(cfg, s, st, n, exclude):
+    ids = []
+    for f in cfg['id_lists']:
+        ids += [x.strip() for x in open(os.path.join(ROOT, f)).read().split(',') if x.strip()]
+    ids = list(dict.fromkeys(ids))
+    done = lever_done(cfg, s)
+    cand = [k for k in ids if k in st and k not in done and k not in exclude]
+    cand.sort(key=lambda k: (-st[k]['len'], k))
+    return cand[:n]
+
+
 def launch(cfg, s, slot, st):
     busy = set()
     for sl in s['slots'].values():
         if sl.get('state') in ('running', 'pushed', 'queued'):
             busy.update(sl.get('ids', []))
-    ids = choose_shard(cfg, s, st, int(cfg['puzzles_per_kernel']), busy)
+    name, seen = slot_profile(cfg, slot), set()
+    while True:   # follow the profile's 'then' chain until one has work
+        if s.get('profile_fail', {}).get(name, 0) >= 2 and name != 'public':
+            name = 'public'   # its last kernels died fast: do not burn slots on it (reset by a healthy harvest)
+        pc = profile_cfg(cfg, name); seen.add(name)
+        if pc.get('mode') == 'pydriver':
+            ids = choose_lever_shard(pc, s, st, int(pc['puzzles_per_kernel']), busy)
+        else:
+            ids = choose_shard(pc, s, st, int(pc['puzzles_per_kernel']), busy)
+        if ids or not pc.get('then') or pc['then'] in seen:
+            break
+        name = pc['then']
+    cfg = pc
     if not ids:
         return False
     seed = random.randrange(1, 2 ** 31)
@@ -202,14 +281,16 @@ def launch(cfg, s, slot, st):
     ver = r.get('versionNumber')
     s['slots'][slot] = {'state': 'pushed', 'ids': ids, 'tag': tag, 'version': ver, 'pushed_at': time.time(),
                         'budget_s': cfg['budget_s'], 'base_total': sum(st[k]['len'] for k in ids),
-                        'engines': [e['name'] for e in cfg['engines']], 'url': r.get('url')}
+                        'engines': [e['name'] for e in cfg['engines']] if cfg.get('mode') != 'pydriver' else [cfg['driver']['name']],
+                        'url': r.get('url'), 'profile': cfg['_profile'], 'lever_key': cfg.get('lever_key'),
+                        'workers': cfg.get('workers', 4)}
     for k in ids:
         s['launches'][k] = s['launches'].get(k, 0) + 1
         # provisional coverage so the next shard picks other puzzles; corrected at harvest
         s['coverage'][k] = s['coverage'].get(k, 0.0) + cfg['budget_s'] * cfg.get('workers', 4) / len(ids)
-    mlog('launched %s v%s: %d puzzles (len %d..%d, %d instr), budget %.1f h, engines %s' % (
-        slot, ver, len(ids), min(st[k]['len'] for k in ids), max(st[k]['len'] for k in ids),
-        sum(st[k]['len'] for k in ids), cfg['budget_s'] / 3600, ','.join(e['name'] for e in cfg['engines'])))
+    mlog('launched %s v%s [%s]: %d puzzles (len %d..%d, %d instr), budget %.1f h, engines %s' % (
+        slot, ver, cfg['_profile'], len(ids), min(st[k]['len'] for k in ids), max(st[k]['len'] for k in ids),
+        sum(st[k]['len'] for k in ids), cfg['budget_s'] / 3600, ','.join(s['slots'][slot]['engines'])))
     return True
 
 
@@ -251,10 +332,22 @@ def harvest(cfg, s, slot, sl, status):
     # bookkeeping: real core-seconds per puzzle and per engine
     spent = stats.get('spent_s', {})
     ids = sl.get('ids', [])
-    prov = sl.get('budget_s', 0) * cfg.get('workers', 4) / max(1, len(ids))
+    prov = sl.get('budget_s', 0) * sl.get('workers', cfg.get('workers', 4)) / max(1, len(ids))
     for k in ids:
         s['coverage'][k] = max(0.0, s['coverage'].get(k, 0.0) - prov) + float(spent.get(k, 0.0))
-    cpu = sum(float(v) for v in spent.values())
+    cpu = sum(float(e.get('cpu_s', 0.0)) for e in (stats.get('engines') or {}).values())
+    if sl.get('lever_key') and stats.get('finished') is not None:
+        d = s.setdefault('lever_done', {}).setdefault(sl['lever_key'], [])
+        d.extend(k for k in stats['finished'] if k not in d)
+    pt = s.setdefault('profile_totals', {}).setdefault(sl.get('profile', 'public'),
+                                                       {'kernels': 0, 'cpu_s': 0.0, 'gain_merged': 0, 'gain_kernel': 0})
+    pt['kernels'] += 1; pt['cpu_s'] += cpu; pt['gain_merged'] += gained; pt['gain_kernel'] += int(stats.get('gain', 0) or 0)
+    pf = s.setdefault('profile_fail', {}); prof = sl.get('profile', 'public')
+    if cpu < 600 and sl.get('budget_s', 0) > 3600:
+        pf[prof] = pf.get(prof, 0) + 1
+        mlog('  %s kernel died fast (%.0f CPU-s); profile %s fail count %d' % (slot, cpu, prof, pf[prof]))
+    else:
+        pf[prof] = 0
     for name, e in (stats.get('engines') or {}).items():
         t = s['engine_totals'].setdefault(name, {'runs': 0, 'cpu_s': 0.0, 'gain_kernel': 0, 'hits': 0})
         t['runs'] += e.get('runs', 0); t['cpu_s'] += e.get('cpu_s', 0.0)
@@ -265,8 +358,8 @@ def harvest(cfg, s, slot, sl, status):
     s['history'].append({'slot': slot, 'version': sl.get('version'), 'status': status, 'gain_store': gained,
                          'gain_kernel': stats.get('gain', 0), 'cpu_s': cpu, 'n': len(ids), 'finished_at': time.time(),
                          'store_total': tot, 'files': names})
-    mlog('harvested %s v%s (%s): kernel gain %s, merged gain %d on %d puzzles (%d rejected), %.1f CPU-h, store now %d%s' % (
-        slot, sl.get('version'), status, stats.get('gain', '?'), gained, n_imp, n_bad, cpu / 3600, tot,
+    mlog('harvested %s v%s [%s] (%s): kernel gain %s, merged gain %d on %d puzzles (%d rejected), %.1f CPU-h, store now %d%s' % (
+        slot, sl.get('version'), sl.get('profile', 'public'), status, stats.get('gain', '?'), gained, n_imp, n_bad, cpu / 3600, tot,
         ('; ' + ', '.join(details[:12])) if details else ''))
     if not stats:
         mlog('  %s produced no stats.json (files: %s); see %s' % (slot, names, dest))
@@ -346,6 +439,10 @@ def cmd_status():
                                                                      len(sl.get('ids', [])), age, sl.get('error', '')))
     cpu = s.get('total_cpu_s', 0) / 3600
     print('merged gain %d over %.1f CPU-h (%.2f per CPU-h)' % (s.get('total_gain', 0), cpu, s.get('total_gain', 0) / cpu if cpu else 0))
+    for name, t in sorted(s.get('profile_totals', {}).items()):
+        h = t['cpu_s'] / 3600
+        print('  profile %-12s kernels %3d  %7.1f CPU-h  merged gain %4d (%.2f per CPU-h), kernel gain %d' % (
+            name, t['kernels'], h, t['gain_merged'], t['gain_merged'] / h if h else 0, t['gain_kernel']))
     for name, t in sorted(s.get('engine_totals', {}).items()):
         h = t['cpu_s'] / 3600
         print('  %-22s runs %6d  %7.1f CPU-h  kernel gain %4d  (%.2f per CPU-h)' % (name, t['runs'], h, t['gain_kernel'],
@@ -398,6 +495,8 @@ if __name__ == '__main__':
         cmd_loop(int(a[a.index('--every') + 1]) if '--every' in a else 300)
     elif a[0] == 'status':
         cmd_status()
+    elif a[0] == 'snapshot-leverb':
+        cmd_snapshot_leverb()
     elif a[0] == 'localtest':
         cmd_localtest(a[1], a[2])
     else:

@@ -51,3 +51,10 @@ engines on shards of our store; a local loop harvests their outputs and merges t
 - 2026-11-20 20:20:19 UTC dataset versioned ograhulrajkumar/elf-compute with store total 133923 (27 files)
 - 2026-11-20 20:22:14 UTC elfopt/recomb now use elfopt_v (emits equal-length plateau programs); the runner keeps up to 8 value-distinct donors per puzzle for the seeded/diverse WJ engines
 - 2026-11-20 20:25:40 UTC dataset versioned ograhulrajkumar/elf-compute with store total 133923 (27 files)
+- 2026-11-20 20:52:55 UTC lever B sources snapshot into kaggle/engines/leverB (16 files)
+- 2026-11-20 20:55:45 UTC fleet code changed, re-exec
+- 2026-11-20 20:55:45 UTC fleet loop started (pid 16470)
+- 2026-11-20 20:56:16 UTC dataset versioned ograhulrajkumar/elf-compute with store total 133862 (43 files)
+- 2026-11-20 20:59:25 UTC coordinator request: lever B deep group rebuild (research/round4/beyond, FLEET_SPEC.md) added as runner mode 'pydriver' (kernel rebuilds src/ + beyond/ tree, kernel-local store, grun.py 8 4 ids 8 10, then jrun.py on 60-bit; skips puzzles in runs_g50/g60 resp. runs_j60). Sources frozen in kaggle/engines/leverB (refresh: python3 kaggle/fleet.py snapshot-leverb). Slots from the next launches: c01-c04 leverB_g (40 puzzles, 3.5 h), c05 public engines on the 80-180 band. Local pydriver test: scored_0001 229 -> 228 in 5 min on 1 core.
+- 2026-11-20 21:01:16 UTC fleet code changed, re-exec
+- 2026-11-20 21:01:16 UTC fleet loop started (pid 16470)

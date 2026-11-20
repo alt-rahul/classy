@@ -409,6 +409,93 @@ def run_recomb(e, exe, p, prog, variants, seed, deadline, t0, newvars):
     return best, time.time() - t0
 
 
+# ------------------------------------------------------------------ pydriver mode (our research drivers, e.g. lever B)
+def run_pydriver(cfg, dirs, outdir, P, start, ids):
+    """Rebuild a minimal repo tree in /tmp, run a research driver (grun.py / jrun.py) on the shard with a kernel-local
+    store, and export every program that got shorter (re-validated) as improved.csv."""
+    import signal
+    root = os.path.abspath(cfg.get('repo_root') or '/tmp/elfrepo')
+    for base, rel in cfg['tree'].items():
+        src = find_file(dirs, base)
+        if src is None: raise SystemExit('pydriver file %s not found' % base)
+        dst = os.path.join(root, rel); os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy(src, dst)
+    os.makedirs(os.path.join(root, 'data'), exist_ok=True); os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    shutil.copy(find_file(dirs, 'puzzles.csv'), os.path.join(root, 'data', 'puzzles.csv'))
+    store = {k: {'len': len(v), 'prog': v, 'tag': 'kg-start'} for k, v in start.items()}
+    spath = os.path.join(root, 'store', 'best.json')
+    with open(spath, 'w') as f: json.dump(store, f, separators=(',', ':'))
+    drv = cfg['driver']; ddir = os.path.join(root, drv['cwd'])
+    with open(os.path.join(ddir, 'ids_kshard.txt'), 'w') as f: f.write(','.join(ids))
+    for cmd in cfg.get('builds', []):
+        r = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+        if r.returncode != 0: raise SystemExit('build %s failed: %s' % (cmd, (r.stdout + r.stderr)[-1500:]))
+    log('built', [c[-1] for c in cfg.get('builds', [])])
+    tag = cfg.get('driver_tag', 'k')
+    nw = int(cfg.get('workers') or os.cpu_count() or 4)
+    args = [a.replace('{tag}', tag).replace('{workers}', str(nw)).replace('{idsfile}', 'ids_kshard.txt') for a in drv['args']]
+    name = drv.get('name', drv['script'])
+    dlog = open(os.path.join(outdir, 'driver.log'), 'w')
+    t0 = time.time(); deadline = T_START + float(cfg['budget_s'])
+    pr = subprocess.Popen([sys.executable, '-u', drv['script']] + args, cwd=ddir, stdout=dlog, stderr=subprocess.STDOUT,
+                          start_new_session=True, env=dict(os.environ, **drv.get('env', {})))
+    log('driver started:', drv['script'], ' '.join(args))
+    base = {k: start[k] for k in ids}
+
+    def export(final=False):
+        try: cur = json.load(open(spath))
+        except (OSError, ValueError): cur = None   # mid-write: try again next time
+        rows = []
+        if cur is not None:
+            for k in ids:
+                prog = cur.get(k, {}).get('prog')
+                if prog and len(prog) < len(base[k]) and not P[k].check(prog):
+                    rows.append((k, len(prog), len(base[k]), name, prog))
+            tmp = os.path.join(outdir, '.improved.csv.tmp')
+            with open(tmp, 'w', newline='', encoding='utf-8') as f:
+                w = csv.writer(f); w.writerow(['id', 'len', 'base_len', 'engine', 'program'])
+                for k, n, b, e, prog in rows: w.writerow([k, n, b, e, json.dumps(prog, separators=(',', ':'))])
+            os.replace(tmp, os.path.join(outdir, 'improved.csv'))
+        runs = []
+        rp = os.path.join(ddir, 'runs_%s.jsonl' % tag)
+        if os.path.exists(rp):
+            for l in open(rp):
+                try: runs.append(json.loads(l))
+                except ValueError: pass
+            shutil.copy(rp, os.path.join(outdir, 'runs_%s.jsonl' % tag))
+        ip = os.path.join(ddir, 'improved_%s.jsonl' % tag)
+        if os.path.exists(ip): shutil.copy(ip, os.path.join(outdir, 'improved_%s.jsonl' % tag))
+        el = time.time() - t0
+        gain = sum(r[2] - r[1] for r in rows)
+        stats = {'engines': {name: {'runs': len(runs), 'cpu_s': el * nw, 'gain': gain, 'hits': len(rows), 'invalid': 0}},
+                 'elapsed_s': time.time() - T_START, 'final': final, 'shard': ids, 'mode': 'pydriver',
+                 'spent_s': {r[0]: float(r[4]) for r in runs}, 'finished': [r[0] for r in runs],
+                 'gain': gain, 'tag': cfg.get('tag', ''), 'env': cfg.get('_env', {}), 'timeline': []}
+        tmp = os.path.join(outdir, '.stats.json.tmp')
+        with open(tmp, 'w') as f: json.dump(stats, f)
+        os.replace(tmp, os.path.join(outdir, 'stats.json'))
+        return stats
+
+    last = 0
+    while pr.poll() is None and time.time() < deadline:
+        time.sleep(10)
+        if time.time() - last > float(cfg.get('write_every_s', 300)):
+            st = export(); last = time.time()
+            log('progress: %d finished, gain %d' % (len(st['finished']), st['gain']))
+    if pr.poll() is None:
+        log('budget reached, stopping driver')
+        try: os.killpg(pr.pid, signal.SIGTERM)
+        except OSError: pass
+        try: pr.wait(60)
+        except subprocess.TimeoutExpired:
+            try: os.killpg(pr.pid, signal.SIGKILL)
+            except OSError: pass
+            pr.wait()
+    dlog.close()
+    st = export(final=True)
+    log('done: driver exit %s, %d of %d puzzles finished, gain %d on %d puzzles' % (
+        pr.returncode, len(st['finished']), len(ids), st['gain'], st['engines'][name]['hits']))
+
+
 # ------------------------------------------------------------------ main loop
 class State:
     def __init__(self, P, ids, start, outdir, cfg):
@@ -520,6 +607,9 @@ def main(cfg, dirs, outdir):
     env['self'] = SELF_PATH[0]
     log('env', env)
     cfg['_env'] = env
+    if cfg.get('mode') == 'pydriver':
+        cfg['_env'] = env
+        return run_pydriver(cfg, dirs, outdir, P, start, ids)
     exes = build_engines(cfg, dirs, bindir)
     cfg['engines'] = [e for e in cfg['engines'] if e['name'] in exes]
     S = State(P, ids, start, outdir, cfg)

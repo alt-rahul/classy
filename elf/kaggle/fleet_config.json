@@ -172,5 +172,125 @@
  ],
  "band_prior_gain": 1,
  "band_prior_hours": 20,
- "pseudo_coverage_s": 1800
+ "pseudo_coverage_s": 1800,
+ "profiles": {
+  "public": {},
+  "leverB_g": {
+   "mode": "pydriver",
+   "budget_s": 12600,
+   "puzzles_per_kernel": 40,
+   "workers": 4,
+   "builds": [
+    [
+     "gcc",
+     "-O3",
+     "-march=native",
+     "-shared",
+     "-fPIC",
+     "-o",
+     "src/core.so",
+     "src/core.c"
+    ],
+    [
+     "g++",
+     "-O3",
+     "-march=native",
+     "-o",
+     "research/round4/beyond/wide2",
+     "research/round4/beyond/wide2.cpp"
+    ],
+    [
+     "g++",
+     "-O3",
+     "-march=native",
+     "-o",
+     "research/round4/beyond/sched",
+     "research/round4/beyond/sched.cpp"
+    ]
+   ],
+   "driver": {
+    "cwd": "research/round4/beyond",
+    "script": "grun.py",
+    "name": "leverB_grun",
+    "args": [
+     "{tag}",
+     "8",
+     "{workers}",
+     "{idsfile}",
+     "8",
+     "10"
+    ]
+   },
+   "lever_key": "grun",
+   "id_lists": [
+    "research/round4/beyond/ids_50all.txt",
+    "research/round4/beyond/ids_60all.txt"
+   ],
+   "skip_runs": [
+    "research/round4/beyond/runs_g50.jsonl",
+    "research/round4/beyond/runs_g60.jsonl"
+   ],
+   "then": "leverB_j"
+  },
+  "leverB_j": {
+   "mode": "pydriver",
+   "budget_s": 12600,
+   "puzzles_per_kernel": 40,
+   "workers": 4,
+   "builds": [
+    [
+     "gcc",
+     "-O3",
+     "-march=native",
+     "-shared",
+     "-fPIC",
+     "-o",
+     "src/core.so",
+     "src/core.c"
+    ],
+    [
+     "g++",
+     "-O3",
+     "-march=native",
+     "-o",
+     "research/round4/beyond/wide2",
+     "research/round4/beyond/wide2.cpp"
+    ],
+    [
+     "g++",
+     "-O3",
+     "-march=native",
+     "-o",
+     "research/round4/beyond/sched",
+     "research/round4/beyond/sched.cpp"
+    ]
+   ],
+   "driver": {
+    "cwd": "research/round4/beyond",
+    "script": "jrun.py",
+    "name": "leverB_jrun",
+    "args": [
+     "{tag}",
+     "8",
+     "{workers}",
+     "{idsfile}"
+    ]
+   },
+   "lever_key": "jrun60",
+   "id_lists": [
+    "research/round4/beyond/ids_60all.txt"
+   ],
+   "skip_runs": [
+    "research/round4/beyond/runs_j60.jsonl"
+   ],
+   "then": "public"
+  }
+ },
+ "slot_profiles": {
+  "elf-c01": "leverB_g",
+  "elf-c02": "leverB_g",
+  "elf-c03": "leverB_g",
+  "elf-c04": "leverB_g",
+  "elf-c05": "public"
+ }
 }
