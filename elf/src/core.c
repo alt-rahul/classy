@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/mman.h>
 
 typedef uint64_t u64;
 typedef int64_t i64;
@@ -29,6 +30,15 @@ static int NLEV = 0;
 #define W_IB(w) ((i64)((w) & ((1ULL << 28) - 1)))
 enum { OP_ADD = 0, OP_SUB = 1, OP_MUL = 2, OP_DIV = 3 };
 
+// large buffers: 2 MB aligned with transparent huge pages (cuts TLB misses in scatters)
+static void *big_alloc(size_t bytes) {
+    size_t al = 1 << 21;
+    size_t sz = (bytes + al - 1) / al * al;
+    void *p = NULL;
+    if (posix_memalign(&p, al, sz)) return malloc(bytes);
+    madvise(p, sz, MADV_HUGEPAGE);
+    return p;
+}
 typedef struct { u64 v, w; } VW;
 static VW *TMP = NULL, *TMP2 = NULL; static i64 TMPCAP = 0;
 static u64 *K1 = NULL, *K2 = NULL; static i64 KCAP = 0;
@@ -37,24 +47,24 @@ static void ensure_tmp(i64 n) {
     if (n > TMPCAP) {
         free(TMP); free(TMP2);
         TMPCAP = n + n / 4 + 1024;
-        TMP = (VW *)malloc(sizeof(VW) * TMPCAP);
-        TMP2 = (VW *)malloc(sizeof(VW) * TMPCAP);
+        TMP = (VW *)big_alloc(sizeof(VW) * TMPCAP);
+        TMP2 = (VW *)big_alloc(sizeof(VW) * TMPCAP);
     }
 }
 static void ensure_k(i64 n) {
     if (n > KCAP) {
         free(K1); free(K2);
         KCAP = n + n / 4 + 1024;
-        K1 = (u64 *)malloc(8 * KCAP);
-        K2 = (u64 *)malloc(8 * KCAP);
+        K1 = (u64 *)big_alloc(8 * KCAP);
+        K2 = (u64 *)big_alloc(8 * KCAP);
     }
 }
 static void ensure_level(int k, i64 n, int wit) {
     if (n > LCAP[k]) {
         free(LV[k]); free(LW[k]);
         LCAP[k] = n + n / 4 + 1024;
-        LV[k] = (u64 *)malloc(8 * LCAP[k]);
-        LW[k] = wit ? (u64 *)malloc(8 * LCAP[k]) : NULL;
+        LV[k] = (u64 *)big_alloc(8 * LCAP[k]);
+        LW[k] = wit ? (u64 *)big_alloc(8 * LCAP[k]) : NULL;
     }
 }
 
@@ -121,7 +131,7 @@ static void lf_build(int k) {
     int b = 10;  // log2 words
     while ((1LL << b) * 64 < LN[k] * 16 && b < 28) b++;
     i64 words = 1LL << b;
-    if (words > LFCAP[k]) { free(LF[k]); LF[k] = (u64 *)malloc(8 * words); LFCAP[k] = words; }
+    if (words > LFCAP[k]) { free(LF[k]); LF[k] = (u64 *)big_alloc(8 * words); LFCAP[k] = words; }
     memset(LF[k], 0, 8 * words);
     LFB[k] = b;
     for (i64 i = 0; i < LN[k]; i++) { u64 h = lfh(LV[k][i]); LF[k][h >> (64 - b)] |= (1ULL << (h & 63)) | (1ULL << ((h >> 6) & 63)); }
@@ -136,8 +146,13 @@ static inline int lookup(u64 x, int maxlev, i64 *idx) {
     return -1;
 }
 static inline int lookup_fast(u64 x, int maxlev, i64 *idx) {
-    if (!hset_maybe(x)) return -1;
-    return lookup(x, maxlev, idx);
+    if (maxlev >= NLEV) maxlev = NLEV - 1;
+    for (int k = 0; k <= maxlev; k++) {
+        if (!lf_maybe(k, x)) continue;
+        i64 i = bsearch_u64(LV[k], LN[k], x);
+        if (i >= 0) { *idx = i; return k; }
+    }
+    return -1;
 }
 
 static void finalize_vw(int k, i64 n) {
@@ -161,8 +176,81 @@ static void finalize_vw(int k, i64 n) {
     for (i64 i = 0; i < r; i++) { LV[k][i] = TMP[i].v; LW[k][i] = TMP[i].w; }
     LN[k] = r;
 }
+// LSD radix of a[0..n) using tmp (>= n), result in a.
+static void radix_range(u64 *a, i64 n, u64 *tmp) {
+    if (n < 2) return;
+    u64 *src = a, *dst = tmp;
+    u64 maxv = 0, minv = ~0ULL;
+    for (i64 i = 0; i < n; i++) { if (a[i] > maxv) maxv = a[i]; if (a[i] < minv) minv = a[i]; }
+    u64 diff = maxv ^ minv;
+    static i64 C8[256];
+    for (int sh = 0; sh < 64 && (diff >> sh); sh += 8) {
+        memset(C8, 0, sizeof(C8));
+        for (i64 i = 0; i < n; i++) C8[(src[i] >> sh) & 255]++;
+        i64 s = 0;
+        for (int b = 0; b < 256; b++) { i64 c = C8[b]; C8[b] = s; s += c; }
+        for (i64 i = 0; i < n; i++) dst[C8[(src[i] >> sh) & 255]++] = src[i];
+        u64 *t = src; src = dst; dst = t;
+    }
+    if (src != a) memcpy(a, src, 8 * n);
+}
+static inline void isort_u64(u64 *a, i64 n) {
+    for (i64 i = 1; i < n; i++) {
+        u64 v = a[i]; i64 j = i - 1;
+        while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; }
+        a[j + 1] = v;
+    }
+}
+// two-level MSD radix on a log-linear key (bit length, then mantissa bits), then small sorts.
+#define D1N (65 * 64)
+static i64 MC1[D1N + 1];
+static inline int msd_d1(u64 v) { int b = 64 - __builtin_clzll(v); u64 x = v << (64 - b); return (b << 6) | (int)((x >> 57) & 63); }
+static i64 RCNT[24][4097];
+// a[0..n): all values have bit length b and equal bits of x = v << (64 - b) above position top.
+static void rec_sort(u64 *a, i64 n, u64 *tmp, int top, int b, int depth) {
+    if (n <= 32) { isort_u64(a, n); return; }
+    if (top <= 0) return;
+    if (depth >= 23) { radix_range(a, n, tmp); return; }
+    int lg = 63 - __builtin_clzll((u64)n);
+    int w = lg - 1; if (w < 4) w = 4; if (w > 12) w = 12; if (w > top) w = top;
+    int nb = 1 << w; u64 msk = (u64)nb - 1;
+    i64 *cnt = RCNT[depth];
+    memset(cnt, 0, 8 * (nb + 1));
+    int sh = 64 - b, s2 = top - w;
+    for (i64 i = 0; i < n; i++) cnt[(((a[i] << sh) >> s2) & msk) + 1]++;
+    for (int d = 0; d < nb; d++) cnt[d + 1] += cnt[d];
+    // scatter a -> tmp using running positions (cnt[d] = start of d); restore starts afterwards
+    for (i64 i = 0; i < n; i++) { u64 v = a[i]; tmp[cnt[((v << sh) >> s2) & msk]++] = v; }
+    memcpy(a, tmp, 8 * n);
+    i64 prev = 0;
+    for (int d = 0; d < nb; d++) {
+        i64 end = cnt[d];  // after scatter cnt[d] = end of bucket d
+        i64 m = end - prev;
+        if (m > 1) rec_sort(a + prev, m, tmp + prev, s2, b, depth + 1);
+        prev = end;
+    }
+}
+static void msd_sort(u64 *a, i64 n, u64 *tmp) {
+    if (n < 4096) { radix_range(a, n, tmp); return; }
+    memset(MC1, 0, sizeof(MC1));
+    for (i64 i = 0; i < n; i++) MC1[msd_d1(a[i])]++;
+    i64 s = 0;
+    for (int b = 0; b < D1N; b++) { i64 c = MC1[b]; MC1[b] = s; s += c; }
+    MC1[D1N] = n;
+    {
+        static i64 pos[D1N];
+        memcpy(pos, MC1, sizeof(pos));
+        for (i64 i = 0; i < n; i++) { u64 v = a[i]; tmp[pos[msd_d1(v)]++] = v; }
+    }
+    for (int bk = 0; bk < D1N; bk++) {
+        i64 st = MC1[bk], m = MC1[bk + 1] - st;
+        if (m <= 0) continue;
+        memcpy(a + st, tmp + st, 8 * m);
+        if (m > 1) rec_sort(a + st, m, tmp + st, 57, bk >> 6, 0);
+    }
+}
 static void finalize_k(int k, i64 n) {
-    radix_u64(K1, n);
+    msd_sort(K1, n, K2);
     i64 m = 0;
     for (i64 i = 0; i < n; i++) {
         if (m > 0 && K1[m - 1] == K1[i]) continue;
@@ -312,8 +400,7 @@ i64 build_levels(const u64 *pool, int n, u64 lim, int maxlev, int keep, i64 cap,
         HAVEDEEP = (NLEV > 3);
         DEEPN = NLEV;
     }
-    hset_build();
-    for (int k = 0; k < NLEV; k++) lf_build(k);
+    for (int k = 0; k < NLEV; k++) if (!keepdeep || k < 3) lf_build(k);
     i64 tot = 0;
     for (int k = 0; k < MAXLEV; k++) { out[k] = (k < NLEV) ? LN[k] : 0; tot += out[k]; }
     return tot;
@@ -329,8 +416,7 @@ static int expand(int lev, i64 idx);
 // derive witness for v in L3: v = x op a (x in L2, a in L0) or x op y (x, y in L1)
 static int DERIVE_FAIL = 0;
 static inline int lk(u64 x, int maxlev, int *lev, i64 *idx) {
-    if (!hset_maybe(x)) return 0;
-    int k = lookup(x, maxlev, idx);
+    int k = lookup_fast(x, maxlev, idx);
     if (k < 0) return 0;
     *lev = k; return 1;
 }
@@ -637,4 +723,59 @@ int horner_candidates(u64 t, int ax, int cz, u64 *out, int maxq) {
 void level_hist(int k, i64 *h) {
     for (int b = 0; b < 65; b++) h[b] = 0;
     for (i64 i = 0; i < LN[k]; i++) h[64 - __builtin_clzll(LV[k][i])]++;
+}
+
+// ---------------- regret pick (batch over all uncovered targets) ----------------
+// For each target the cheapest plan (direct lookup, or pair search at cost 4..maxc, the same search
+// order as find_pair). Commits argmin of (cost - alpha * bitlen, cost, t) lexicographically.
+// Searches run breadth-first by cost and skip any (target, cost) that cannot beat the current best.
+// Returns the chosen index (or -1); writes the plan to out and the cost to *cost_out.
+int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outcap, int *cost_out) {
+    OUT = out; OUTN = 0; OUTCAP = outcap;
+    static int st_lev[4096]; static i64 st_idx[4096]; static int st_c[4096]; static PairRes st_r[4096];
+    static char alive[4096];
+    if (n > 4096) n = 4096;
+    int bi = -1; double bsc = 0; int bc = 0;
+#define BETTER(sc, c, t) (bi < 0 || (sc) < bsc || ((sc) == bsc && ((c) < bc || ((c) == bc && (t) < ts[bi]))))
+    for (int i = 0; i < n; i++) {
+        u64 t = ts[i];
+        i64 idx; int k = lookup(t, NLEV - 1, &idx);
+        st_c[i] = -1; alive[i] = 1;
+        if (k >= 0) {
+            alive[i] = 0;
+            if (k <= maxc) {
+                st_lev[i] = k; st_idx[i] = idx; st_c[i] = k;
+                double sc = (double)k - alpha * (double)(64 - __builtin_clzll(t));
+                if (BETTER(sc, k, t)) { bi = i; bsc = sc; bc = k; }
+            }
+        }
+    }
+    for (int c = (NLEV < 4 ? NLEV : 4); c <= maxc; c++) {
+        for (int i = 0; i < n; i++) {
+            if (!alive[i]) continue;
+            u64 t = ts[i];
+            double sc = (double)c - alpha * (double)(64 - __builtin_clzll(t));
+            if (!BETTER(sc, c, t)) { alive[i] = 0; continue; }
+            for (int b = 0; b <= (c - 1) / 2; b++) {
+                int a = c - 1 - b;
+                if (a >= NLEV) continue;
+                PairRes r;
+                if (pair_search(t, a, b, &r)) {
+                    st_r[i] = r; st_c[i] = c; st_lev[i] = -1; alive[i] = 0;
+                    bi = i; bsc = sc; bc = c;
+                    break;
+                }
+            }
+        }
+    }
+#undef BETTER
+    if (bi < 0) return -1;
+    if (st_lev[bi] >= 0) expand(st_lev[bi], st_idx[bi]);
+    else {
+        PairRes r = st_r[bi];
+        expand(r.la, r.ia); expand(r.lb, r.ib);
+        emit_step(r.op, LV[r.la][r.ia], LV[r.lb][r.ib], ts[bi]);
+    }
+    *cost_out = bc;
+    return bi;
 }

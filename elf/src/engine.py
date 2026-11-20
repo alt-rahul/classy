@@ -1,7 +1,7 @@
 """ctypes wrapper around core.so (level sets, pair search, window search, Horner candidates)."""
 import ctypes, os
 HERE = os.path.dirname(os.path.abspath(__file__))
-_lib = ctypes.CDLL(os.path.join(HERE, 'core.so'))
+_lib = ctypes.CDLL(os.environ.get('ELF_CORE') or os.path.join(HERE, 'core.so'))
 u64p = ctypes.POINTER(ctypes.c_uint64)
 i64p = ctypes.POINTER(ctypes.c_int64)
 C = ctypes
@@ -26,6 +26,10 @@ _lib.derive_failed.restype = C.c_int
 _lib.set_wemin.argtypes = [C.c_double]
 _lib.window_cands.restype = C.c_int64
 _lib.level_hist.argtypes = [C.c_int, i64p]
+if hasattr(_lib, 'regret_pick'):
+    _lib.regret_pick.restype = C.c_int
+    _lib.regret_pick.argtypes = [u64p, C.c_int, C.c_int, C.c_double, u64p, C.c_int, C.POINTER(C.c_int)]
+_RC = C.c_int(0)
 
 OPS = '+-*/'
 _BUF = (C.c_uint64 * 8192)()
@@ -104,3 +108,13 @@ def set_wemin(e):
 
 def derive_failed():
     return _lib.derive_failed()
+
+
+def regret_pick(ts, maxc, alpha):
+    """Regret ordering pick over targets ts (fresh levels required). Returns (cost, t, steps) or None."""
+    n = len(ts)
+    arr = (C.c_uint64 * n)(*ts)
+    i = _lib.regret_pick(arr, n, maxc, alpha, _BUF, 8192, C.byref(_RC))
+    if i < 0:
+        return None
+    return _RC.value, ts[i], _steps(_lib.get_outn())

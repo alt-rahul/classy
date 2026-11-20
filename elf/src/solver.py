@@ -129,6 +129,11 @@ class Cfg:
         self.evict_size = 0       # 1: evict largest values first (by bit length, LRU within)
         self.evict_unused = 0     # 1: evict values never used as an operand first (LRU within)
         self.evict_big = 0        # >0: evict values with bit_length >= (min target bits - evict_big) first
+        self.perm_seed = -1       # >=0: random target order (item 3/4): take any target costing <= perm_free,
+        self.perm_free = 2        #      else the first uncovered target of a seeded random permutation
+        self.perm_mix = 1.0       # fraction of rounds that follow the permutation (rest: normal greedy round)
+        self.regret = 0.0         # >0: regret ordering, commit argmin(cost - regret * bits) over pair plans <= regret_maxc
+        self.regret_maxc = 7
         self.__dict__.update(kw)
 
 
@@ -282,6 +287,63 @@ class Solver:
         assert not engine.derive_failed()
         return best
 
+    def perm_round(self, ts, pool_order, pool):
+        cfg, limit = self.cfg, self.p.limit
+        if not hasattr(self, 'rank'):
+            r = random.Random(cfg.perm_seed)
+            tl = sorted(set(self.p.targets))
+            r.shuffle(tl)
+            self.rank = {t: i for i, t in enumerate(tl)}
+        if self.rng.random() >= cfg.perm_mix:
+            return self.search_round(ts, pool_order, pool)
+        engine.build(pool_order, limit, 2, 1)
+        best = None
+        if cfg.perm_free >= 0:
+            for t in ts:
+                mc = cfg.perm_free if best is None else best[0] - 1
+                if mc < 0:
+                    break
+                r = engine.find_pair(t, mc)
+                if r is not None and (best is None or r[0] < best[0]):
+                    best = (r[0], t, r[1], 'pf')
+            if engine.derive_failed() or (best is not None and not self.plan_ok(pool, best[2])):
+                engine.build(pool_order, limit, 2, 0)
+                best = None
+                for t in ts:
+                    mc = cfg.perm_free if best is None else best[0] - 1
+                    if mc < 0:
+                        break
+                    r = engine.find_pair(t, mc)
+                    if r is not None and (best is None or r[0] < best[0]):
+                        best = (r[0], t, r[1], 'pf')
+        if best is not None:
+            return best
+        t = min(ts, key=lambda u: self.rank[u])
+        return self.search_round([t], pool_order, pool)
+
+    def regret_round(self, ts, pool_order, pool):
+        """Regret ordering (PLAN2 item 1): fresh L0..L3, cheapest pair plan (<= regret_maxc) for every
+        uncovered target; commit argmin(cost - alpha * bits). Falls back to search_round."""
+        cfg, limit = self.cfg, self.p.limit
+        a = cfg.regret
+        # exact shortcut: costs <= 3 are exact on L0..L2 (pairs (2,0), (1,1)); if the best such
+        # score beats every possible cost-4 score, the full pick would choose the same plan.
+        engine.build(pool_order, limit, 2, 0)
+        b2 = engine.regret_pick(ts, 3, a)
+        if b2 is not None:
+            s2 = b2[0] - a * b2[1].bit_length()
+            if s2 <= 4 - a * max(t.bit_length() for t in ts):
+                self.stats['reg2'] = self.stats.get('reg2', 0) + 1
+                return (b2[0], b2[1], b2[2], 'reg')
+        engine.build(pool_order, limit, 3, 0)
+        self.n_l3 += 1
+        self.deep_age = 0
+        self.evicted = False
+        best = engine.regret_pick(ts, cfg.regret_maxc, a)
+        if best is not None:
+            return (best[0], best[1], best[2], 'reg')
+        return self.search_round(ts, pool_order, pool)
+
     def lookahead(self, ts, pool_order):
         """Cheap-tier choice with one-step lookahead: minimise own cost + sum of the other
         targets' cheap-tier costs after committing the plan."""
@@ -346,7 +408,12 @@ class Solver:
                 ts = sorted(uncovered, key=lambda t: t.bit_length() + cfg.noise * self.rng.random())
             else:
                 ts = sorted(uncovered)
-            best = self.search_round(ts, order, pool)
+            if cfg.perm_seed >= 0:
+                best = self.perm_round(ts, order, pool)
+            elif cfg.regret > 0:
+                best = self.regret_round(ts, order, pool)
+            else:
+                best = self.search_round(ts, order, pool)
             assert self.plan_ok(pool, best[2])
             c, t, st, how = best
             st_counts[how] = st_counts.get(how, 0) + 1
