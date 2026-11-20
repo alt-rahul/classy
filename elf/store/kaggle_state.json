@@ -59,7 +59,7 @@
    "running_at": 1795202779.1939607
   },
   "elf-c02": {
-   "state": "pushed",
+   "state": "running",
    "ids": [
     "scored_0051",
     "scored_0218",
@@ -113,10 +113,11 @@
    "url": "https://www.kaggle.com/code/ograhulrajkumar/elf-c02",
    "profile": "leverB_g",
    "lever_key": "grun",
-   "workers": 4
+   "workers": 4,
+   "running_at": 1795211496.7873344
   },
   "elf-c03": {
-   "state": "pushed",
+   "state": "running",
    "ids": [
     "scored_0799",
     "scored_0865",
@@ -170,10 +171,11 @@
    "url": "https://www.kaggle.com/code/ograhulrajkumar/elf-c03",
    "profile": "leverB_g",
    "lever_key": "grun",
-   "workers": 4
+   "workers": 4,
+   "running_at": 1795211496.9685872
   },
   "elf-c04": {
-   "state": "pushed",
+   "state": "running",
    "ids": [
     "scored_0198",
     "scored_0209",
@@ -227,10 +229,11 @@
    "url": "https://www.kaggle.com/code/ograhulrajkumar/elf-c04",
    "profile": "leverB_g",
    "lever_key": "grun",
-   "workers": 4
+   "workers": 4,
+   "running_at": 1795211497.104853
   },
   "elf-c05": {
-   "state": "pushed",
+   "state": "running",
    "ids": [
     "scored_0010",
     "scored_0012",
@@ -283,7 +286,8 @@
    "url": "https://www.kaggle.com/code/ograhulrajkumar/elf-c05",
    "profile": "public",
    "lever_key": null,
-   "workers": 4
+   "workers": 4,
+   "running_at": 1795211497.2870734
   }
  },
  "coverage": {
