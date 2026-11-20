@@ -37,7 +37,8 @@ Losses (``ARMS``): fingerprint loss "bce" or "focal" (gamma ``enc_focal_gamma``)
 over bits / ``enc_fp_loss_scale``, mean over the batch; candidate-contrastive InfoNCE
 over [true structure, ``enc_n_neg`` same-mass negatives of the structure, the other
 queries' true structures in the batch] (same-structure and identical-fingerprint
-entries masked).
+entries masked); optionally (``fpcon_weight``) a second InfoNCE over the same candidates
+on cosine(sigmoid(fingerprint logits), candidate bits) with its own learned scale.
 
 Candidate scores (``EncoderModel.score``, all ranker features): ``con`` (cosine in the
 contrastive space; tower arms only), ``fpcos`` (cosine between the fingerprint
@@ -76,6 +77,10 @@ Bundle (``Bundle``, directory of .npy files plus ``info.json`` and ``structures.
   (``pool_off``, ``pool_idx`` int32 NP rows, ``pool_pos`` bool: the row's ik14 is a
   truth key of the molecule). The class 2 condition: the structure stays in the pool,
   the encoder never trained on it (holdout excluded via ``splits.training_exclusion``).
+- ``extend_bundle`` writes a new bundle with extra spectra of NP-tier structures appended
+  (roadmap item 2: simulated spectra, ``spec_sim`` 1, a fixed share of the sampling
+  weight); the metadata token's simulated flag is set from ``spec_sim`` during training
+  and is 0 at inference.
 
 Metrics (``rank_metrics``): rank of the best-scoring positive among the pool (ties count
 against it), MRR@25, top-1/5/25 hit rates, recall (truth in pool); molecules without
@@ -115,6 +120,9 @@ __all__ = [
     "lib_weights",
     "synthetic_bundle",
     "unpack_bits",
+    "fp_hash",
+    "same_mass_negatives",
+    "extend_bundle",
     "build_net",
     "train",
     "EncoderModel",
@@ -138,11 +146,21 @@ _FAMILY_OF = {"[M+H]+": 0, "[M+NH4]+": 0, "[M-H2O+H]+": 0, "[M-2H2O+H]+": 0, "[M
 ADDUCT_FAMILY_CODE = np.array([_FAMILY_OF[a] for a in TEST_ADDUCT_NAMES] + [5], dtype=np.int8)
 
 # Training arms: fingerprint loss, fingerprint weight, contrastive weight, molecule tower.
+# ``fpcon_weight``: InfoNCE on cosine(sigmoid(fingerprint logits), candidate bits) over the
+# same candidates (ms-mole "contrastive, fingerprint cosine").
 ARMS: dict[str, dict[str, Any]] = {
-    "bce": {"fp_loss": "bce", "fp_weight": 1.0, "con_weight": 0.0, "use_tower": False},
-    "focal": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 0.0, "use_tower": False},
-    "focal_con": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 1.0, "use_tower": True},
-    "con": {"fp_loss": "focal", "fp_weight": 0.0, "con_weight": 1.0, "use_tower": True},
+    "bce": {"fp_loss": "bce", "fp_weight": 1.0, "con_weight": 0.0, "fpcon_weight": 0.0,
+            "use_tower": False},
+    "focal": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 0.0, "fpcon_weight": 0.0,
+              "use_tower": False},
+    "focal_con": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 1.0, "fpcon_weight": 0.5,
+                  "use_tower": True},
+    "focal_con_emb": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 1.0,
+                      "fpcon_weight": 0.0, "use_tower": True},
+    "focal_fpcon": {"fp_loss": "focal", "fp_weight": 1.0, "con_weight": 0.0,
+                    "fpcon_weight": 1.0, "use_tower": False},
+    "con": {"fp_loss": "focal", "fp_weight": 0.0, "con_weight": 1.0, "fpcon_weight": 0.0,
+            "use_tower": True},
 }
 
 SPEC_ARRAYS = ("spec_prec", "spec_mass", "spec_ce", "spec_ne", "spec_add", "spec_pol",
@@ -501,7 +519,7 @@ def rank_metrics(scores: np.ndarray, pos: np.ndarray, off: np.ndarray, k: int = 
         p = pos[a:b]
         if not p.any():
             continue
-        s = scores[a:b]
+        s = np.nan_to_num(scores[a:b], nan=-np.inf)
         best = s[p].max()
         rank[i] = 1 + int(((s >= best) & ~p).sum())
     ok = rank > 0
@@ -530,6 +548,144 @@ def fp_hash(packed: np.ndarray) -> np.ndarray:
             h = (h ^ v[:, j]) * np.uint64(1099511628211)
             h ^= h >> np.uint64(29)
     return h
+
+
+def same_mass_negatives(st_mass: np.ndarray, st_uni: np.ndarray, st_hash: np.ndarray,
+              uni_mass: np.ndarray, uni_hash: np.ndarray, ppm: float, min_da: float,
+              n_max: int, n_min: int, seed: int) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Per structure: universe rows within the mass window, minus its own row and rows with
+    an identical fingerprint; random subsample (seeded per structure) to ``n_max``; topped up
+    with the nearest masses outside the window to ``n_min``. CSR (offsets, rows)."""
+    order = np.argsort(uni_mass, kind="mergesort")
+    sm = uni_mass[order]
+    tol = np.maximum(st_mass * ppm * 1e-6, min_da)
+    lo = np.searchsorted(sm, st_mass - tol, side="left")
+    hi = np.searchsorted(sm, st_mass + tol, side="right")
+    lists = []
+    n_window = np.zeros(len(st_mass), np.int64)
+    topped = 0
+    for i in range(len(st_mass)):
+        c = order[lo[i]:hi[i]]
+        c = c[(c != st_uni[i]) & (uni_hash[c] != st_hash[i])]
+        n_window[i] = len(c)
+        if len(c) > n_max:
+            rng = np.random.default_rng([seed, i])
+            c = np.sort(rng.choice(c, n_max, replace=False))
+        elif len(c) < n_min:
+            a = max(0, lo[i] - 2 * n_min)
+            b = min(len(sm), hi[i] + 2 * n_min)
+            w = order[a:b]
+            w = w[(w != st_uni[i]) & (uni_hash[w] != st_hash[i])]
+            d = np.abs(uni_mass[w] - st_mass[i])
+            w = w[np.lexsort((w, d))][:n_min]
+            c = np.sort(w)
+            topped += 1
+        lists.append(c.astype(np.int32))
+    off = np.zeros(len(lists) + 1, np.int64)
+    np.cumsum([len(c) for c in lists], out=off[1:])
+    idx = np.concatenate(lists) if lists else np.zeros(0, np.int32)
+    stats = {"window_median": float(np.median(n_window)) if len(n_window) else 0.0,
+             "window_p10": float(np.percentile(n_window, 10)) if len(n_window) else 0.0,
+             "window_p90": float(np.percentile(n_window, 90)) if len(n_window) else 0.0,
+             "topped_up": int(topped), "stored_median": float(np.median(np.diff(off))) if len(off) > 1 else 0.0,
+             "stored_total": int(len(idx))}
+    return off, idx, stats
+
+
+def extend_bundle(src: Path | str, out: Path | str, *, mz: np.ndarray, intensity: np.ndarray,
+                  offsets: np.ndarray, meta: Mapping[str, np.ndarray], np_row: np.ndarray,
+                  np_fp: np.ndarray, np_mass: np.ndarray, share: float, cfg: Config | None = None,
+                  lib_name: str = "simulated", sim_flag: int = 1,
+                  np_ik14: np.ndarray | None = None) -> dict[str, Any]:
+    """New bundle ``out`` = bundle ``src`` plus extra (e.g. simulated, roadmap item 2) spectra.
+
+    The extra spectra (cleaned, flat ``mz`` / ``intensity`` / ``offsets``; ``meta`` arrays
+    ``prec``, ``mass``, ``ce``, ``ne``, ``add``, ``pol``, ``inst`` per spectrum) belong to
+    NP-tier structures ``np_row``. A row that is already a bundle structure (its ``st_uni``)
+    gets the spectra added to that structure; other rows become new structures with target
+    ``np_fp[row]``, mass ``np_mass[row]`` and same-mass negatives from the same universe.
+    Extra spectra carry ``spec_sim = sim_flag`` and library ``lib_name``; they form groups
+    per (structure, polarity, adduct family) and receive ``share`` of the sampling weight
+    (1 / sqrt(groups of the structure) inside it); the original groups keep 1 - share.
+    Evaluation packs are copied unchanged: simulated spectra of holdout structures are
+    allowed, as at test time (their real spectra stay excluded).
+    """
+    cfg = cfg or Config()
+    b = Bundle.load(src, mmap=True)
+    n_np = b.n_np
+    np_row = np.asarray(np_row, np.int64)
+    n_new_spec = len(np_row)
+    if len(offsets) != n_new_spec + 1:
+        raise ValueError("offsets must have one entry per extra spectrum plus one")
+    if not 0.0 < share < 1.0:
+        raise ValueError("share must be in (0, 1)")
+    st_uni_old = np.asarray(b.st["st_uni"], np.int64)
+    n_st_old = len(st_uni_old)
+    existing = {int(u): i for i, u in enumerate(st_uni_old) if u < n_np}
+    new_rows = sorted({int(r) for r in np_row} - set(existing))
+    new_code = {r: n_st_old + i for i, r in enumerate(new_rows)}
+    spec_struct = np.array([existing.get(int(r), new_code.get(int(r), -1)) for r in np_row], np.int64)
+    nr = np.asarray(new_rows, np.int64)
+    st_fp = np.concatenate([np.asarray(b.st["st_fp"]), np.asarray(np_fp[nr], np.uint8).reshape(-1, N_BYTES)])
+    st_mass = np.concatenate([np.asarray(b.st["st_mass"]), np.asarray(np_mass, np.float64)[nr]])
+    st_uni = np.concatenate([st_uni_old, nr]).astype(np.int32)
+    # negatives of the new structures over the same universe (NP tier + extra rows)
+    extra_mass = np.zeros(len(b.uni_extra_fp))
+    is_extra = st_uni_old >= n_np
+    extra_mass[st_uni_old[is_extra] - n_np] = np.asarray(b.st["st_mass"])[is_extra]
+    uni_mass = np.concatenate([np.asarray(np_mass, np.float64), extra_mass])
+    uni_hash = np.concatenate([fp_hash(np.asarray(np_fp)), fp_hash(np.asarray(b.uni_extra_fp))])
+    noff, nidx, nstats = same_mass_negatives(st_mass[n_st_old:], nr, fp_hash(st_fp[n_st_old:]), uni_mass,
+                                             uni_hash, cfg.enc_neg_window_ppm, cfg.mass_tol_min_da,
+                                             cfg.enc_neg_max, cfg.enc_neg_min, cfg.seed)
+    neg_off = np.concatenate([np.asarray(b.neg_off), np.asarray(b.neg_off)[-1] + noff[1:]])
+    neg_idx = np.concatenate([np.asarray(b.neg_idx), nidx])
+    # extra spectra, grouped per (structure, polarity, adduct family)
+    fam = ADDUCT_FAMILY_CODE[np.clip(np.asarray(meta["add"], np.int64), 0, ADDUCT_OTHER)]
+    pol = np.asarray(meta["pol"], np.int64)
+    order = np.lexsort((np.arange(n_new_spec), fam, pol, spec_struct))
+    key = np.stack([spec_struct[order], pol[order], fam[order].astype(np.int64)], 1)
+    starts = np.flatnonzero(np.r_[True, (key[1:] != key[:-1]).any(1)]) if n_new_spec else np.zeros(0, int)
+    n_old_spec = len(b.spec_off) - 1
+    grp_off_new = np.r_[starts, n_new_spec].astype(np.int64) + n_old_spec
+    grp_struct_new = spec_struct[order][starts]
+    libs = list(b.info.get("libs", []))
+    if lib_name not in libs:
+        libs.append(lib_name)
+    lib_code = libs.index(lib_name)
+    w_new = lib_weights(np.full(len(starts), lib_name, dtype=object), grp_struct_new, ())
+    g = {"grp_off": np.concatenate([np.asarray(b.g["grp_off"])[:-1], grp_off_new]),
+         "grp_mem": np.concatenate([np.asarray(b.g["grp_mem"]), n_old_spec + order]).astype(np.int32),
+         "grp_struct": np.concatenate([np.asarray(b.g["grp_struct"]), grp_struct_new]).astype(np.int32),
+         "grp_w": np.concatenate([np.asarray(b.g["grp_w"]) * (1 - share), w_new * share]),
+         "grp_lib": np.concatenate([np.asarray(b.g["grp_lib"]), np.full(len(starts), lib_code)]).astype(np.int8)}
+    s = {}
+    extra = {"spec_prec": meta["prec"], "spec_mass": meta["mass"], "spec_ce": meta["ce"],
+             "spec_ne": meta["ne"], "spec_add": meta["add"], "spec_pol": meta["pol"],
+             "spec_inst": meta["inst"], "spec_lib": np.full(n_new_spec, lib_code),
+             "spec_sim": np.full(n_new_spec, sim_flag), "spec_struct": spec_struct}
+    for k in SPEC_ARRAYS:
+        old = np.asarray(b.s[k])
+        s[k] = np.concatenate([old, np.asarray(extra[k]).astype(old.dtype)])
+    spec_off = np.concatenate([np.asarray(b.spec_off), np.asarray(b.spec_off)[-1] + np.asarray(offsets[1:], np.int64)
+                               - int(offsets[0])])
+    ik = (np.asarray(np_ik14, dtype=object)[nr].astype(str) if np_ik14 is not None
+          else np.array([f"NP{r:07d}" for r in nr], dtype=object))
+    structures = pd.concat([b.structures, pd.DataFrame({"ik14": ik, "mkey": [""] * len(nr),
+                                                        "in_np": True, "n_spectra": 0})],
+                           ignore_index=True)
+    structures["n_spectra"] = np.bincount(s["spec_struct"].astype(np.int64), minlength=len(structures))
+    info = dict(b.info)
+    info.update({"libs": libs, "n_structures": int(len(st_uni)), "n_spectra": int(len(spec_off) - 1),
+                 "n_groups": int(len(g["grp_struct"])), "extended_from": str(src),
+                 "extension": {"lib": lib_name, "sim_flag": int(sim_flag), "share": float(share),
+                               "n_spectra": int(n_new_spec), "n_new_structures": int(len(nr)),
+                               "negatives": nstats}})
+    return save_bundle(out, spec_mz=np.concatenate([np.asarray(b.spec_mz), np.asarray(mz, np.float32)]),
+                       spec_int=np.concatenate([np.asarray(b.spec_int), np.asarray(intensity, np.float16)]),
+                       spec_off=spec_off, s=s, g=g, st={"st_fp": st_fp, "st_mass": st_mass, "st_uni": st_uni},
+                       structures=structures, uni_extra_fp=np.asarray(b.uni_extra_fp), neg_off=neg_off,
+                       neg_idx=neg_idx, info=info, packs=b.eval_packs())
 
 
 # ======================================================================================
@@ -716,6 +872,7 @@ def build_net(spec: EncoderSpec):
             else:
                 self.tower = None
             self.log_scale = nn.Parameter(torch.tensor(math.log(1.0 / 0.05)))
+            self.log_scale_fp = nn.Parameter(torch.tensor(math.log(1.0 / 0.05)))
             with torch.no_grad():
                 self.fp_head.bias.fill_(-4.0)       # about 1.5 percent of bits are on
 
@@ -762,6 +919,9 @@ def build_net(spec: EncoderSpec):
         def scale(self):
             return self.log_scale.exp().clamp(max=100.0)
 
+        def scale_fp(self):
+            return self.log_scale_fp.exp().clamp(max=100.0)
+
     return Encoder(spec)
 
 
@@ -782,6 +942,9 @@ def _gather_members(t, mz_flat, int_flat, off, members, max_peaks):
     idx = start.unsqueeze(-1) + ar
     valid = (ar < length.unsqueeze(-1)) & mvalid.unsqueeze(-1)
     idx = torch.where(valid, idx, torch.zeros_like(idx))
+    if mz_flat.shape[0] == 0:                     # no peaks at all (metadata-only queries)
+        z = torch.zeros(valid.shape, dtype=torch.float32, device=members.device)
+        return z, z.clone(), torch.zeros_like(valid)
     mz = mz_flat[idx].float() * valid
     it = int_flat[idx].float() * valid
     return mz, it, valid
@@ -876,7 +1039,7 @@ class DeviceData:
         self.torch = torch
         self.dev = torch.device(device)
         self.cfg = cfg
-        T = lambda a, dt=None: torch.as_tensor(np.ascontiguousarray(a), device=self.dev,  # noqa: E731
+        T = lambda a, dt=None: torch.as_tensor(np.array(a, copy=True), device=self.dev,  # noqa: E731
                                                dtype=dt)
         self.mz = T(bundle.spec_mz, torch.float32)
         self.it = T(bundle.spec_int, torch.float16)
@@ -925,7 +1088,7 @@ class DeviceData:
         posn = (start.unsqueeze(1) + j * stride.unsqueeze(1)) % ng.unsqueeze(1).clamp(min=1)
         mvalid = j < k.unsqueeze(1)
         dup = (posn.unsqueeze(2) == posn.unsqueeze(1)) & (j.unsqueeze(1) < j.unsqueeze(0)).unsqueeze(0)
-        mvalid = mvalid & ~(dup & mvalid.unsqueeze(1)).any(1)
+        mvalid = mvalid & ~(dup & mvalid.unsqueeze(2)).any(1)
         rows = self.gmem[(g0.unsqueeze(1) + posn).clamp(max=len(self.gmem) - 1)]
         members = torch.where(mvalid, rows, torch.full_like(rows, -1))
         mz, it, valid = _gather_members(torch, self.mz, self.it, self.off, members, spec.max_peaks)
@@ -970,6 +1133,36 @@ def fp_loss(logits, y, kind: str, gamma: float, scale: float):
     return bce.sum(1).mean() / scale
 
 
+def _in_batch_mask(batch):
+    torch = _torch()
+    same = batch["st"].unsqueeze(0) == batch["st"].unsqueeze(1)
+    pp = batch["pos_packed"]
+    if pp.shape[0] <= 512:
+        same = same | (pp.unsqueeze(0) == pp.unsqueeze(1)).all(-1)
+    return same
+
+
+def fp_contrastive_loss(net, logits, batch):
+    """InfoNCE on cosine(sigmoid(logits), candidate bits) over the same candidate set."""
+    torch = _torch()
+    F = torch.nn.functional
+    B = logits.shape[0]
+    p = F.normalize(torch.sigmoid(logits.float()), dim=-1)
+    yp = F.normalize(batch["y"].float(), dim=-1)
+    parts = [(p * yp).sum(-1, keepdim=True)]
+    masks = [torch.zeros((B, 1), dtype=torch.bool, device=p.device)]
+    if "neg_bits" in batch:
+        nb = batch["neg_bits"].float()
+        nb = nb / nb.sum(-1, keepdim=True).clamp(min=1.0).sqrt()
+        parts.append(torch.einsum("bd,bkd->bk", p, nb))
+        masks.append(~batch["neg_valid"])
+    parts.append(p @ yp.T)
+    masks.append(_in_batch_mask(batch))
+    lg = (torch.cat(parts, dim=1) * net.scale_fp()).masked_fill(torch.cat(masks, dim=1), float("-inf"))
+    target = torch.zeros(B, dtype=torch.long, device=p.device)
+    return F.cross_entropy(lg, target)
+
+
 def contrastive_loss(net, z, batch):
     """InfoNCE over [positive, sampled negatives, in-batch positives]."""
     torch = _torch()
@@ -978,19 +1171,19 @@ def contrastive_loss(net, z, batch):
     zp = net.embed_molecules(batch["y"])
     s_pos = (z * zp).sum(-1, keepdim=True)
     parts = [s_pos]
+    masks = [torch.zeros_like(s_pos, dtype=torch.bool)]
     if "neg_bits" in batch:
         K = batch["neg_bits"].shape[1]
-        zn = net.embed_molecules(batch["neg_bits"].reshape(B * K, -1).float()).reshape(B, K, -1)
-        s_neg = torch.einsum("bd,bkd->bk", z, zn)
-        s_neg = s_neg.masked_fill(~batch["neg_valid"], float("-inf"))
-        parts.append(s_neg)
-    s_in = z @ zp.T
-    same = batch["st"].unsqueeze(0) == batch["st"].unsqueeze(1)
-    pp = batch["pos_packed"]
-    ident = (pp.unsqueeze(0) == pp.unsqueeze(1)).all(-1) if B <= 512 else same
-    s_in = s_in.masked_fill(same | ident, float("-inf"))
-    parts.append(s_in)
-    logits = torch.cat(parts, dim=1) * net.scale()
+        nb = batch["neg_bits"].reshape(B * K, -1)
+        nb = nb.half() if z.is_cuda else nb.float()
+        zn = net.embed_molecules(nb).reshape(B, K, -1)
+        parts.append(torch.einsum("bd,bkd->bk", z, zn))
+        masks.append(~batch["neg_valid"])
+    parts.append(z @ zp.T)
+    masks.append(_in_batch_mask(batch))
+    # Mask after scaling: -inf times the learned scale has a NaN gradient.
+    logits = (torch.cat(parts, dim=1) * net.scale()).masked_fill(torch.cat(masks, dim=1),
+                                                                 float("-inf"))
     target = torch.zeros(B, dtype=torch.long, device=z.device)
     loss = F.cross_entropy(logits, target)
     with torch.no_grad():
@@ -1001,6 +1194,10 @@ def contrastive_loss(net, z, batch):
 # ======================================================================================
 # torch half: inference model
 # ======================================================================================
+
+
+# Parameters added after the first checkpoints were written (absent keys keep their init).
+_OPTIONAL_KEYS = frozenset({"log_scale_fp"})
 
 
 class EncoderModel:
@@ -1020,7 +1217,11 @@ class EncoderModel:
         ck = torch.load(Path(path), map_location=device, weights_only=True)
         spec = EncoderSpec.from_dict(json.loads(ck["spec_json"]))
         net = build_net(spec).to(device)
-        net.load_state_dict(ck["state_dict"])
+        res = net.load_state_dict(ck["state_dict"], strict=False)
+        missing = set(res.missing_keys) - _OPTIONAL_KEYS
+        if missing or res.unexpected_keys:
+            raise RuntimeError(f"{path}: state dict mismatch, missing {sorted(missing)}, "
+                               f"unexpected {sorted(res.unexpected_keys)}")
         net.eval()
         info = json.loads(ck.get("info_json", "{}"))
         return cls(net, spec, info, device)
@@ -1226,8 +1427,6 @@ def evaluate_packs(model: EncoderModel, packs: Mapping[str, EvalPack], np_fp: np
                 res[f"{k}/{mode}"] = {kk: v for kk, v in m.items() if kk != "rank"}
         res["n_queries"] = int(len(qs))
         res["seconds"] = round(time.time() - t0, 1)
-        res["recall"] = float((np.add.reduceat(pack.pool_pos.astype(np.int64), off[:-1])
-                               [np.diff(off) > 0] > 0).sum() / max(n_mol, 1)) if len(pack.pool_pos) else 0.0
         res["median_pool"] = float(np.median(np.diff(off))) if n_mol else 0.0
         out[name] = res
     return out
@@ -1322,7 +1521,7 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
            "int_sigma": cfg.enc_aug_intensity_sigma, "noise_prob": cfg.enc_aug_noise_prob,
            "noise_max": cfg.enc_aug_noise_max, "noise_int_min": cfg.enc_aug_noise_int_min,
            "noise_int_max": cfg.enc_aug_noise_int_max}
-    n_neg = cfg.enc_n_neg if a["con_weight"] > 0 else 0
+    n_neg = cfg.enc_n_neg if (a["con_weight"] > 0 or a.get("fpcon_weight", 0) > 0) else 0
     info = {"arm": arm, **a, "n_params": int(n_params), "device": device, "seed": seed,
             "bundle": str(bundle_dir), "bundle_info": {k: bundle.info.get(k) for k in
                                                        ("holdout_sha256", "n_np", "n_structures",
@@ -1334,7 +1533,8 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
     new_log = not log_path.exists() or step == 0
     logf = log_path.open("w" if new_log else "a", encoding="utf-8")
     if new_log:
-        logf.write("step,train_s,lr,loss,fp_loss,con_loss,con_acc,scale,samples_per_s\n")
+        logf.write("step,train_s,lr,loss,fp_loss,con_loss,fpcon_loss,con_acc,scale,scale_fp,"
+                   "samples_per_s\n")
     evalf = (out / "eval.jsonl").open("a", encoding="utf-8")
     model = EncoderModel(net, spec, info, device)
 
@@ -1359,7 +1559,7 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
         os.replace(tmp, ck_path)
 
     net.train()
-    acc_loss = acc_fp = acc_con = acc_acc = 0.0
+    acc_loss = acc_fp = acc_con = acc_fpc = acc_acc = 0.0
     acc_n = 0
     t_log = time.time()
     t_eval = time.time()
@@ -1384,6 +1584,11 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
                 loss = loss + a["con_weight"] * lc
             else:
                 lc, cacc = torch.zeros(()), torch.zeros(())
+            if a.get("fpcon_weight", 0) > 0:
+                lfc = fp_contrastive_loss(net, logits, batch)
+                loss = loss + a["fpcon_weight"] * lfc
+            else:
+                lfc = torch.zeros(())
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
@@ -1394,6 +1599,7 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
         acc_loss += float(loss.detach())
         acc_fp += float(lf.detach())
         acc_con += float(lc.detach())
+        acc_fpc += float(lfc.detach())
         acc_acc += float(cacc)
         acc_n += 1
         if data.dev.type == "cuda" and step % 50 == 0:
@@ -1403,14 +1609,15 @@ def train(bundle_dir: Path | str, np_fp_path: Path | str, out_dir: Path | str,
             dt = time.time() - t_log
             logf.write(f"{step},{train_seconds:.1f},{opt.param_groups[0]['lr']:.3e},"
                        f"{acc_loss / acc_n:.4f},{acc_fp / acc_n:.4f},{acc_con / acc_n:.4f},"
-                       f"{acc_acc / acc_n:.4f},{float(net.scale()):.2f},"
-                       f"{acc_n * B / max(dt, 1e-9):.1f}\n")
+                       f"{acc_fpc / acc_n:.4f},{acc_acc / acc_n:.4f},{float(net.scale().detach()):.2f},"
+                       f"{float(net.scale_fp().detach()):.2f},{acc_n * B / max(dt, 1e-9):.1f}\n")
             logf.flush()
             if step % (cfg.enc_log_every_steps * 10) == 0:
-                log.info("step %d (%.0f s): loss %.4f fp %.4f con %.4f acc %.3f, %.0f samples/s",
-                         step, train_seconds, acc_loss / acc_n, acc_fp / acc_n, acc_con / acc_n,
-                         acc_acc / acc_n, acc_n * B / max(dt, 1e-9))
-            acc_loss = acc_fp = acc_con = acc_acc = 0.0
+                log.info("step %d (%.0f s): loss %.4f fp %.4f con %.4f fpcon %.4f acc %.3f, "
+                         "%.0f samples/s", step, train_seconds, acc_loss / acc_n, acc_fp / acc_n,
+                         acc_con / acc_n, acc_fpc / acc_n, acc_acc / acc_n,
+                         acc_n * B / max(dt, 1e-9))
+            acc_loss = acc_fp = acc_con = acc_fpc = acc_acc = 0.0
             acc_n = 0
             t_log = time.time()
         if time.time() - t_eval >= cfg.enc_eval_every_min * 60.0:
@@ -1471,10 +1678,13 @@ def stage_encoder(state, cfg: Config):
     row_of = {m: i for i, m in enumerate(enc["molecule_id"])}
     n = len(pool)
     packed = np.zeros((n, N_BYTES), np.uint8)
-    np_row = pool["np_row"].to_numpy(np.int64) if "np_row" in pool.columns else np.full(n, -1)
+    np_row = (pd.to_numeric(pool["np_row"], errors="coerce").fillna(-1).to_numpy(np.int64)
+              if "np_row" in pool.columns else np.full(n, -1, np.int64))
     has = np_row >= 0
     if has.any():
-        dbh = state.db if state.db is not None else __import__("casmi.db", fromlist=["get_db"]).get_db(cfg)
+        from . import db as cdb  # noqa: PLC0415
+
+        dbh = state.db if state.db is not None else cdb.get_db(cfg)
         packed[has] = dbh.np_fingerprints(np_row[has])
     if (~has).any():
         from .chem import morgan_fps  # noqa: PLC0415

@@ -33,7 +33,10 @@ WP8 extension (``lib_extra_rules``, both off by default, so the rules above are 
 unless a config turns them on): rule 1b (``fusion_lib_weak``) scores a LIB candidate that
 misses rule 1 but has lib_best_cos >= ``fusion_lib_weak_cos_min`` and lib_n_matched >=
 ``fusion_lib_weak_min_matched`` at 2 + cap + (1 - cap) x lib_best_cos (cap =
-``fusion_prior_cap``): above every rule 2 score, below every rule 1 score. Demotion
+``fusion_prior_cap``): above every rule 2 score, below every rule 1 score; with
+``fusion_lib_weak_additive`` it instead adds ``fusion_lib_weak_weight`` x clip((lib_best_cos -
+weak_cos_min) / (1 - weak_cos_min), 0, 1) to the candidate's rule 2 score (prior and
+similarity both count). Demotion
 (``fusion_lib_demote``): a LIB candidate left for rule 2 whose lib_best_cos is measured and
 below ``fusion_lib_demote_cos_max`` scores ``fusion_lib_demote_factor`` x z instead, i.e.
 below every NP-tier candidate (its reference spectra contradict the query).
@@ -323,8 +326,13 @@ def lib_extra_rules(score: np.ndarray, z: np.ndarray, cos: np.ndarray, matched: 
         with np.errstate(invalid="ignore"):
             weak = (rest & measured & (cos >= cfg.fusion_lib_weak_cos_min)
                     & (np.nan_to_num(matched, nan=0.0) >= cfg.fusion_lib_weak_min_matched))
-        cap = float(cfg.fusion_prior_cap)
-        out[weak] = 2.0 + cap + (1.0 - cap) * np.clip(cos[weak], 0.0, 1.0)
+        if bool(getattr(cfg, "fusion_lib_weak_additive", False)):
+            span = max(1.0 - float(cfg.fusion_lib_weak_cos_min), 1e-9)
+            g = np.clip((cos[weak] - cfg.fusion_lib_weak_cos_min) / span, 0.0, 1.0)
+            out[weak] = score[weak] + cfg.fusion_lib_weak_weight * g
+        else:
+            cap = float(cfg.fusion_prior_cap)
+            out[weak] = 2.0 + cap + (1.0 - cap) * np.clip(cos[weak], 0.0, 1.0)
     if demote_on:
         with np.errstate(invalid="ignore"):
             low = rest & ~weak & measured & (cos < cfg.fusion_lib_demote_cos_max)

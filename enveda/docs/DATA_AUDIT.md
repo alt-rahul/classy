@@ -1,6 +1,6 @@
 # Data audit (WP6)
 
-Generated 2026-11-20 19:07 by `scripts/ingest_train.py --stage audit` from `/home/user/classy/enveda/data/raw/train.parquet` (2,539,608 rows, 21 row groups). Every number below is recomputed by that command; PLAN.md section numbers in brackets.
+Generated 2026-11-20 19:27 by `scripts/ingest_train.py --stage audit` from `/home/user/classy/enveda/data/raw/train.parquet` (2,539,608 rows, 21 row groups). Every number below is recomputed by that command; PLAN.md section numbers in brackets.
 
 ## 1. Rows and structures per library (WP6 acceptance)
 
@@ -207,6 +207,15 @@ Free-text values with their family (top 60 of 83 distinct texts, by spectra):
 
 Columns `abs ...` are quantiles of the absolute given error. `abs M err` is recomputed here: neutral mass from precursor m/z and the parsed adduct versus the formula mass of `molecular_formula`, in ppm of M (the quantity the retrieval window applies to).
 
+Given and recomputed errors disagree: 52,460 kept spectra have |given precursor_error_ppm| > 20 but |recomputed M error| <= 5 ppm (the label and precursor agree; the given column is off). Largest groups:
+
+| library | adduct | spectra | given_median | recomputed_median |
+|---|---|---|---|---|
+| pluskal_ms2 | [M+CH2O2-H]- | 50,785 | 2,414.52 | 0.01 |
+| gnps | [M+CH2O2-H]- | 1,675 | 2,050.44 | -0.11 |
+
+A label-quality filter on the given `precursor_error_ppm` (WP9 `fpm_max_precursor_error_ppm`) would drop these good spectra; filter on `m_err_ppm` from meta.parquet / the spectra files instead.
+
 timsTOF libraries (the test instrument), test adducts only, recomputed M error per spectrum (signed, ppm). Molecule-level numbers and the window are in section 11.
 
 | library | adduct | spectra | p0.5 | p5 | median | p95 | p99.5 | abs p99 | abs max | abs > 5 | abs > 10 |
@@ -314,19 +323,21 @@ NP-heavy libraries (enveda-np-examples, riken, gnps, msdial, massbank, mona; 55,
 
 mkey computed for 275,775 of 275,775 structures (status: {'ok': 275775}). mkey != ik14 for 4,362 (1.58 percent). mkeys shared by more than one ik14: 1,540 (covering 3,165 ik14).
 
-| library | fraction mkey != ik14 |
-|---|---|
-| drug_plus | 0.0748 |
-| enveda-180 | 0.0050 |
-| enveda-np-examples | 0.0640 |
-| gnps | 0.0446 |
-| masaryk | 0.0433 |
-| massbank | 0.0474 |
-| mona | 0.0649 |
-| msdial | 0.0695 |
-| pluskal_ms2 | 0.0278 |
-| riken | 0.0768 |
-| spectraverse | 0.0004 |
+| library | fraction mkey != ik14 | in another library only under another ik14 |
+|---|---|---|
+| drug_plus | 0.0748 | 9 |
+| enveda-180 | 0.0050 | 1 |
+| enveda-np-examples | 0.0640 | 0 |
+| gnps | 0.0446 | 460 |
+| masaryk | 0.0433 | 3 |
+| massbank | 0.0474 | 18 |
+| mona | 0.0649 | 12 |
+| msdial | 0.0695 | 1 |
+| pluskal_ms2 | 0.0278 | 122 |
+| riken | 0.0768 | 46 |
+| spectraverse | 0.0004 | 1,383 |
+
+Last column: structures of the library whose mkey occurs in some other library but never under the same ik14 (tautomer or protonation variants labelled differently). Library matching, splits and the C1/C2 masks must group by mkey, not ik14 (`splits` and `validation` do).
 
 ## 10. Public test join [5.7]
 
@@ -365,3 +376,13 @@ Recommended `mass_tol_ppm`: **10** (smallest of 3, 5, 7.5, 10, 15, 20 ppm, at le
 275,775 structures; RDKit parse ok 275,775; label SMILES variants per ik14 > 1: 1,608; RDKit mass vs formula mass differs by more than 0.001 Da: 24; NP-likeness median -1.31.
 
 Ingestion: pass 1 78.9 s (32,180 rows/s), peak RSS 1,693 MB during pass 1; structures 181.69 s (RDKit 2772.4 structures/s on 3 jobs).
+
+## 13. Holdout molecules (WP7, `splits/holdout_v1.csv`) [5.2]
+
+| set | molecules (mkeys) | ik14 rows | eligible C1 | mass min / median / max | query spectra | spectra per molecule | query libraries |
+|---|---|---|---|---|---|---|---|
+| NP-TIMS | 250 | 265 | 250 | 133 / 354 / 1109 | 599 | 2.40 | enveda-np-examples 250 |
+| SYN-TIMS | 3,000 | 3,001 | 44 | 235 / 331 / 499 | 8,289 | 2.76 | enveda-180 3000 |
+| NP-OTHER | 3,000 | 3,188 | 1,871 | 157 / 353 / 1141 | 8,167 | 2.72 | gnps 1268, riken 670, massbank 574, mona 407, msdial 81 |
+
+ik14 rows beyond the molecules are aliases (another ik14 with the same mkey), masked together with the molecule. Query spectra follow the public test's spectra-per-molecule and collision-energy distribution, capped by what the query library holds (`validation.build_queries`).

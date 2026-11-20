@@ -109,9 +109,12 @@ def main(argv: list[str] | None = None) -> int:
     max_rows = 2 * args.max_spectra if args.max_spectra else None
     data = fpmodel.load_training_source(args.source, cfg, n_jobs=args.n_jobs,
                                         synthetic=args.synthetic, max_rows=max_rows)
+    # synthetic spectra never match the real holdout (splits/holdout_v1.csv exists since WP7
+    # ran on train): use the synthetic 5 percent holdout of split_training_data instead
     train, val, calib, info = fpmodel.split_training_data(
-        data, cfg, exclude_holdout=args.exclude_holdout, holdout=args.holdout_file,
-        structures=args.structures, max_spectra=args.max_spectra)
+        data, cfg, exclude_holdout=args.exclude_holdout,
+        holdout=None if args.synthetic else args.holdout_file,
+        structures=None if args.synthetic else args.structures, max_spectra=args.max_spectra)
     del data
     npz = out_dir / f"fp_{tag}.npz"
     res = fpmodel.train(train, cfg, hours=args.hours, steps=args.steps, epochs=args.epochs,

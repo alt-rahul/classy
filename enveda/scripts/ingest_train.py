@@ -1402,6 +1402,35 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
              f"{info.get('structures', {}).get('structures_seconds', float('nan'))} s "
              f"(RDKit {info.get('structures', {}).get('featurize_per_s', float('nan'))} structures/s on "
              f"{info.get('structures', {}).get('featurize_jobs', '?')} jobs).")
+    # 13. holdout (WP7), when splits exist
+    hp = paths.SPLITS / "holdout_v1.csv"
+    if hp.exists() and not synthetic:
+        from casmi.splits import SETS, holdout_molecules, load_holdout
+
+        ho = load_holdout(hp)
+        mols = holdout_molecules(ho)
+        L += ["", "## 13. Holdout molecules (WP7, `splits/holdout_v1.csv`) [5.2]", ""]
+        qi_path = paths.PROCESSED / "validation" / "queries_info.json"
+        qi = json.loads(qi_path.read_text()).get("sets", {}) if qi_path.exists() else {}
+        rows = []
+        for s_ in SETS:
+            m = mols[mols["set"] == s_]
+            if not len(m):
+                continue
+            q = np.percentile(m["mono_mass"], [0, 50, 100])
+            rows.append([s_, len(m), int((ho["set"] == s_).sum()), int(m["eligible_c1"].sum()),
+                         f"{q[0]:.0f} / {q[1]:.0f} / {q[2]:.0f}",
+                         qi.get(s_, {}).get("spectra", np.nan),
+                         qi.get(s_, {}).get("spectra_per_molecule_mean", np.nan),
+                         ", ".join(f"{k} {v}" for k, v in m["query_lib"].value_counts().items())])
+        L.append(_table(pd.DataFrame(rows, columns=[
+            "set", "molecules (mkeys)", "ik14 rows", "eligible C1", "mass min / median / max",
+            "query spectra", "spectra per molecule", "query libraries"]), 2))
+        L.append("")
+        L.append("ik14 rows beyond the molecules are aliases (another ik14 with the same mkey), "
+                 "masked together with the molecule. Query spectra follow the public test's "
+                 "spectra-per-molecule and collision-energy distribution, capped by what the query "
+                 "library holds (`validation.build_queries`).")
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.write_text("\n".join(L) + "\n", encoding="utf-8")
     tol_path = out / "tolerance.json"

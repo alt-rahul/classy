@@ -160,6 +160,8 @@ class Config:
     fusion_lib_demote: bool = False          # LIB with a measured similarity below the next value ...
     fusion_lib_demote_cos_max: float = 0.2   # ... drops below every NP-tier candidate (score = factor x z)
     fusion_lib_demote_factor: float = 1.0
+    fusion_lib_weak_additive: bool = False   # rule 1b as rule 2 score + weight x clip((cos - weak_cos_min) / (1 - weak_cos_min), 0, 1)
+    fusion_lib_weak_weight: float = 1.0
 
     # --- Formula enumeration (3.4) ----------------------------------------------------
     formula_hc_min: float = 0.2

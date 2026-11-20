@@ -286,10 +286,48 @@ Only the `.npz` files and the calibration go into the Kaggle bundle.
 <!-- WP6:train:start -->
 ## Train ingestion (WP6) and validation tables (WP7)
 
-Not built yet on the real data: `data/raw/train.parquet` has not arrived. Every format below was
-exercised end to end on the synthetic train file (`scripts/make_synthetic_train.py`, 4,145 rows,
-9 row groups, 543 structures, 11 libraries, 21 planted bad rows). Add the table rows (size,
-sha256 of `ingest_info.json`, `splits/holdout_v1.csv`, `queries_info.json`) after the real run.
+Built on the real `data/raw/train.parquet` on 2026-11-20 (3,033,286,496 bytes, 2,539,608 rows,
+21 row groups, 18 columns), RUNBOOK steps 1 to 6. The real file has no `spectrum_id` and no
+`molecule_id` column (the synthetic file had both): ingestion assigns
+`spectrum_id = "t_<row index in train.parquet>"` (= `source_row`, stable in file order), writes
+`molecule_id` as null, skips the duplicate-id check, and the public test join matches by
+precursor m/z plus peak arrays (all 1,213 public spectra matched, all verbatim enveda-180
+rows). Validation query tables reuse these ids. A second full ingest of the same file gave
+byte-identical spectra, meta, structures, lib-count and public-test files; `make_splits` run
+twice gave a byte-identical holdout. Formats were rehearsed on the synthetic train file
+(`scripts/make_synthetic_train.py`, 4,145 rows, 9 row groups, 543 structures, 11 libraries, 21
+planted bad rows).
+
+| artefact | rows | bytes | sha256 |
+|---|---|---|---|
+| `data/processed/train/spectra/` (11 files) | 2,505,117 spectra, 66.2M cleaned peaks | 600,891,035 | per file: see `sha256sum` (deterministic) |
+| `data/processed/train/meta.parquet` | 2,505,117 | 111,244,880 | `315e26eb87421862d2a2487ceea3cd04f74a51094d2d6d4599302d302c84755b` |
+| `data/processed/train/structures.parquet` (with mkey) | 275,775 | 24,092,836 | `2bbdad34721d23b776e4fc3d7b06eb51df69e747b0dcfaf0430731ecb060ec50` |
+| `data/processed/train/structure_lib_counts.parquet` | (ik14, lib) pairs | 5,858,383 | `723083e787ba631bd6f2308b496daaf889a21c55c70367656c706eb3c93d9207` |
+| `data/processed/train/public_test_truth.parquet` | 400 | 24,684 | `851b38021c9d14f2ba79a6921e5c176c02e8202b43e4dd44cb544571e2ea35cc` |
+| `data/processed/train/ingest_info.json` | - | 4,376 | `4e7d16a21832cb53bb1b1f9dc76ca23d9dcf0f8aa0bc075b1a7b6104b2c10069` |
+| `data/processed/library/` (WP5 index, precleaned) | 2,505,117 spectra, 275,775 structures, 625,990 consensus | 1,189,617,341 | `library_info.json` `c070c1cc3551898b99faa26ceeecb1312874024e777be17283e79fbfc0939e7e` |
+| `data/processed/cache/mkey.parquet` | about 290k SMILES (all train structures + holdout DB rows + b0 guesses) | grows | not fixed |
+| `splits/holdout_v1.csv` (tracked) | 6,454 ik14 rows, 6,250 molecules | 531,478 | `fa5f843a8858f1fed999845972bacf266b24aacb97b73df33de538bb18cd065c` |
+| `data/processed/validation/queries_info.json` | NP-TIMS 250 / 599 spectra, SYN-TIMS 3,000 / 8,289, NP-OTHER 3,000 / 8,167 | 1,099 | `ad4886fd6ec1d4b83d86c1c9444f542d62f15f06ef41b38fc27976e247e11b3f` |
+| `data/processed/validation/truth_keys.parquet` | 6,250 mkeys (np,pubchem) | 221,486 | `7842a632f8116d1a681cb20201dd5bedf9fc73799cb1fba88996a438ee15f234` |
+
+Real-run timings (4 cores, nice 10; a second agent active from about 19:05):
+
+| step | command | wall | peak RSS | notes |
+|---|---|---|---|---|
+| 1 ingest + audit | `ingest_train.py --stage all --n-jobs 3` | 271 s | 3.18 GB | pass 1 79 s (32,180 rows/s, 1.69 GB), RDKit 275,775 structures in 99 s (2,772/s on 3), PubChem membership 64 s |
+| 2 mkey | `--stage mkey --mkey-jobs 4` | 1,083 s | 0.68 GB (+4 x 0.25 GB workers) | 275,775 ok, 0 timeouts; mkey != ik14 for 4,362 |
+| 3 library | `--stage library` | 52 s | 3.41 GB | 1.19 GB on disk; loaded 1.8 GB RSS (2.7 GB after 400-molecule searches) |
+| 4 splits | `make_splits.py --n-jobs 3` | 985 s | 3.62 GB | holdout 1 s, queries 31 s, truth keys 16 min (NP-TIMS 44 s, SYN-TIMS 9 min, NP-OTHER 6 min) |
+| 5 audit | `--stage audit` | 11 s | 2.2 GB | |
+| 6 evaluate b0 | `evaluate.py --config configs/b0_npdb.yaml --n-jobs 3` | 1,269 s (self check 30 s, cells 1,237 s) | 3.0 GB | cold mkey cache for the guesses: SYN-TIMS C2 376 s, NP-OTHER C1 562 s |
+
+WP5 build acceptance on this library (1 core): self-search of 1,000 random spectra (seed
+`Config.seed`): cosine 1.0 at rank 1 for 1,000, own spectrum 967 plus 18 identical-peak
+duplicates plus 14 same-structure ties, 1 single-peak isomer tie (gnps vs massbank, m/z 107.05);
+4.3 ms per search. Mass-restricted search for the 400 public test molecules 5.0 s (5.4 s with a
+1,000-structure exclusion mask); open search 497 consensus queries in 19.2 s (39 ms each).
 
 `data/processed/train/` (`nice -n 10 python scripts/ingest_train.py --stage all --n-jobs 3`):
 
@@ -353,3 +391,41 @@ size, sha256); the local copy is `dist/kaggle/<slug>/MANIFEST.json`. Mounted on 
 Upload time: about 10 s for casmi-db-np, 40 s for casmi-db-pubchem (3 parallel uploads), then
 20 s and 183 s of Kaggle processing until READY.
 <!-- WP14:kaggle:end -->
+
+<!-- ENCODER:start -->
+## Contrastive transformer encoder (RESEARCH.md roadmap item 1)
+
+Code: `src/casmi/encoder.py`, `scripts/build_encoder_bundle.py`, `scripts/train_encoder.py`,
+`scripts/kaggle_encoder_kernel.py` (generates `notebooks/kaggle_train_encoder.ipynb`).
+Results: docs/EXPERIMENTS.md, section "Contrastive transformer encoder v1".
+
+| artefact | path | rows | size | sha256 | how to rebuild |
+|---|---|---|---|---|---|
+| encoder training bundle v1 | `data/processed/encoder/bundle_v1/` (54 files: spectra, groups, structures, negatives, `eval_np_tims/`, `eval_np_other/`, `info.json`) | 1,963,065 spectra (58.4M peaks), 555,165 groups, 265,499 structures, 34.7M negative links, eval 250 + 3,000 molecules | 856.3 MB | `info.json` `2285fd8fa14b2111...`, `spec_mz.npy` `7bbc53bf24e71e55...`, `st_fp.npy` `216ae3c419d92dc8...`, `neg_idx.npy` `cf8e4813ccde7a7a...`; full list in the Kaggle MANIFEST below | `nice -n 10 python scripts/build_encoder_bundle.py --n-jobs 2` (inputs: library store, train meta/structures, `splits/holdout_v1.csv` sha256 `fa5f843a...cd065c`, NP tier, validation queries/truth/truth_keys); 386 s wall (targets 351 s on 2 busy cores), peak RSS 4.2 GB |
+
+Bundle facts (`info.json`): training rows 2,505,117 library spectra -> 2,190,762 with >= 5
+peaks -> 2,186,185 in 100-1300 Da -> 2,186,170 parseable adduct -> 2,105,272 |ppm| <= 20 ->
+1,963,065 after `training_exclusion(holdout_v1)` (142,207 rows, 6,454 holdout ik14 / 6,250
+mkeys removed). Targets `chem.morgan_fps` of the label SMILES (std_mol + InChI round trip);
+for the 31,467 training structures that are also NP-tier rows the target equals the NP-tier
+fingerprint for 99.73 percent. Candidate universe = 854,475 NP-tier rows (`np_fp.npy`
+sha256 `a526ef20...20f9a9`, not copied) + 234,032 train-only structures. Negatives per
+structure within 10 ppm (min 0.002 Da): median 119 (p10 23, p90 302), capped at 256, 18,498
+structures topped up to 16 by nearest mass; 45 percent of links point into the NP tier.
+Sampling shares per library: enveda-180 0.20, gnps 0.20, riken 0.135, pluskal_ms2 0.12, mona
+0.10, msdial 0.07, spectraverse 0.07, massbank 0.065, drug_plus 0.0315, masaryk 0.0085;
+inside a library 1 / sqrt(groups of the structure). Eval packs: NP-TIMS 250 molecules / 599
+spectra, median NP pool 76.5, truth in pool 100 percent; NP-OTHER 3,000 / 8,167, median pool
+49, truth in pool 96.6 percent (M estimated from the spectra by `io.mass_tables`).
+
+Kaggle (all private, owner `ograhulrajkumar`, published with `scripts/kaggle_publish.py`):
+
+| slug | version | content | bytes | MANIFEST.json sha256 |
+|---|---|---|---|---|
+| `casmi-encoder-code` | 2 | `casmi/` (src/casmi) + `scripts/train_encoder.py` | 672,033 | `51b7b4074e65370289f038a4ca04804c1d099b30867fc3bbfe1d259ceb81aaa4` |
+| `casmi-encoder-bundle` | 1 | bundle_v1 | 856,343,566 | `8c6874a8d27fb0f3014a8e9ae6d5c575ec7da326e26780ef98fa724679946e9b` |
+
+Training kernel `ograhulrajkumar/casmi-encoder-train` (private, GPU T4 x2 via machine shape
+`NvidiaTeslaT4`, internet off) mounts the two datasets above plus `casmi-db-np` and
+`metric/rdkit-2026-3-3-wheel`; outputs are fetched to `dist/kaggle/output/casmi-encoder-train_<stamp>/`.
+<!-- ENCODER:end -->

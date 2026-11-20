@@ -92,6 +92,20 @@ def test_weak_rule_and_demotion_order():
     assert fusion.fuse(one, cfg)[0] == pytest.approx(3.0)
 
 
+def test_additive_weak_rule():
+    df = _lib_frame()
+    cfg = Config(fusion_lib_cos_min=9.0, fusion_lib_weak=True, fusion_lib_weak_additive=True,
+                 fusion_lib_weak_weight=0.5, fusion_lib_weak_cos_min=0.5,
+                 fusion_lib_weak_min_matched=2)
+    s, z = fusion.fuse(df, cfg, return_z=True)
+    assert s[0] == pytest.approx(1.0 + z[0] + 0.5 * (0.9 - 0.5) / 0.5)   # rule 1 off: additive
+    assert s[1] == pytest.approx(1.0 + z[1] + 0.5 * (0.6 - 0.5) / 0.5)
+    assert s[2] == pytest.approx(1.0 + z[2])                               # 1 peak: plain rule 2
+    assert s[5] == pytest.approx(1.0 + z[5] + cfg.fusion_prior_cap)        # NP unchanged
+    # prior and similarity both count: a popular NP row can beat a weak LIB match
+    assert s[5] > s[1]
+
+
 # --- similarity choice, pool context, merge ---------------------------------------------
 
 def test_lib_similarity_options():
