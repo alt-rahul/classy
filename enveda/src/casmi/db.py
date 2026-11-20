@@ -587,3 +587,111 @@ def release(np_tier: bool = False) -> None:
     """Free cached PubChem row groups (and the NP tier if ``np_tier``) of the default DB."""
     if _DEFAULT is not None:
         _DEFAULT.release(np_tier=np_tier)
+
+
+# ---------------------------------------------------------------------- VA tier (ROADMAP R13)
+# Appended by R13 without changing the code above. "va" joins TIERS, and
+# ``CandidateDB._lookup_many`` / ``CandidateDB.release`` are wrapped: a lookup whose tiers
+# include "va" also returns rows of the virtual-analog tier (``casmi.va.VATier`` over
+# ``PROCESSED/db/va``; set ``CandidateDB.va_path`` to use another directory). A lookup without
+# "va" calls the original method with the original arguments, so ("np", "pubchem") returns
+# exactly what it did before. VA rows: tier "va", in_np / in_pubchem False, np_row -1, the
+# NP / PubChem columns NA; ``va.LOOKUP_COLUMNS`` (provenance: seed id, rule code and name,
+# n_seeds, n_pairs, the rule's NP rate, the seed's tier, ik14, NP row, mass, spectra and
+# priors) are appended after ``OUT_COLUMNS`` (NA on NP / PubChem rows) only when "va" is
+# queried. A VA row whose ik14 is also an NP or PubChem row of the same query is dropped
+# (the build already excludes them; this keeps newer NP / PubChem tiers authoritative).
+# Rows are sorted by (query, mono_mass, ik14, tier) as before.
+
+VA_TIER = "va"
+TIERS = TIERS + (VA_TIER,)
+__all__ += ["VA_TIER", "va_dir"]
+
+
+def va_dir() -> Path:
+    """Directory of the VA tier shards (``PROCESSED/db/va``)."""
+    return paths.PROCESSED / "db" / "va"
+
+
+_lookup_many_base = CandidateDB._lookup_many
+_release_base = CandidateDB.release
+
+
+def _va_reader(self: CandidateDB):
+    from .va import VATier
+
+    path = Path(getattr(self, "va_path", None) or va_dir())
+    r = getattr(self, "_va_reader_obj", None)
+    if r is None or r.dir != path:
+        r = VATier(path)
+        self._va_reader_obj = r
+    return r
+
+
+def _va_na_columns(n: int) -> dict:
+    from .va import LOOKUP_DTYPES
+
+    return {c: pd.array([pd.NA] * n, dtype=dt) for c, dt in LOOKUP_DTYPES.items()}
+
+
+def _lookup_many_va(self: CandidateDB, masses: np.ndarray, tol_ppm, tiers, min_tol_da) -> pd.DataFrame:
+    t = _norm_tiers(tiers, self.cfg.db_tiers)
+    if VA_TIER not in t:
+        return _lookup_many_base(self, masses, tol_ppm, tiers, min_tol_da)
+    base = tuple(x for x in t if x != VA_TIER)
+    out = _lookup_many_base(self, masses, tol_ppm, base, min_tol_da) if base else _empty_out()
+    out = out.assign(**_va_na_columns(len(out)))
+    cfg = self.cfg
+    tol = cfg.mass_tol_ppm if tol_ppm is None else float(tol_ppm)
+    mtd = cfg.mass_tol_min_da if min_tol_da is None else float(min_tol_da)
+    if not np.all(np.isfinite(masses)):
+        raise ValueError("lookup: masses must be finite")
+    rdr = _va_reader(self)
+    if not rdr.available():
+        return out
+    half = np.maximum(tol * 1e-6 * masses, mtd)
+    w = rdr.windows(masses - half, masses + half)
+    if w is None or not len(w):
+        return out
+    if len(out):
+        k_out = pd.MultiIndex.from_arrays([out["_q"].to_numpy(), out["ik14"].astype(object)])
+        k_va = pd.MultiIndex.from_arrays([w["_q"].to_numpy(), w["ik14"].astype(object)])
+        w = w[~k_va.isin(k_out)].reset_index(drop=True)
+    n = len(w)
+    if not n:
+        return out
+    q = w["_q"].to_numpy(np.int64)
+    qm = masses[q]
+    mm = w["mono_mass"].to_numpy(np.float64)
+    cols: dict = {"_q": q, "query_mass": qm}
+    for c in OUT_COLUMNS:
+        if c == "ppm_err":
+            cols[c] = (mm - qm) / qm * 1e6
+        elif c == "tier":
+            cols[c] = _str_column([VA_TIER] * n, n)
+        elif c in ("ik14", "smiles", "formula"):
+            cols[c] = _str_column(w[c].to_numpy(dtype=object), n)
+        elif c == "mono_mass":
+            cols[c] = mm
+        else:
+            cols[c] = _na_column(c, n)
+    cols.update(rdr.provenance(w["seed_id"].to_numpy(), w["rule"].to_numpy(), w["n_seeds"].to_numpy(),
+                               w["n_pairs"].to_numpy()))
+    vdf = pd.DataFrame(cols)
+    allf = pd.concat([out, vdf], ignore_index=True) if len(out) else vdf
+    allf = allf.sort_values(["_q", "mono_mass", "ik14", "tier"], kind="mergesort",
+                            na_position="last").reset_index(drop=True)
+    return allf[list(out.columns)]
+
+
+def _release_va(self: CandidateDB, np_tier: bool = False) -> None:
+    _release_base(self, np_tier=np_tier)
+    r = getattr(self, "_va_reader_obj", None)
+    if r is not None:
+        r.release()
+        if np_tier:
+            self._va_reader_obj = None
+
+
+CandidateDB._lookup_many = _lookup_many_va
+CandidateDB.release = _release_va

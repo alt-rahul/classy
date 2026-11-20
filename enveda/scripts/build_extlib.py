@@ -141,6 +141,18 @@ def stage_fetch(source: str, lg) -> None:
         _record_download(source, name, url, dest)
 
 
+
+def _join(*cols) -> pa.ChunkedArray:
+    """Element-wise "a|b|c" of string columns (any string type), as large_string."""
+    cs = [pc.cast(c, pa.large_string()) for c in cols]
+    return pc.binary_join_element_wise(*cs, pa.scalar("|", pa.large_string()))
+
+
+def _isin(col, values) -> np.ndarray:
+    return pc.is_in(pc.cast(col, pa.large_string()), value_set=pc.cast(values, pa.large_string())).to_numpy(
+        zero_copy_only=False)
+
+
 # --------------------------------------------------------------------------------------
 # train context
 # --------------------------------------------------------------------------------------
@@ -413,7 +425,7 @@ class StagedPeaks:
 
 def train_peaks_for(pairs: list[str], lg) -> dict[str, tuple]:
     """(ik14|adduct) -> cleaned train peaks (flat) from WP6's spectra files."""
-    want = pa.array(sorted(set(pairs)))
+    want = pa.array(sorted(set(pairs)), pa.large_string())
     acc: dict[str, tuple[list, list]] = defaultdict(lambda: ([], []))
     t0 = time.perf_counter()
     n = 0
@@ -421,12 +433,12 @@ def train_peaks_for(pairs: list[str], lg) -> dict[str, tuple]:
         pf = pq.ParquetFile(f)
         for b in pf.iter_batches(batch_size=50000, columns=["inchikey14", "adduct", "ms2_mzs",
                                                              "ms2_normalized_intensities"]):
-            key = pc.binary_join_element_wise(b.column(0), b.column(1), "|")
+            key = _join(b.column(0), b.column(1))
             hit = pc.is_in(key, value_set=want)
             if not pc.any(hit).as_py():
                 continue
             sel = pa.Table.from_batches([b]).filter(hit)
-            keys = pc.binary_join_element_wise(sel.column(0), sel.column(1), "|").to_pylist()
+            keys = _join(sel.column(0), sel.column(1)).to_pylist()
             mzs = sel.column(2).to_numpy(zero_copy_only=False)
             its = sel.column(3).to_numpy(zero_copy_only=False)
             for k, m, x in zip(keys, mzs, its):
@@ -443,9 +455,9 @@ def stage_finalize(cfg: Config, lg) -> dict:
     sources = _staged_sources()
     lg.info("finalize sources (priority order): %s", sources)
     tm = pq.read_table(train_dir() / "meta.parquet", columns=["ik14", "adduct", "instrument_family"])
-    combos = pc.unique(pc.binary_join_element_wise(tm["ik14"], tm["adduct"], tm["instrument_family"], "|"))
-    pairs_t = pc.unique(pc.binary_join_element_wise(tm["ik14"], tm["adduct"], "|"))
-    train_ik = pc.unique(tm["ik14"])
+    combos = pc.unique(_join(tm["ik14"], tm["adduct"], tm["instrument_family"]))
+    pairs_t = pc.unique(_join(tm["ik14"], tm["adduct"]))
+    train_ik = pc.unique(pc.cast(tm["ik14"], pa.large_string()))
     del tm
     lg.info("train: %d structures, %d (ik14, adduct) pairs, %d (ik14, adduct, instrument) combos",
             len(train_ik), len(pairs_t), len(combos))
@@ -453,11 +465,11 @@ def stage_finalize(cfg: Config, lg) -> dict:
     metas = []
     for pri, s in enumerate(sources):
         t = _read_staged(s, cols)
-        k3 = pc.binary_join_element_wise(t["inchikey14"], t["adduct"], t["instrument_family"], "|")
-        k2 = pc.binary_join_element_wise(t["inchikey14"], t["adduct"], "|")
-        intr = pc.is_in(t["inchikey14"], value_set=train_ik).to_numpy(zero_copy_only=False)
-        cov = pc.is_in(k3, value_set=combos).to_numpy(zero_copy_only=False)
-        tpair = pc.is_in(k2, value_set=pairs_t).to_numpy(zero_copy_only=False)
+        k3 = _join(t["inchikey14"], t["adduct"], t["instrument_family"])
+        k2 = _join(t["inchikey14"], t["adduct"])
+        intr = _isin(t["inchikey14"], train_ik)
+        cov = _isin(k3, combos)
+        tpair = _isin(k2, pairs_t)
         alive = ~cov
         df = pd.DataFrame({
             "row": np.flatnonzero(alive).astype(np.int64),
@@ -504,7 +516,7 @@ def stage_finalize(cfg: Config, lg) -> dict:
                     tabs.append(pf.read_row_group(rg).take(pa.array(keep_rows[a:b] - base)))
                 base += n
         tab = pa.concat_tables(tabs) if tabs else pq.read_table(_staged_files(s)[0]).slice(0, 0)
-        intr = pc.is_in(tab["inchikey14"], value_set=train_ik)
+        intr = pa.array(_isin(tab["inchikey14"], train_ik))
         tab = tab.append_column("in_train", intr).append_column("mkey", pa.nulls(tab.num_rows, pa.string()))
         tab = tab.select(list(extlib.FINAL_COLUMNS))
         # structures absent from train first, then by structure and spectrum id
@@ -967,7 +979,7 @@ def _staged_rows_for(ik14: set) -> pd.DataFrame:
     parts = []
     for s in _staged_sources():
         t = _read_staged(s, ["inchikey14"])
-        rows = np.flatnonzero(pc.is_in(t["inchikey14"], value_set=pa.array(sorted(ik14))).to_numpy(zero_copy_only=False))
+        rows = np.flatnonzero(_isin(t["inchikey14"], pa.array(sorted(ik14))))
         if rows.size:
             parts.append(_read_staged_rows(s, rows))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=TRAIN_LIB_COLS)

@@ -52,9 +52,11 @@ size, sha256, git commit).
 
 | slug | content | version | size |
 |---|---|---|---|
-| `ograhulrajkumar/casmi-code` | `casmi/` (src/casmi), `configs/`, `pyproject.toml` | 1 | 0.6 MB |
+| `ograhulrajkumar/casmi-code` | `casmi/` (src/casmi), `configs/`, `pyproject.toml` | 2 (code at 8c486ac: libmatch, fragments, R3 priors; v1 = b0 era) | 0.9 MB |
 | `ograhulrajkumar/casmi-db-np` | `np.parquet`, `np_fp.npy`, `build_report.json`, `mass_disagreements.csv` (data/processed/db/np) | 2 (R3 prior columns; v1 without) | 473 MB |
 | `ograhulrajkumar/casmi-db-pubchem` | 120 `mass_XXXX.parquet` shards + `_index.json` (data/processed/db/pubchem) | 2 (R3 prior columns; v1 without) | 2.30 GB |
+| `ograhulrajkumar/casmi-library` | data/processed/library (WP5 build 2026-11-20 18:51): peak stores, consensus, meta, structures, `open_index_pos/neg.npz` (R6) | 1 | 1.19 GB |
+| `ograhulrajkumar/casmi-extreme-test` | `test.parquet` + `cases.json` from `scripts/make_extreme_test.py` (R9 extremes; debug kernels only) | 1 | 0.3 MB |
 
 Later artefacts (library, models) get their own datasets the same way and one line each in
 `ARTEFACTS` in `scripts/package_kaggle.py` (artefact subdir under `CASMI_ARTEFACTS` -> slug),
@@ -83,6 +85,7 @@ by hand). The settings cell has one variable that picks the pipeline: `CONFIG =
 |---|---|---|---|---|
 | casmi-inference v1 | b0_npdb | ERROR: settings cell used `Path` before importing it (fixed) | 31 s | - |
 | casmi-inference v2 | b0_npdb | COMPLETE; pipeline 75.4 s (9,579 + 1,237 mkeys computed cold, no timeouts), peak RSS 1.19 GB | notebook 85 s, session 121 s | byte-identical to `submissions/20261118_b0_npdb_prior.csv` (sha256 `5355da5c...3fcb8a`; a local rerun with today's code gives the same bytes) |
+| casmi-inference v3 | b1_library (code v2, library v1) | COMPLETE; pipeline 378.6 s (local 120 s: slower CPU, cold mkeys, library read from the dataset mount), peak RSS 4.61 GB, 0 errors, 0 padded | notebook 389 s, session 456 s | byte-identical to `submissions/20261120_b1_library_prior.csv` (sha256 `406b36df...239c760`); submitted as #3 |
 
 ## Commands
 

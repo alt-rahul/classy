@@ -48,11 +48,13 @@ PROBE_NOTEBOOK = ROOT / "dist" / "kaggle" / "probe.ipynb"
 KERNEL_SLUG = "casmi-inference"
 KERNEL_TITLE = "casmi inference"
 PROBE_SLUG = "casmi-probe"
+DEBUG_SLUG = "casmi-inference-debug"   # robustness runs (R9 extremes); never submitted
 CODE_DATASET = "casmi-code"
 # Artefact subdirectory (relative to CASMI_ARTEFACTS) -> dataset slug of the owner.
 ARTEFACTS: dict[str, str] = {
     "processed/db/np": "casmi-db-np",
     "processed/db/pubchem": "casmi-db-pubchem",
+    "processed/library": "casmi-library",
 }
 # Extra wheel datasets ("owner/slug"); the RDKit wheel is always attached.
 WHEEL_DATASETS: list[str] = []
@@ -118,7 +120,8 @@ def find_test(competition):
 
 
 def inference_notebook(config: str, owner: str, artefacts: dict[str, str], wheels: list[str],
-                       commit: str) -> dict:
+                       commit: str, test_dataset: str | None = None,
+                       deadlines: dict[str, float] | None = None) -> dict:
     cfg_cell = f'''
 # ---- the only settings ---------------------------------------------------------------
 from pathlib import Path
@@ -133,11 +136,16 @@ WORK = Path("/kaggle/working")
 RUN = WORK / "casmi_run"               # CASMI_ROOT: logs and scratch
 SUBMISSION = WORK / "submission.csv"
 FALLBACK_SMILES = "Oc1ccccc1"          # only if the whole pipeline cannot run
+TEST_DATASET = {test_dataset!r}             # debug kernels only: test.parquet from this dataset
+DEADLINE_OVERRIDES = {json.dumps(deadlines or {}, sort_keys=True)}  # debug: soft/hard/fallback s after start
 '''
     setup = r'''
 T0 = time.time()
 print("python", sys.version.split()[0], "| cpus", os.cpu_count())
-TEST = find_test(COMPETITION)  # without it no submission is possible at all
+if TEST_DATASET:  # debug kernels (never the submission kernel): a synthetic test file
+    TEST = sorted(find_dataset(TEST_DATASET, OWNER).rglob("test.parquet"))[0]
+else:
+    TEST = find_test(COMPETITION)  # without it no submission is possible at all
 print("test:", TEST)
 CODE = None
 SETUP_ERROR = None
@@ -220,33 +228,53 @@ def write_fallback(reason):
     print(f"FALLBACK submission written ({reason}): {len(ids)} molecules")
 
 
-test_df = None
+def run_in_process():
+    """The unsupervised path (only if the supervisor itself fails early)."""
+    from casmi import io, log, pipeline
+    pipeline.limit_threads(cfg.n_jobs)
+    tdf = io.read_test(TEST)
+    res = pipeline.run(tdf, cfg)
+    io.write_submission(res.preds, SUBMISSION, test_df=tdf, max_guesses=cfg.top_k)
+    print(f"in-process pipeline done in {res.wall_s:.1f} s; peak RSS {log.peak_rss_mb():.0f} MB")
+
+
 cfg = None
+GUARD = None
 try:
     if SETUP_ERROR:
         raise RuntimeError("setup failed")
-    from casmi import io, log, paths, pipeline
+    write_fallback("placeholder until the pipeline finishes")
+    from casmi import guards, paths
     from casmi.config import load_config
-    lg = log.get_logger(f"kaggle_{CONFIG}")
     print("paths:", json.dumps(paths.as_dict(), indent=1))
-    cfg = load_config(CODE / "configs" / f"{CONFIG}.yaml")
+    cfg_path = CODE / "configs" / f"{CONFIG}.yaml"
+    cfg = load_config(cfg_path)
     print("config overrides:", cfg.overrides())
-    pipeline.limit_threads(cfg.n_jobs)
-    test_df = io.read_test(TEST)
-    res = pipeline.run(test_df, cfg)
-    io.write_submission(res.preds, SUBMISSION, test_df=test_df, max_guesses=cfg.top_k)
-    rep = RUN / "logs" / f"kaggle_{CONFIG}_molecules.csv"
-    rep.parent.mkdir(parents=True, exist_ok=True)
-    res.molecules.to_csv(rep, index=False, lineterminator="\n")
-    print(f"pipeline done in {res.wall_s:.1f} s; peak RSS {log.peak_rss_mb():.0f} MB")
+    DL = {"soft": cfg.guard_soft_deadline_s, "hard": cfg.guard_hard_deadline_s,
+          "fallback": cfg.guard_fallback_deadline_s}
+    DL.update(DEADLINE_OVERRIDES)
+    print("deadlines (s after notebook start):", DL)
+    fb = CODE / "configs" / f"{cfg.guard_fallback_config}.yaml" if cfg.guard_fallback_config else None
+    GUARD = guards.supervise(TEST, cfg_path, SUBMISSION, work_dir=RUN / "guard",
+                             soft_deadline=T0 + DL["soft"], hard_deadline=T0 + DL["hard"],
+                             fallback_config=fb, fallback_deadline=T0 + DL["fallback"])
+    print("guard report:", json.dumps(GUARD, indent=1, default=str)[:20000])
 except Exception:
     traceback.print_exc()
-    write_fallback("pipeline failed")
+    try:
+        if SETUP_ERROR or cfg is None or time.time() - T0 > 3600:
+            raise RuntimeError("no time or no setup for an in-process run")
+        run_in_process()
+    except Exception:
+        traceback.print_exc()
+        write_fallback("pipeline failed")
 '''
     validate = r'''
 try:
     from casmi import io
-    report = io.validate_submission(SUBMISSION, test_df=test_df,
+    import pandas as pd
+    test_ids = pd.read_parquet(TEST, columns=["molecule_id"])
+    report = io.validate_submission(SUBMISSION, test_df=test_ids,
                                     max_guesses=cfg.top_k if cfg is not None else 25)
     print("validate_submission:", report)
 except Exception:
@@ -401,6 +429,18 @@ def _commit() -> str:
         return "unknown"
 
 
+def _deadlines(spec: str | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for part in (spec or "").split(","):
+        if not part.strip():
+            continue
+        k, sep, v = part.partition("=")
+        if not sep or k.strip() not in ("soft", "hard", "fallback"):
+            kc.die(f"--deadlines {spec}: expected soft=S,hard=S,fallback=S")
+        out[k.strip()] = float(v)
+    return out
+
+
 def _artefacts(extra: list[str]) -> dict[str, str]:
     a = dict(ARTEFACTS)
     for spec in extra:
@@ -412,17 +452,19 @@ def _artefacts(extra: list[str]) -> dict[str, str]:
 
 
 def write_notebook(config: str, owner: str, artefacts: dict[str, str], wheels: list[str],
-                   out: Path = NOTEBOOK) -> Path:
+                   out: Path = NOTEBOOK, test_dataset: str | None = None,
+                   deadlines: dict[str, float] | None = None) -> Path:
     if not (ROOT / "configs" / f"{config}.yaml").is_file():
         kc.die(f"configs/{config}.yaml does not exist")
-    nb = inference_notebook(config, owner, artefacts, wheels, _commit())
+    nb = inference_notebook(config, owner, artefacts, wheels, _commit(), test_dataset, deadlines)
     text = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
     for bad in ("/home/", "/root/", "/tmp/"):
         if bad in text:
             kc.die(f"notebook would contain an absolute path outside /kaggle/ ({bad})")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
-    kc.say(f"wrote {out.relative_to(ROOT)} (config {config}, owner {owner}, commit {_commit()})")
+    shown = out.relative_to(ROOT) if out.resolve().is_relative_to(ROOT) else out
+    kc.say(f"wrote {shown} (config {config}, owner {owner}, commit {_commit()})")
     return out
 
 
@@ -456,9 +498,17 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
                        help="extra artefact dataset (repeatable)")
         s.add_argument("--wheels", action="append", default=[], metavar="OWNER/SLUG",
                        help="extra wheel dataset (repeatable)")
-        s.add_argument("--out", type=Path, default=NOTEBOOK)
+        s.add_argument("--out", type=Path, default=None,
+                       help="notebook path (default notebooks/kaggle_inference.ipynb; debug "
+                            "notebooks go to dist/kaggle/<slug>.ipynb)")
+        s.add_argument("--test-dataset", default=None, metavar="SLUG",
+                       help="DEBUG kernels only: read test.parquet from this private dataset "
+                            "(e.g. casmi-extreme-test from scripts/make_extreme_test.py)")
+        s.add_argument("--deadlines", default=None, metavar="soft=S,hard=S,fallback=S",
+                       help="DEBUG kernels only: guard deadlines in seconds after notebook start")
         if name == "push":
-            s.add_argument("--slug", default=KERNEL_SLUG)
+            s.add_argument("--slug", default=KERNEL_SLUG,
+                           help=f"kernel slug (default {KERNEL_SLUG}, the submission kernel)")
             s.add_argument("--title", default=KERNEL_TITLE)
             s.add_argument("--wait", action="store_true")
             s.add_argument("--fetch", action="store_true", help="download the output after --wait")
@@ -479,13 +529,22 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd in ("notebook", "push"):
         arts = _artefacts(a.artefact)
         wheels = list(WHEEL_DATASETS) + list(a.wheels)
-        path = write_notebook(a.config, own, arts, wheels, a.out)
+        deadlines = _deadlines(a.deadlines)
+        debug = bool(a.test_dataset or deadlines)
+        slug = getattr(a, "slug", None) or (DEBUG_SLUG if debug else KERNEL_SLUG)
+        if debug and slug == KERNEL_SLUG:
+            kc.die(f"--test-dataset / --deadlines are for debug kernels only; pass --slug "
+                   f"(e.g. {DEBUG_SLUG}), never the submission kernel {KERNEL_SLUG}")
+        out = a.out or (ROOT / "dist" / "kaggle" / f"{slug}.ipynb" if debug else NOTEBOOK)
+        path = write_notebook(a.config, own, arts, wheels, out, a.test_dataset, deadlines)
         if a.cmd == "notebook":
             return 0
         datasets = sorted({f"{own}/{CODE_DATASET}", kc.RDKIT_WHEEL_DATASET,
-                           *(f"{own}/{s}" for s in arts.values()), *wheels})
+                           *(f"{own}/{s}" for s in arts.values()), *wheels,
+                           *([f"{own}/{a.test_dataset}"] if a.test_dataset else [])})
         nb = json.loads(path.read_text(encoding="utf-8"))
-        return push(nb, a.slug, a.title, own, datasets, a.wait, a.fetch, a.timeout)
+        return push(nb, slug, a.title if slug == KERNEL_SLUG else slug, own, datasets, a.wait,
+                    a.fetch, a.timeout)
     if a.cmd == "output":
         dest = a.dest or ROOT / "dist" / "kaggle" / "output" / a.slug
         got = kc.kernel_output(own, a.slug, dest)

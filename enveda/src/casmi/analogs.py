@@ -404,11 +404,12 @@ class _Struct:
 
 
 _STRUCT_MEMO: "OrderedDict[str, _Struct]" = OrderedDict()
-_STRUCT_MEMO_MAX = 200_000
+_STRUCT_MEMO_MAX = 20_000            # hit structures repeat across molecules; candidates rarely
 
 
-def struct_info(smiles: Any) -> _Struct:
-    """Scaffold, element-graph keys and element-graph Mol of a SMILES (memoised)."""
+def struct_info(smiles: Any, memo: bool = True) -> _Struct:
+    """Scaffold, element-graph keys and element-graph Mol of a SMILES (memoised in a
+    bounded LRU when ``memo``; candidates are not memoised, hit structures are)."""
     key = smiles if isinstance(smiles, str) else ""
     hit = _STRUCT_MEMO.get(key)
     if hit is not None:
@@ -432,9 +433,10 @@ def struct_info(smiles: Any) -> _Struct:
                     out = _Struct(scaf or "", skel or "", g, mol.GetNumAtoms())
             except Exception:  # noqa: BLE001 - one bad structure never fails a run
                 out = _Struct("", "", None, 0)
-    _STRUCT_MEMO[key] = out
-    if len(_STRUCT_MEMO) > _STRUCT_MEMO_MAX:
-        _STRUCT_MEMO.popitem(last=False)
+    if memo:
+        _STRUCT_MEMO[key] = out
+        if len(_STRUCT_MEMO) > _STRUCT_MEMO_MAX:
+            _STRUCT_MEMO.popitem(last=False)
     return out
 
 
@@ -665,7 +667,7 @@ def structure_features(cand_smiles: Sequence[Any], cand_formulas: Sequence[Any],
     codes = formula_delta_codes(list(cand_formulas), list(hs["formula"]))
     hscaf = np.array([h.scaffold for h in hinfo], dtype=object)
     for i, smi in enumerate(cand_smiles):
-        ci = struct_info(smi)
+        ci = struct_info(smi, memo=False)
         if ci.graph is None:
             continue
         scaf = (hscaf == ci.scaffold) if ci.scaffold else np.zeros(len(hinfo), bool)

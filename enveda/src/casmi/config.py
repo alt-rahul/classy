@@ -328,6 +328,24 @@ class Config:
     analog_feat_fp_path: str = ""            # optional precomputed hit fingerprints: <x>.npy + <x>_ik14.parquet ("" = on the fly)
     analog_feat_n_jobs: int = 1              # processes for candidate fingerprints (0 = n_jobs)
 
+    # --- Virtual-analog tier (ROADMAP R13; casmi.va, scripts/build_va.py) --------------
+    va_mass_min: float = 100.0               # products kept with mono_mass in [min, max] Da
+    va_mass_max: float = 1300.0
+    va_seed_max_heavy: int = 120             # seeds with more heavy atoms are skipped
+    va_seed_time_s: float = 60.0             # rules stop on a seed after this many seconds
+    va_exclude_libs: tuple = ("enveda-180", "drug_plus")  # train seeds need spectra outside these
+    va_gen_n_seeds: int = 20                 # best seeds that get the on-demand second edit (GEN)
+
+    # --- Kaggle inference guards (ROADMAP R9; casmi.guards, the inference notebook) -----
+    # Only active under casmi.guards.run / supervise (the Kaggle notebook); other runs ignore them.
+    guard_stage_budget_s: float = 20.0       # per stage: cumulative seconds per molecule before it trips (0 = off)
+    guard_stage_budgets: tuple = ()          # per-stage overrides, "name=seconds per molecule" (e.g. "lib=5")
+    guard_stage_grace_s: float = 600.0       # added to every stage budget (warm-up, numba compilation)
+    guard_soft_deadline_s: float = 10800.0   # after notebook start: optional stages skipped, fast core stages
+    guard_hard_deadline_s: float = 23400.0   # main pipeline process killed; its finished batches are kept
+    guard_fallback_deadline_s: float = 28800.0  # fallback run for missing molecules killed (Kaggle limit 9 h)
+    guard_fallback_config: str = "b0_npdb"   # configs/<name>.yaml for molecules the main run did not finish
+
     def __post_init__(self) -> None:
         for f in dataclasses.fields(self):
             value = _coerce(f.name, f.default, getattr(self, f.name))

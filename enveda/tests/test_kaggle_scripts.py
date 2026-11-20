@@ -75,3 +75,24 @@ def test_inference_notebook_is_offline_and_parses():
     assert "CONFIG = 'b0_npdb'" in code
     assert "NUMBA_CACHE_DIR" in code and "validate_submission" in code
     assert chr(0x2014) not in text  # no em-dash
+
+
+def test_inference_notebook_is_supervised_and_debug_kernels_are_separate(tmp_path):
+    nb = package_kaggle.inference_notebook("b1_library", "someone", dict(package_kaggle.ARTEFACTS),
+                                           [], "abc1234")
+    code = "\n\n".join(c["source"] for c in nb["cells"] if c["cell_type"] == "code")
+    assert "guards.supervise(" in code and "TEST_DATASET = None" in code
+    assert "DEADLINE_OVERRIDES = {}" in code and "write_fallback" in code
+    assert package_kaggle.ARTEFACTS["processed/library"] == "casmi-library"
+    dbg = package_kaggle.inference_notebook("b1_library", "someone", {}, [], "abc1234",
+                                            test_dataset="casmi-extreme-test",
+                                            deadlines={"hard": 60.0})
+    dcode = "\n\n".join(c["source"] for c in dbg["cells"] if c["cell_type"] == "code")
+    ast.parse(dcode)
+    assert "TEST_DATASET = 'casmi-extreme-test'" in dcode and '"hard": 60.0' in dcode
+    assert package_kaggle._deadlines("soft=1,hard=2.5") == {"soft": 1.0, "hard": 2.5}
+    # a debug notebook can never be pushed as the submission kernel
+    with pytest.raises(SystemExit):
+        package_kaggle.main(["push", "--config", "b1_library", "--owner", "x",
+                             "--test-dataset", "casmi-extreme-test",
+                             "--out", str(tmp_path / "nb.ipynb")])
