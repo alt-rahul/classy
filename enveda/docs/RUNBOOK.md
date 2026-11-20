@@ -33,3 +33,11 @@ Rules that bite:
 - Merger and new-entrant deadline 2026-12-07 23:59 UTC; final deadline 2026-12-14 23:59 UTC.
 - Scoring image: Python 3.12, internet off, RDKit from dataset `metric/rdkit-2026-3-3-wheel`.
 - train.parquet has no spectrum_id or molecule_id columns (2,539,608 rows, 21 row groups).
+
+## Strategy pivot (2026-11-20, after docs/RESEARCH.md)
+
+- The public 0.495 notebook line already contains most of PLAN.md and more. Strategy: fork-and-extend. A private fork of the best public notebook is the base, the fallback submission and a candidate/feature source; our components are measured as gains over it.
+- The CPU MLP fingerprint model (WP9) is superseded as the main model by a contrastive peak-token transformer trained on Kaggle GPUs (RESEARCH item 1), which is also the carrier for simulated-spectra training of the NP tier (item 2).
+- Validate and fit rankers on NP-like structures only (enveda-np-examples masks first); random synthetic timsTOF holdouts mis-rank pipelines.
+- Never prune the pool by a library-similarity signal before ranking.
+- Public board is about 125 molecules: differences under 0.01 are noise.

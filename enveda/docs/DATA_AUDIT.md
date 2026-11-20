@@ -1,26 +1,26 @@
 # Data audit (WP6)
 
-Generated 2026-11-20 18:49 by `scripts/ingest_train.py --stage audit` from `/home/user/classy/enveda/data/raw/train.parquet` (2,539,608 rows, 21 row groups). Every number below is recomputed by that command; PLAN.md section numbers in brackets.
-
-mkey pass not run yet: mkey-dependent items are marked pending. Run `scripts/ingest_train.py --stage mkey` then `--stage audit`.
+Generated 2026-11-20 19:07 by `scripts/ingest_train.py --stage audit` from `/home/user/classy/enveda/data/raw/train.parquet` (2,539,608 rows, 21 row groups). Every number below is recomputed by that command; PLAN.md section numbers in brackets.
 
 ## 1. Rows and structures per library (WP6 acceptance)
 
-| library | rows in | dropped | kept | expected spectra | kept vs expected % | structures | expected structures | structures vs expected % |
-|---|---|---|---|---|---|---|---|---|
-| drug_plus | 2,545 | 0 | 2,545 | 2,545 | 0.00 | 2,539 | 2,539 | 0.00 |
-| enveda-180 | 1,153,785 | 0 | 1,153,785 | 1,153,785 | 0.00 | 182,941 | 182,941 | 0.00 |
-| enveda-np-examples | 1,184 | 0 | 1,184 | 1,151 | 2.87 | 250 | 250 | 0.00 |
-| gnps | 220,849 | 595 | 220,254 | 220,849 | -0.27 | 45,729 | 45,750 | -0.05 |
-| masaryk | 652 | 0 | 652 | 652 | 0.00 | 416 | 416 | 0.00 |
-| massbank | 101,727 | 2,526 | 99,201 | 101,727 | -2.48 | 9,157 | 9,180 | -0.25 |
-| mona | 92,416 | 257 | 92,159 | 92,416 | -0.28 | 11,679 | 11,681 | -0.02 |
-| msdial | 40,765 | 709 | 40,056 | 40,765 | -1.74 | 9,097 | 9,127 | -0.33 |
-| pluskal_ms2 | 527,581 | 442 | 527,139 | 527,581 | -0.08 | 46,816 | 46,821 | -0.01 |
-| riken | 347,171 | 29,911 | 317,260 | 347,171 | -8.62 | 15,851 | 15,892 | -0.26 |
-| spectraverse | 50,933 | 51 | 50,882 | 50,933 | -0.10 | 9,630 | 9,631 | -0.01 |
+| library | rows in | expected spectra | rows in vs expected % | dropped | kept | kept % of rows in | structures kept | expected structures | structures vs expected % |
+|---|---|---|---|---|---|---|---|---|---|
+| drug_plus | 2,545 | 2,545 | 0.00 | 0 | 2,545 | 100.00 | 2,539 | 2,539 | 0.00 |
+| enveda-180 | 1,153,785 | 1,153,785 | 0.00 | 0 | 1,153,785 | 100.00 | 182,941 | 182,941 | 0.00 |
+| enveda-np-examples | 1,184 | 1,151 | 2.87 | 0 | 1,184 | 100.00 | 250 | 250 | 0.00 |
+| gnps | 220,849 | 220,849 | 0.00 | 595 | 220,254 | 99.73 | 45,729 | 45,750 | -0.05 |
+| masaryk | 652 | 652 | 0.00 | 0 | 652 | 100.00 | 416 | 416 | 0.00 |
+| massbank | 101,727 | 101,727 | 0.00 | 2,526 | 99,201 | 97.52 | 9,157 | 9,180 | -0.25 |
+| mona | 92,416 | 92,416 | 0.00 | 257 | 92,159 | 99.72 | 11,679 | 11,681 | -0.02 |
+| msdial | 40,765 | 40,765 | 0.00 | 709 | 40,056 | 98.26 | 9,097 | 9,127 | -0.33 |
+| pluskal_ms2 | 527,581 | 527,581 | 0.00 | 442 | 527,139 | 99.92 | 46,816 | 46,821 | -0.01 |
+| riken | 347,171 | 347,171 | 0.00 | 29,911 | 317,260 | 91.38 | 15,851 | 15,892 | -0.26 |
+| spectraverse | 50,933 | 50,933 | 0.00 | 51 | 50,882 | 99.90 | 9,630 | 9,631 | -0.01 |
 
-Within 1 percent of COMPETITION.md for every library: **False** (total kept 2,505,117 of 2,539,608).
+Rows read within 1 percent of COMPETITION.md for every library: **False** (outside: enveda-np-examples 1,184 vs 1,151, +2.87 percent). Total kept 2,505,117 of 2,539,608 (98.64 percent); every dropped row has a reason below. Structures are counted after the drops.
+
+enveda-np-examples: COMPETITION.md says 1,151 spectra but the file has more; its structure count is checked in the table (expected 250). The extra rows are kept: they are the NP-TIMS query pool.
 
 Drop reasons (first failing check, order as in the ingest docstring):
 
@@ -37,6 +37,18 @@ Drop reasons (first failing check, order as in the ingest docstring):
 | pluskal_ms2 | 0 | 0 | 0 | 0 | 0 | 0 | 442 |
 | riken | 0 | 0 | 0 | 0 | 0 | 0 | 29,911 |
 | spectraverse | 0 | 0 | 0 | 0 | 0 | 0 | 51 |
+
+`empty_after_cleaning` by cause (`_empty_kind`: precursor_window_only = every raw peak within [precursor - 0.5, precursor + 2] Da, i.e. no fragment; nothing_below_precursor = no peak below that window but some above it; below_floor_or_other = fragments existed but none survived):
+
+| library | precursor_window_only | nothing_below_precursor | below_floor_or_other |
+|---|---|---|---|
+| gnps | 470 | 125 | 0 |
+| massbank | 2,357 | 169 | 0 |
+| mona | 146 | 111 | 0 |
+| msdial | 642 | 67 | 0 |
+| pluskal_ms2 | 441 | 1 | 0 |
+| riken | 10,720 | 19,191 | 0 |
+| spectraverse | 44 | 7 | 0 |
 
 Flags on kept rows (not dropped):
 
@@ -195,6 +207,30 @@ Free-text values with their family (top 60 of 83 distinct texts, by spectra):
 
 Columns `abs ...` are quantiles of the absolute given error. `abs M err` is recomputed here: neutral mass from precursor m/z and the parsed adduct versus the formula mass of `molecular_formula`, in ppm of M (the quantity the retrieval window applies to).
 
+timsTOF libraries (the test instrument), test adducts only, recomputed M error per spectrum (signed, ppm). Molecule-level numbers and the window are in section 11.
+
+| library | adduct | spectra | p0.5 | p5 | median | p95 | p99.5 | abs p99 | abs max | abs > 5 | abs > 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| enveda-180 | [M+CH2O2-H]- | 24,556 | -4.37 | -1.50 | 0.35 | 2.07 | 4.30 | 4.34 | 5.78 | 106 | 0 |
+| enveda-180 | [M+Cl]- | 2,407 | -4.82 | -3.13 | -0.15 | 2.35 | 5.01 | 4.85 | 5.48 | 19 | 0 |
+| enveda-180 | [M+H]+ | 588,507 | -0.89 | 0.68 | 2.22 | 3.64 | 4.27 | 4.13 | 5.14 | 32 | 0 |
+| enveda-180 | [M+K]+ | 1,084 | -5.47 | -4.44 | 0.23 | 4.46 | 5.52 | 5.48 | 5.60 | 55 | 0 |
+| enveda-180 | [M+NH4]+ | 4,702 | -5.23 | -4.41 | 1.50 | 4.03 | 5.11 | 5.18 | 5.33 | 114 | 0 |
+| enveda-180 | [M+Na]+ | 15,957 | -4.74 | -2.23 | 1.03 | 3.41 | 4.91 | 4.84 | 5.50 | 98 | 0 |
+| enveda-180 | [M-H]- | 184,747 | -1.74 | -0.66 | 0.80 | 2.17 | 2.95 | 2.75 | 5.06 | 2 | 0 |
+| enveda-np-examples | [M+CH2O2-H]- | 105 | -3.04 | -2.00 | 0.22 | 2.96 | 6.07 | 3.87 | 8.44 | 1 | 0 |
+| enveda-np-examples | [M+Cl]- | 7 | -2.55 | -1.97 | -0.07 | 1.36 | 1.60 | 2.55 | 2.61 | 0 | 0 |
+| enveda-np-examples | [M+H]+ | 569 | -2.33 | -0.64 | 2.01 | 3.78 | 8.74 | 6.59 | 8.77 | 14 | 0 |
+| enveda-np-examples | [M+K]+ | 16 | -4.28 | -3.44 | 1.26 | 9.19 | 12.30 | 11.95 | 12.65 | 2 | 1 |
+| enveda-np-examples | [M+NH4]+ | 98 | -3.15 | -0.46 | 1.25 | 3.54 | 3.80 | 3.81 | 4.10 | 0 | 0 |
+| enveda-np-examples | [M+Na]+ | 80 | -5.94 | -0.78 | 1.67 | 4.56 | 6.06 | 6.46 | 7.24 | 4 | 0 |
+| enveda-np-examples | [M-2H2O+H]+ | 8 | 0.72 | 0.74 | 1.58 | 3.29 | 3.31 | 3.31 | 3.31 | 0 | 0 |
+| enveda-np-examples | [M-H2O+H]+ | 24 | -6.39 | -1.87 | 1.96 | 3.89 | 4.17 | 6.33 | 6.97 | 1 | 0 |
+| enveda-np-examples | [M-H2O-H]- | 1 | -4.45 | -4.45 | -4.45 | -4.45 | -4.45 | 4.45 | 4.45 | 0 | 0 |
+| enveda-np-examples | [M-H]- | 276 | -6.31 | -1.60 | 0.56 | 2.11 | 4.60 | 6.08 | 21.01 | 7 | 1 |
+| enveda-180 | all test adducts | 821,960 | -2.17 | -0.24 | 1.88 | 3.51 | 4.25 | 4.10 | 5.78 | 426 | 0 |
+| enveda-np-examples | all test adducts | 1,184 | -5.57 | -1.41 | 1.55 | 3.66 | 8.07 | 6.60 | 21.01 | 29 | 2 |
+
 ## 5. Structure overlap between libraries (by inchikey14)
 
 | library | drug_plus | enveda-180 | enveda-np-examples | gnps | masaryk | massbank | mona | msdial | pluskal_ms2 | riken | spectraverse |
@@ -211,12 +247,30 @@ Columns `abs ...` are quantiles of the absolute given error. `abs M err` is reco
 | riken | 1,841 | 7 | 246 | 9,225 | 379 | 6,528 | 11,180 | 8,332 | 5,430 | 15,851 | 0 |
 | spectraverse | 0 | 0 | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 9,630 |
 
+Same matrix by mkey:
+
+| library | drug_plus | enveda-180 | enveda-np-examples | gnps | masaryk | massbank | mona | msdial | pluskal_ms2 | riken | spectraverse |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| drug_plus | 2,534 | 3 | 145 | 2,185 | 227 | 1,651 | 1,762 | 1,286 | 1,633 | 1,845 | 159 |
+| enveda-180 | 3 | 182,941 | 0 | 807 | 0 | 2 | 7 | 3 | 2,276 | 7 | 0 |
+| enveda-np-examples | 145 | 0 | 250 | 233 | 53 | 209 | 231 | 227 | 226 | 246 | 11 |
+| gnps | 2,185 | 807 | 233 | 45,620 | 398 | 5,624 | 7,541 | 5,543 | 15,147 | 9,216 | 1,025 |
+| masaryk | 227 | 0 | 53 | 398 | 415 | 377 | 366 | 240 | 233 | 379 | 12 |
+| massbank | 1,651 | 2 | 209 | 5,624 | 377 | 9,127 | 4,968 | 3,734 | 2,288 | 6,524 | 264 |
+| mona | 1,762 | 7 | 231 | 7,541 | 366 | 4,968 | 11,617 | 6,797 | 4,730 | 11,161 | 660 |
+| msdial | 1,286 | 3 | 227 | 5,543 | 240 | 3,734 | 6,797 | 9,069 | 3,301 | 8,307 | 461 |
+| pluskal_ms2 | 1,633 | 2,276 | 226 | 15,147 | 233 | 2,288 | 4,730 | 3,301 | 46,805 | 5,461 | 576 |
+| riken | 1,845 | 7 | 246 | 9,216 | 379 | 6,524 | 11,161 | 8,307 | 5,461 | 15,801 | 730 |
+| spectraverse | 159 | 0 | 11 | 1,025 | 12 | 264 | 660 | 461 | 576 | 730 | 9,630 |
+
 ## 6. C1 eligibility [5.3]: Enveda structures also in other libraries
 
-| library | structures | in any other library | fraction | in a non-Enveda library | fraction |
-|---|---|---|---|---|---|
-| enveda-180 | 182,941 | 2,288 | 0.013 | 2,288 | 0.013 |
-| enveda-np-examples | 250 | 250 | 1.000 | 250 | 1.000 |
+| library | structures | in any other library | fraction | in a non-Enveda library | fraction | with a test-adduct spectrum there | fraction | mkeys | mkeys in a non-Enveda library | fraction |
+|---|---|---|---|---|---|---|---|---|---|---|
+| enveda-180 | 182,941 | 2,288 | 0.013 | 2,288 | 0.013 | 2,287 | 0.013 | 182,941 | 2,289 | 0.013 |
+| enveda-np-examples | 250 | 250 | 1.000 | 250 | 1.000 | 250 | 1.000 | 250 | 250 | 1.000 |
+
+enveda-np-examples structures (the NP-TIMS set) in non-Enveda libraries: median 6 other libraries and 158 reference spectra per structure (min 2, p10 28); per library: riken 246, gnps 233, mona 231, msdial 227, pluskal_ms2 224, massbank 208, drug_plus 145, masaryk 53.
 
 ## 7. Candidate recall ceiling: train structures in the NP and PubChem tiers [2, 5.5]
 
@@ -234,7 +288,9 @@ Columns `abs ...` are quantiles of the absolute given error. `abs M err` is reco
 | riken | 15,851 | 0.854 | 0.960 | 0.971 | 0.970 | 0.996 |
 | spectraverse | 9,630 | 0.262 | 0.803 | 0.806 | 0.994 | 0.808 |
 
-Membership is by inchikey14 (train label vs the tier's ik14). A structure that fails the 2.2 filters cannot be retrieved from either tier by construction.
+Membership is by inchikey14 (train label vs the tier's ik14), a lower bound for the metric (a tier row with another ik14 but the same mkey, e.g. a tautomer, also counts; `validation.truth_keys` finds those per holdout molecule, and evaluate.py's candidate recall uses them). A structure that fails the 2.2 filters cannot be retrieved from either tier by construction.
+
+enveda-np-examples (the NP-TIMS set, closest to the hidden test): 250 of 250 in the NP tier, 248 in the PubChem tier, 250 in either. Not in PubChem: FSASIHFSFGAIJM, YHKYFYCSTJGMID; not in the NP tier: none.
 
 ## 8. Element coverage and the other 2.2 filters
 
@@ -256,7 +312,21 @@ NP-heavy libraries (enveda-np-examples, riken, gnps, msdial, massbank, mona; 55,
 
 ## 9. mkey versus inchikey14 [5.1]
 
-Pending (mkey stage not run).
+mkey computed for 275,775 of 275,775 structures (status: {'ok': 275775}). mkey != ik14 for 4,362 (1.58 percent). mkeys shared by more than one ik14: 1,540 (covering 3,165 ik14).
+
+| library | fraction mkey != ik14 |
+|---|---|
+| drug_plus | 0.0748 |
+| enveda-180 | 0.0050 |
+| enveda-np-examples | 0.0640 |
+| gnps | 0.0446 |
+| masaryk | 0.0433 |
+| massbank | 0.0474 |
+| mona | 0.0649 |
+| msdial | 0.0695 |
+| pluskal_ms2 | 0.0278 |
+| riken | 0.0768 |
+| spectraverse | 0.0004 |
 
 ## 10. Public test join [5.7]
 
@@ -268,7 +338,9 @@ Public test spectra matched to a train row: 1,213 of 1,213 (0 by shared spectrum
 
 M error of the public test spectra against their train label (ppm, after the organisers' cleaning): p50 2.07, p90 3.23, p99 4.13, max 4.65; per molecule (median over its spectra) p99.5 4.37, max 4.65.
 
-Peak cut evidence: largest kept peak above precursor +2.1846 Da; smallest train peak above precursor missing from the test spectrum +nan Da; intensity ratio test/train on matched peaks: median 1.0000, max spread 0 (1 and 0 mean the intensities were not renormalised).
+Identical copies (every test peak matched, every train peak matched, same intensities): 1,213 of 1,213 matched spectra. Test spectra keeping peaks above precursor + 2 Da: 418; train peaks above the precursor missing from the test copy: 0. Public test base_peak_intensity minimum 1,018.
+
+Peak cut evidence: largest kept peak above precursor +2.1846 Da; smallest train peak above precursor missing from the test spectrum none (no train peak is missing); intensity ratio test/train on matched peaks: median 1.0000, max spread 0 (1 and 0 mean the intensities were not renormalised).
 
 Matched spectra per molecule: mean 3.03, max 9. Train spectra available for the same structure in the source library versus spectra the test kept (query emulation, 5.2):
 
@@ -276,12 +348,17 @@ kept / available: mean 0.584; available median 6, max 19.
 
 ## 11. Retrieval tolerance recommendation [3.3]
 
-Per-molecule median |M error| over the ten test adducts, 99.5th percentile:
+Error of the molecule mass M (median over a molecule's test-adduct spectra, as `io.mass_tables` computes it; molecule = structure for the two Enveda libraries, molecule_id for the public test) against the label's formula mass, in ppm. Coverage = fraction of molecules with |M error| within the window.
 
-- enveda libraries, recomputed M error: 4.27 ppm over 179,943 (library, structure) groups (max 8.77); with the given precursor_error_ppm: 4.08 ppm.
-- public test joined to train labels: 4.37 ppm over 400 molecules (single spectrum max 4.65 ppm).
+| source | molecules | signed median | abs p50 | abs p99 | abs p99.5 | abs max | cov 3 | cov 5 | cov 7.5 | cov 10 | cov 15 | cov 20 | n > 5 ppm | n > 10 ppm |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| enveda-180 | 179,693 | 2.006 | 2.015 | 4.089 | 4.264 | 5.504 | 0.852 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 48 | 0 |
+| enveda-np-examples | 250 | 1.451 | 1.487 | 6.026 | 8.159 | 8.769 | 0.876 | 0.976 | 0.992 | 1.000 | 1.000 | 1.000 | 6 | 0 |
+| public test | 400 | 2.089 | 2.097 | 4.215 | 4.370 | 4.654 | 0.830 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0 | 0 |
 
-Recommended `mass_tol_ppm`: **5** (larger of the two, rounded up, floor 5; current default 10). `val_query_max_abs_ppm` (query emulation, organisers' precursor cut) should not be below the public single-spectrum maximum above.
+Pooled Enveda libraries (earlier definition): p99.5 4.27 ppm over 179,943 groups (max 8.77); public test single-spectrum max 4.65 ppm.
+
+Recommended `mass_tol_ppm`: **10** (smallest of 3, 5, 7.5, 10, 15, 20 ppm, at least 5, that holds 99.5 percent of the molecules of every source; current default 10); decided by: enveda-np-examples (enveda-np-examples shares the hidden test's pipeline and chemistry). Signed medians above 0 mean M is heavier than the label mass (a calibration bias; per adduct in section 4): a window centred at M minus that bias would be narrower for the same coverage. `val_query_max_abs_ppm` (query emulation, organisers' precursor cut) should not be below the public single-spectrum maximum above.
 
 ## 12. structures.parquet
 

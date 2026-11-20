@@ -335,3 +335,21 @@ about 0.9 GB (373 B per row), meta.parquet about 0.1 GB. mkey pass: PLAN estimat
 processes. Truth keys for about 6,250 holdout molecules: 15 to 35 min on 2 processes, cached.
 Evaluation of 6,250 molecules x 3 conditions: b0 about 6 min, b0b about 40 min.
 <!-- WP6:train:end -->
+
+<!-- WP14:kaggle:start -->
+## Kaggle datasets (WP14)
+
+All private, owner `ograhulrajkumar`, published 2026-11-20 with `scripts/kaggle_publish.py` from
+git 9833dad (working tree). Each version holds a generated `MANIFEST.json` (per file: path,
+size, sha256); the local copy is `dist/kaggle/<slug>/MANIFEST.json`. Mounted on Kaggle at
+`/kaggle/input/datasets/ograhulrajkumar/<slug>/`. See docs/KAGGLE.md.
+
+| slug | version | files | bytes (without manifest) | MANIFEST.json sha256 |
+|---|---|---|---|---|
+| `casmi-code` | 1 | 25 | 584,159 | `4c834891ad96b34f7a6c41516bff2bee43e697964b73a9fc580d0a1d3682ac3b` |
+| `casmi-db-np` | 1 | 4 | 470,023,481 | `b4eb658b1818e41efba8e88ecc5f890cc16e97551671c4f7bdaba7b6f7b51d2f` |
+| `casmi-db-pubchem` | 1 | 121 | 2,189,271,723 | `347677e9ad81a8e465cb1e06fa22a256129e14bad4dda432f33344d6bd435ef8` |
+
+Upload time: about 10 s for casmi-db-np, 40 s for casmi-db-pubchem (3 parallel uploads), then
+20 s and 183 s of Kaggle processing until READY.
+<!-- WP14:kaggle:end -->

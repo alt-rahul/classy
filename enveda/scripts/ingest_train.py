@@ -952,9 +952,12 @@ def tolerance_recommendation(meta: pd.DataFrame, matches: pd.DataFrame, floor_pp
                      "n_above": {f"{w:g}": int((a > w).sum()) for w in TOL_WINDOWS},
                      "coverage": cov}
         ok = [w for w in TOL_WINDOWS if w >= floor_ppm and cov[f"{w:g}"] >= coverage]
-        need.append(ok[0] if ok else max(TOL_WINDOWS))
+        per[name]["window_needed"] = float(ok[0] if ok else max(TOL_WINDOWS))
+        need.append(per[name]["window_needed"])
     out["sources"] = per
     out["recommended_ppm"] = float(max([floor_ppm] + need))
+    out["decided_by"] = sorted(k for k, d in per.items()
+                               if d["window_needed"] == out["recommended_ppm"])
     return out
 
 
@@ -1301,7 +1304,9 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
                     _test_bpi_min() == _test_bpi_min() else ""))
         L.append("")
         L.append(f"Peak cut evidence: largest kept peak above precursor {ke:+.4f} Da; smallest "
-                 f"train peak above precursor missing from the test spectrum {de:+.4f} Da; "
+                 "train peak above precursor missing from the test spectrum "
+                 + (f"{de:+.4f} Da" if np.isfinite(de) else "none (no train peak is missing)")
+                 + "; "
                  f"intensity ratio test/train on matched peaks: median "
                  f"{b['int_ratio_median'].median():.4f}, max spread {b['int_ratio_spread'].max():.3g} "
                  "(1 and 0 mean the intensities were not renormalised).")
@@ -1348,11 +1353,11 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
     L.append(f"Recommended `mass_tol_ppm`: **{tol['recommended_ppm']:g}** (smallest of "
              f"{', '.join(f'{w:g}' for w in TOL_WINDOWS)} ppm, at least 5, that holds "
              f"{tol['coverage_target'] * 100:g} percent of the molecules of every source; current "
-             f"default {cfg.mass_tol_ppm:g}). The enveda-np-examples row decides it: it comes from "
-             "the hidden test's pipeline and chemistry, the public test and enveda-180 are "
-             "tighter. The signed medians show a positive bias on timsTOF (M too heavy by about "
-             "1.5 to 2 ppm, largest for [M+H]+), so a window centred at M - bias would be "
-             "narrower for the same coverage. `val_query_max_abs_ppm` (query emulation, "
+             f"default {cfg.mass_tol_ppm:g}); decided by: {', '.join(tol.get('decided_by', [])) or '-'} "
+             "(enveda-np-examples shares the hidden test's pipeline and chemistry). Signed "
+             "medians above 0 mean M is heavier than the label mass (a calibration bias; per "
+             "adduct in section 4): a window centred at M minus that bias would be narrower for "
+             "the same coverage. `val_query_max_abs_ppm` (query emulation, "
              "organisers' precursor cut) should not be below the public single-spectrum "
              "maximum above.")
     # 12. structures table summary

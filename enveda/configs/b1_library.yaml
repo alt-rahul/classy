@@ -1,0 +1,20 @@
+# Baseline 1 (WP8): LIB candidates by mass with spectral-match features (casmi.libmatch, PLAN 4.2)
+# plus both DB tiers with priors; fallback fusion (PLAN 4.6) with rule 1 for LIB candidates.
+# python scripts/predict.py --config configs/b1_library.yaml
+#   -> submissions/YYYYMMDD_b1_library_prior.csv
+# Thresholds below are tuned on validation (C1/C2 cells of NP-TIMS and NP-OTHER), see
+# docs/EXPERIMENTS.md; never on the public test.
+submission_tag: b1_library_prior
+pipeline_plugins: [casmi.libmatch]
+pipeline_stages: [mass, pool, lib, features, score, assemble]
+db_tiers: [np, pubchem]
+n_jobs: 2                 # mkey worker processes
+batch_molecules: 50       # about 10k candidates per molecule with PubChem (PLAN risk 14)
+lib_mass_tol_ppm: 10.0
+lib_sim: cos_or_cons
+fusion_lib_cos_min: 0.7
+fusion_lib_min_matched: 4
+fusion_lib_weak: true
+fusion_lib_weak_cos_min: 0.5
+fusion_lib_weak_min_matched: 2
+fusion_lib_demote: false

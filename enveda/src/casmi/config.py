@@ -63,7 +63,7 @@ class Config:
     # WP8 additions (4.2; casmi.libmatch, the "lib" pipeline stage)
     lib_dir: str = ""                        # library directory; "" = paths.PROCESSED/library, relative = under PROCESSED
     lib_mass_tol_ppm: float = 10.0           # LIB candidate window (min width mass_tol_min_da)
-    lib_sim: str = "cos_max"                 # lib_best_cos source: cos_max | ent_max | cons_cos | max_cos_cons | mean_cos_ent
+    lib_sim: str = "cos_max"                 # lib_best_cos source: cos_max | ent_max | cons_cos | max_cos_cons | mean_cos_ent | cos_or_cons
 
     # --- Analog search (4.3) ----------------------------------------------------------
     analog_bin_da: float = 0.05

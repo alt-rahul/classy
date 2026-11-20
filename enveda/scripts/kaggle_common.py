@@ -222,13 +222,19 @@ def upload_blob(path: Path, blob_type: str = "DATASET", quiet: bool = False) -> 
 
 # --- datasets ---------------------------------------------------------------------------
 
+def _missing(exc: Exception) -> bool:
+    """Kaggle answers 403 (not 404) for a dataset of the caller that does not exist."""
+    t = str(exc)
+    return "HTTP 403" in t or "HTTP 404" in t or "not found" in t.lower()
+
+
 def dataset_status(own: str, slug: str) -> str | None:
     """Status name of the dataset's current version (e.g. READY), None if it does not exist."""
     try:
         d = rpc("datasets.DatasetApiService", "GetDatasetStatus",
                 {"ownerSlug": own, "datasetSlug": slug})
     except KaggleError as exc:
-        if "404" in str(exc) or "not found" in str(exc).lower():
+        if _missing(exc):
             return None
         raise
     return str(d.get("status", "")) or "UNKNOWN"
@@ -238,7 +244,7 @@ def dataset_info(own: str, slug: str) -> dict | None:
     try:
         return rpc("datasets.DatasetApiService", "GetDataset", {"ownerSlug": own, "datasetSlug": slug})
     except KaggleError as exc:
-        if "404" in str(exc) or "not found" in str(exc).lower():
+        if _missing(exc):
             return None
         raise
 
