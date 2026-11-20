@@ -13,3 +13,4 @@
 {"id": "practice_0032", "k": 0, "name": "base", "kw": {}, "n": 129, "t": 36.5}
 {"id": "practice_0032", "k": 0, "name": "peel", "kw": {}, "n": 128, "t": 49.5}
 {"id": "practice_0006", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.12, "sig": 0.0, "ajit": 0.05}, "n": 28, "t": 0.3}
+{"id": "practice_0015", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.1, "sig": 0.3, "ajit": 0.05}, "n": 207, "t": 123.0}
