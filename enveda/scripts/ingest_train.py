@@ -1198,8 +1198,21 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
                                                 "in PubChem tier", "in either",
                                                 "passes 2.2 filters", "in either | passes filters"]), 3))
     L.append("")
-    L.append("Membership is by inchikey14 (train label vs the tier's ik14). A structure that fails "
-             "the 2.2 filters cannot be retrieved from either tier by construction.")
+    L.append("Membership is by inchikey14 (train label vs the tier's ik14), a lower bound for "
+             "the metric (a tier row with another ik14 but the same mkey, e.g. a tautomer, also "
+             "counts; `validation.truth_keys` finds those per holdout molecule, and evaluate.py's "
+             "candidate recall uses them). A structure that fails the 2.2 filters cannot be "
+             "retrieved from either tier by construction.")
+    g = lk[lk["ingest_lib"] == "enveda-np-examples"]
+    if len(g):
+        inp = g["in_np"].fillna(False).astype(bool)
+        inpc = g["in_pubchem"].astype("boolean").fillna(False).astype(bool)
+        L.append("")
+        L.append(f"enveda-np-examples (the NP-TIMS set, closest to the hidden test): {int(inp.sum())} "
+                 f"of {len(g)} in the NP tier, {int(inpc.sum())} in the PubChem tier, "
+                 f"{int((inp | inpc).sum())} in either. Not in PubChem: "
+                 + (", ".join(sorted(g.loc[~inpc, "ik14"].astype(str))) or "none")
+                 + "; not in the NP tier: " + (", ".join(sorted(g.loc[~inp, "ik14"].astype(str))) or "none") + ".")
     # 8. elements
     L += ["", "## 8. Element coverage and the other 2.2 filters", ""]
     sl = pairs.merge(st[["ik14", "elements", "elements_ok", "charge", "n_components",
