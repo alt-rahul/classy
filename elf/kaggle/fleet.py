@@ -226,14 +226,19 @@ def choose_shard(cfg, s, st, n, exclude):
 
 
 def lever_done(cfg, s):
-    done = set(s.get('lever_done', {}).get(cfg['lever_key'], []))
+    """{id: program length when the mode last finished it}; a puzzle whose program changed since is eligible again."""
+    done = {}
     for f in cfg.get('skip_runs', []):
         try:
             for l in open(os.path.join(ROOT, f)):
-                try: done.add(json.loads(l)[0])
-                except (ValueError, IndexError): pass
+                try: r = json.loads(l); done[r[0]] = int(r[2])
+                except (ValueError, IndexError, TypeError): pass
         except OSError:
             pass
+    d = s.get('lever_done', {}).get(cfg['lever_key'], {})
+    if isinstance(d, list):
+        d = {k: None for k in d}
+    done.update(d)
     return done
 
 
@@ -243,7 +248,7 @@ def choose_lever_shard(cfg, s, st, n, exclude):
         ids += [x.strip() for x in open(os.path.join(ROOT, f)).read().split(',') if x.strip()]
     ids = list(dict.fromkeys(ids))
     done = lever_done(cfg, s)
-    cand = [k for k in ids if k in st and k not in done and k not in exclude]
+    cand = [k for k in ids if k in st and k not in exclude and (k not in done or (done[k] is not None and done[k] != st[k]['len']))]
     cand.sort(key=lambda k: (-st[k]['len'], k))
     return cand[:n]
 
@@ -337,8 +342,14 @@ def harvest(cfg, s, slot, sl, status):
         s['coverage'][k] = max(0.0, s['coverage'].get(k, 0.0) - prov) + float(spent.get(k, 0.0))
     cpu = sum(float(e.get('cpu_s', 0.0)) for e in (stats.get('engines') or {}).values())
     if sl.get('lever_key') and stats.get('finished') is not None:
-        d = s.setdefault('lever_done', {}).setdefault(sl['lever_key'], [])
-        d.extend(k for k in stats['finished'] if k not in d)
+        ld = s.setdefault('lever_done', {})
+        d = ld.get(sl['lever_key'], {})
+        if isinstance(d, list):
+            d = {k: None for k in d}
+        st_now = load_store()
+        for k in stats['finished']:
+            d[k] = st_now[k]['len'] if k in st_now else None
+        ld[sl['lever_key']] = d
     pt = s.setdefault('profile_totals', {}).setdefault(sl.get('profile', 'public'),
                                                        {'kernels': 0, 'cpu_s': 0.0, 'gain_merged': 0, 'gain_kernel': 0})
     pt['kernels'] += 1; pt['cpu_s'] += cpu; pt['gain_merged'] += gained; pt['gain_kernel'] += int(stats.get('gain', 0) or 0)

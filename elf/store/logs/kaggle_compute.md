@@ -14,6 +14,14 @@ engines on shards of our store; a local loop harvests their outputs and merges t
 - Config (read every cycle): `kaggle/fleet_config.json` - `max_kernels` (concurrent slots), `budget_s` (engine time
   per session, Kaggle caps sessions at 12 h), `puzzles_per_kernel`, `min_len`, `len_power` (priority ~ len^p),
   `engines` (list, see kaggle/ENGINES.md). Changing engine sources or runner.py triggers a dataset re-version.
+- Slot allocation: `slot_profiles` maps each slot (elf-c01..c05) to a profile in `profiles`: `public` (top-level
+  engines/budget/band) or `leverB_g` / `leverB_j` (research lever B, runner mode `pydriver`: the kernel rebuilds the
+  src/ + research/round4/beyond/ tree with a kernel-local store and runs grun.py resp. jrun.py on 40 puzzles for
+  3.5 h; `then` chains grun -> jrun -> public when a pool is exhausted). Per-mode done lists (with the program length
+  at completion, so changed programs become eligible for another pass) are in the state file under `lever_done`.
+  Lever B sources are a frozen copy in kaggle/engines/leverB; refresh after research changes with
+  `python3 kaggle/fleet.py snapshot-leverb` (compile-checks, then the next poll re-versions the dataset).
+  A profile whose last two kernels died within 10 CPU-minutes is skipped (falls back to public) until a healthy harvest.
 - Files: kaggle/runner.py (runs inside the kernel), kaggle/fleet.py (local controller), kaggle/kapi.py (REST via curl,
   credential injected by the proxy), kaggle/engines/ (public Apache-2.0 engine sources), kaggle/build/ (generated).
   Raw kernel outputs: store/kaggle_out/<slot>_v<version>/ (improved.csv, stats.json, kernel_log.json).
@@ -74,3 +82,4 @@ engines on shards of our store; a local loop harvests their outputs and merges t
   their gains) as the running comparison; reallocate by merged gain per CPU-hour when lever B results are in.
 - 2026-11-20 21:56:38 UTC harvested elf-c01 v4 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
 - 2026-11-20 21:56:40 UTC push elf-c01 FAILED: Maximum batch CPU session count of 5 reached.
+- 2026-11-20 22:01:42 UTC launched elf-c01 v5 [leverB_g]: 40 puzzles (len 206..273, 9913 instr), budget 3.5 h, engines leverB_grun

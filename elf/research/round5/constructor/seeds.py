@@ -14,7 +14,8 @@ def one(a):
     return pid,seed,prog,time.time()-t0
 if __name__=='__main__':
     ids=sys.argv[1].split(','); n=int(sys.argv[2]); args=sys.argv[3].split(','); binary=sys.argv[4]; nw=int(sys.argv[5]); tag=sys.argv[6]
-    jobs=[(i,s,args,binary) for s in range(1,n+1) for i in ids]; res={}
+    seedl=[int(x) for x in sys.argv[7].split(',')] if len(sys.argv)>7 else list(range(1,n+1))
+    jobs=[(i,s,args,binary) for s in seedl for i in ids]; res={}
     with Pool(nw) as pool:
         for pid,seed,prog,dt in pool.imap_unordered(one,jobs):
             L=len(prog) if prog else None; res.setdefault(pid,[]).append(L)

@@ -40,7 +40,7 @@ def recombine(p,prog,progs,tl,verbose=1):
     m=cp_model.CpModel(); X={v:m.NewBoolVar('') for v in vals}
     dep={s:0 for s in sv}
     for v in order: dep[v]=1+max(dep[nodes[v][1]],dep[nodes[v][2]])
-    D=max(dep.values())+6
+    D=max(dep.values())+int(os.environ.get('BANK_D','2'))
     Lv={v:m.NewIntVar(1,D,'') for v in vals}
     for s in sv: X[s]=1; Lv[s]=0
     ys={}
