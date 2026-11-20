@@ -1,0 +1,25 @@
+scored_0145 216 -> 215 [(13, 6, 5, 'ok', 63.2)] 63.2 s
+scored_0565 214 -> 213 [(13, 5, 6, 'ok', 62.1)] 62.1 s
+scored_0784 219 -> 218 [(13, 6, 6, 'ok', 59.2)] 59.2 s
+scored_0865 230 -> 229 [(13, 6, 6, 'noemit', 174.1), (13, 6, 5, 'ok', 66.5)] 240.6 s
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+                    ~~~~^^^^^^^^^^^^^^^
+  File "/home/user/classy/elf/research/round4/beyond/jrun.py", line 19, in work
+    P = {p.id: p for p in load_puzzles()}; p = P[pid]
+                                               ~^^^^^
+KeyError: 'scored_0916\n'
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/classy/elf/research/round4/beyond/jrun.py", line 75, in <module>
+    for r in pool.imap_unordered(work, [(i, tl) for i in ids]):
+             ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/multiprocessing/pool.py", line 873, in next
+    raise value
+KeyError: 'scored_0916\n'

@@ -10,7 +10,7 @@ for t,(cone,desc,users) in sorted(cones.items(), key=lambda x:-len(x[1][0]))[:2]
     ops,err=run_wide(p.limit,t,pool,len(cone)-1,len(cone)-1,1,25)
     nn,cands=splice(p,nodes,order,cone,ops,t)
     import time; t0=time.time()
-    pr=try_emit3(p,nn,cands,order)
+    pr=try_emit4(p,nn,cands,order,60)
     print(len(cone),len(ops),len(nn),'emit',None if pr is None else len(pr),'%.1fs'%(time.time()-t0))
     sv=set(p.sv); hint=make_hint(nn,order,sv); rng=random.Random(1)
     print('orig pressure',pressure(p,nodes,order),'cands',[ (len(c),pressure(p,nn,c)) for c in cands if len(c)==len(nn)])

@@ -9,3 +9,8 @@
 - `programs.csv`: per-puzzle shortest valid programs of our store, mostly public Apache-2.0 / CC0 programs
   (see THIRD_PARTY.md of the project).
 - `runner.py`: our driver.
+- `anneal_div.cpp`, `incremental_div.cpp` (from kaggle/engines/extra): Wang Jakie's `anneal.cpp` / `incremental.cpp`
+  with `improve()` modified by us: donor tapes seed the crossover pool and stay in it, and the archive evicts its
+  least distinctive member. The idea follows royalacecat's public "diverse" graph search; the code is ours.
+- `elfopt_v.cpp` (from kaggle/engines/extra): goodpjw2008's `elfopt.cpp` plus our `--emit-plateau` option, which also
+  prints the last equal-length program of the plateau walk; the runner keeps these as crossover donors.

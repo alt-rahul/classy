@@ -1,26 +1,176 @@
 {
-  "dataset": "elf-compute",
-  "dataset_title": "elf compute",
-  "slot_prefix": "elf-c",
-  "max_kernels": 1,
-  "workers": 4,
-  "budget_s": 600,
-  "puzzles_per_kernel": 8,
-  "min_len": 0,
-  "len_power": 1.0,
-  "gain_bonus": 0.5,
-  "write_every_s": 300,
-  "dataset_every_s": 3600,
-  "random_engine": true,
-  "engines": [
-    {"name": "elfopt", "kind": "elf", "main": "elfopt.cpp", "time": 60, "args": ["--kicks", "1000", "--kslack", "2"], "weight": 2},
-    {"name": "wj_anneal", "kind": "wj", "main": "anneal.cpp", "rounds": 1000, "weight": 1,
-     "includes": ["common.inc", "compact.inc", "cross.inc", "recipe_lookup.inc", "fast_perturb.inc", "main.inc"]},
-    {"name": "wj_incremental", "kind": "wj", "main": "incremental.cpp", "rounds": 1000, "weight": 1,
-     "includes": ["common.inc", "compact.inc", "cross.inc", "cache_lookup.inc", "cache_perturb.inc", "main.inc"]},
-    {"name": "wj_compact_rotate", "kind": "wj", "main": "compact_rotate.cpp", "rounds": 300, "weight": 1,
-     "includes": ["common.inc", "neutral.inc", "compact.inc", "cross.inc", "main.inc"]},
-    {"name": "wj_anneal_seeded", "kind": "wj", "main": "anneal_seeded.cpp", "rounds": 700, "weight": 1, "seeded": true,
-     "includes": ["common.inc", "compact.inc", "cross.inc", "recipe_lookup.inc", "fast_perturb.inc", "main.inc"]}
-  ]
+ "dataset": "elf-compute",
+ "dataset_title": "elf compute",
+ "slot_prefix": "elf-c",
+ "max_kernels": 5,
+ "workers": 4,
+ "budget_s": 9000,
+ "puzzles_per_kernel": 30,
+ "min_len": 80,
+ "len_power": 1.0,
+ "gain_bonus": 0.5,
+ "write_every_s": 300,
+ "dataset_every_s": 3600,
+ "random_engine": true,
+ "engines": [
+  {
+   "name": "elfopt",
+   "kind": "elf",
+   "main": "elfopt_v.cpp",
+   "time": 45,
+   "args": [
+    "--kicks",
+    "1000",
+    "--kslack",
+    "2",
+    "--emit-plateau",
+    "1"
+   ],
+   "weight": 3
+  },
+  {
+   "name": "recomb",
+   "kind": "recomb",
+   "main": "elfopt_v.cpp",
+   "time": 15,
+   "cp": 25,
+   "weight": 2,
+   "args": [
+    "--emit-plateau",
+    "1"
+   ]
+  },
+  {
+   "name": "wj_anneal",
+   "kind": "wj",
+   "main": "anneal.cpp",
+   "rounds": 1000,
+   "weight": 1,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "recipe_lookup.inc",
+    "fast_perturb.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_anneal_seeded",
+   "kind": "wj",
+   "main": "anneal_seeded.cpp",
+   "rounds": 700,
+   "weight": 1,
+   "seeded": true,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "recipe_lookup.inc",
+    "fast_perturb.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_incremental",
+   "kind": "wj",
+   "main": "incremental.cpp",
+   "rounds": 1000,
+   "weight": 1,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "cache_lookup.inc",
+    "cache_perturb.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_incremental_seeded",
+   "kind": "wj",
+   "main": "incremental_seeded.cpp",
+   "rounds": 700,
+   "weight": 1,
+   "seeded": true,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "cache_lookup.inc",
+    "cache_perturb.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_compact_rotate",
+   "kind": "wj",
+   "main": "compact_rotate.cpp",
+   "rounds": 300,
+   "weight": 1,
+   "includes": [
+    "common.inc",
+    "neutral.inc",
+    "compact.inc",
+    "cross.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_quartet",
+   "kind": "wj",
+   "main": "quartet.cpp",
+   "rounds": 1000,
+   "weight": 1,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_anneal_div",
+   "kind": "wj",
+   "main": "anneal_div.cpp",
+   "rounds": 1000,
+   "weight": 1,
+   "seeded": true,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "recipe_lookup.inc",
+    "fast_perturb.inc",
+    "main.inc"
+   ]
+  },
+  {
+   "name": "wj_incremental_div",
+   "kind": "wj",
+   "main": "incremental_div.cpp",
+   "rounds": 1000,
+   "weight": 1,
+   "seeded": true,
+   "includes": [
+    "common.inc",
+    "compact.inc",
+    "cross.inc",
+    "cache_lookup.inc",
+    "cache_perturb.inc",
+    "main.inc"
+   ]
+  }
+ ],
+ "max_len": 180,
+ "adaptive": false,
+ "band_edges": [
+  60,
+  100,
+  140,
+  180,
+  220
+ ],
+ "band_prior_gain": 1,
+ "band_prior_hours": 20,
+ "pseudo_coverage_s": 1800
 }

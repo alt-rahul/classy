@@ -1,0 +1,11 @@
+[{"stream_name":"stdout","time":2.5038515,"data":"[    0.0 min] shard 8 puzzles, 2198 instructions, budget 600 s, cpus 4\n"}
+,{"stream_name":"stdout","time":20.127478566,"data":"[    0.3 min] built engines ['elfopt', 'wj_anneal', 'wj_anneal_seeded', 'wj_compact_rotate', 'wj_incremental']\n"}
+,{"stream_name":"stdout","time":320.14591438,"data":"[    5.3 min] progress gain 0, runs {'elfopt': 8, 'wj_anneal': 1, 'wj_incremental': 2, 'wj_compact_rotate': 6, 'wj_anneal_seeded': 5}\n"}
+,{"stream_name":"stdout","time":610.157544563,"data":"[   10.2 min] done: gain 0 on 0 puzzles; engines {\"elfopt\": {\"runs\": 17, \"cpu_s\": 983.3891870975494, \"gain\": 0, \"hits\": 0, \"invalid\": 0}, \"wj_anneal\": {\"runs\": 6, \"cpu_s\": 270.8471474647522, \"gain\": 0, \"hits\": 0, \"invalid\": 0}, \"wj_incremental\": {\"runs\": 8, \"cpu_s\": 206.78862166404724, \"gain\": 0, \"hits\": 0, \"invalid\": 0}, \"wj_compact_rotate\": {\"runs\": 12, \"cpu_s\": 641.3702149391174, \"gain\": 0, \"hits\": 0, \"invalid\": 0}, \"wj_anneal_seeded\": {\"runs\": 7, \"cpu_s\": 224.39995694160461, \"gain\": 0, \"hits\": 0, \"invalid\": 0}}\n"}
+,{"stream_name":"stderr","time":613.624197431,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":613.624236463,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":614.073386112,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":614.073471945,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":616.430644078,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":618.073292004,"data":"[NbConvertApp] Writing 396538 bytes to __results__.html\n"}
+]

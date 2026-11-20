@@ -82,26 +82,47 @@ def read_programs(path):
 
 # ------------------------------------------------------------------ engines
 def build_engines(cfg, dirs, bindir):
+    """Copy every engine's sources into one directory first, then compile in parallel (retry failures serially).
+    An engine that still fails to build is dropped from the run instead of aborting it."""
     src = os.path.join(bindir, 'src'); os.makedirs(src, exist_ok=True)
-    built = {}
-    jobs = []
+    todo = {}
     for e in cfg['engines']:
         name = e['name']
-        if name in built: continue
-        files = e.get('sources') or [e['main']]
-        for fn in files + e.get('includes', []):
+        if name in todo: continue
+        ok = True
+        for fn in (e.get('sources') or [e['main']]) + e.get('includes', []):
             p = find_file(dirs, fn)
-            if p is None: raise SystemExit('engine source %s not found' % fn)
-            shutil.copy(p, os.path.join(src, fn))
+            if p is None:
+                log('engine %s: source %s not found, dropped' % (name, fn)); ok = False; break
+            dst = os.path.join(src, fn)
+            if not os.path.exists(dst): shutil.copy(p, dst)
+        if ok: todo[name] = e
+
+    def cmd_for(name, e):
         exe = os.path.join(bindir, name)
         cmd = e.get('compile') or ['g++', '-std=c++17', '-O3', '-march=native', '-o', exe, os.path.join(src, e['main'])]
-        cmd = [c.replace('{exe}', exe).replace('{src}', src) for c in cmd]
-        jobs.append((name, exe, subprocess.Popen(cmd, cwd=src, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
-        built[name] = exe
-    for name, exe, pr in jobs:
-        out, _ = pr.communicate()
-        if pr.returncode != 0 or not os.path.exists(exe):
-            raise SystemExit('compile %s failed: %s' % (name, out[-2000:]))
+        return exe, [c.replace('{exe}', exe).replace('{src}', src) for c in cmd]
+
+    built, failed = {}, {}
+    names = list(todo)
+    nj = max(1, int(cfg.get('build_jobs') or os.cpu_count() or 4))
+    for b in range(0, len(names), nj):
+        jobs = []
+        for name in names[b:b + nj]:
+            exe, cmd = cmd_for(name, todo[name])
+            jobs.append((name, exe, subprocess.Popen(cmd, cwd=src, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
+        for name, exe, pr in jobs:
+            out, _ = pr.communicate()
+            if pr.returncode == 0 and os.path.exists(exe): built[name] = exe
+            else: failed[name] = out
+    for name in list(failed):
+        exe, cmd = cmd_for(name, todo[name])
+        r = subprocess.run(cmd, cwd=src, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(exe):
+            built[name] = exe; del failed[name]
+        else:
+            log('compile %s failed, engine dropped: %s' % (name, (r.stdout + r.stderr)[-1500:]))
+    if not built: raise SystemExit('no engine could be built')
     log('built engines', sorted(built))
     return built
 
@@ -112,14 +133,18 @@ def enc_elf(p, prog):
     return '\n'.join([' '.join(s)] + ['%s %d %d %d' % tuple(x) for x in prog]) + '\n'
 
 
-def parse_elf(text):
+def parse_elf(text, variants=None):
+    """R blocks (strictly shorter programs) -> {id: prog}; V blocks (equal-length plateau programs) appended to
+    variants as (id, prog) when a list is given."""
     res, lines, k = {}, text.split('\n'), 0
     while k < len(lines):
         ln = lines[k].split()
-        if ln and ln[0] == 'R' and len(ln) >= 4:
-            pid, n = ln[1], int(ln[3])
+        if ln and ln[0] in ('R', 'V') and len(ln) >= 3:
+            pid, n = ln[1], int(ln[3] if ln[0] == 'R' else ln[2])
             try:
-                res[pid] = [[o, int(i), int(j), int(d)] for o, i, j, d in (lines[k + 1 + t].split() for t in range(n))]
+                prog = [[o, int(i), int(j), int(d)] for o, i, j, d in (lines[k + 1 + t].split() for t in range(n))]
+                if ln[0] == 'R': res[pid] = prog
+                elif variants is not None: variants.append((pid, prog))
             except (ValueError, IndexError):
                 pass
             k += n + 1
@@ -145,10 +170,12 @@ def parse_wj(line):
         return None
 
 
-def run_engine(e, exe, p, prog, variants, seed, deadline):
-    """Returns (program or None, cpu seconds used)."""
+def run_engine(e, exe, p, prog, variants, seed, deadline, newvars):
+    """Returns (program or None, cpu seconds used); equal-length donor programs are appended to newvars."""
     t0 = time.time()
     kind = e.get('kind', 'elf')
+    if kind == 'recomb':
+        return run_recomb(e, exe, p, prog, variants, seed, deadline, t0, newvars)
     if kind == 'elf':
         tl = min(float(e.get('time', 60)), max(5.0, deadline - time.time() - 30))
         cmd = [exe, '--time', '%.1f' % tl, '--seed', str(seed)] + list(e.get('args', []))
@@ -164,8 +191,222 @@ def run_engine(e, exe, p, prog, variants, seed, deadline):
         out = r.stdout
     except subprocess.TimeoutExpired:
         return None, time.time() - t0
-    new = parse_elf(out).get(p.id) if kind == 'elf' else parse_wj(out.split('\n')[0] if out else '')
+    vv = []
+    new = parse_elf(out, vv).get(p.id) if kind == 'elf' else parse_wj(out.split('\n')[0] if out else '')
+    newvars.extend(q for k, q in vv if k == p.id)
     return new, time.time() - t0
+
+
+# ------------------------------------------------------------------ CP-SAT recombination
+# Adapted from goodpjw2008's recombine.py (dataset goodpjw2008/santa-2026-dag-lns-programs, Apache-2.0):
+# pool the recipes v = a op b seen by an LNS run (--hall 1 --dump) and in known programs, add every cross recipe
+# between pooled values, and let CP-SAT pick the fewest values (one recipe each, acyclic via integer levels)
+# that still build every target; then list-schedule into the registers.
+OPS = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b, '/': lambda a, b: a // b}
+
+
+def program_recipes(sv, nreg, prog):
+    regs = list(sv) + [None] * (nreg - len(sv)); out = set()
+    for op, i, j, d in prog:
+        a, b = regs[i], regs[j]; v = OPS[op](a, b); regs[d] = v
+        out.add((op, a, b, v))
+    return out
+
+
+def read_dump(path):
+    out = set()
+    try:
+        lines = open(path).read().split('\n')
+    except OSError:
+        return out
+    k = 0
+    while k < len(lines):
+        ln = lines[k].split()
+        if ln and ln[0] == 'D':
+            n = int(ln[2])
+            for t in range(n):
+                try:
+                    op, a, b, v = lines[k + 1 + t].split(); out.add((op, int(a), int(b), int(v)))
+                except (ValueError, IndexError):
+                    pass
+            k += n + 1
+        else:
+            k += 1
+    return out
+
+
+def cross_recipes(limit, values):
+    vs = sorted(values); S = set(vs); out = set()
+    for i, a in enumerate(vs):
+        for b in vs[i:]:
+            s = a + b
+            if s in S: out.add(('+', a, b, s))
+            m = a * b
+            if m <= limit and m in S: out.add(('*', a, b, m))
+            if b > a and b - a in S: out.add(('-', b, a, b - a))
+            if b != a and b % a == 0 and b // a in S: out.add(('/', b, a, b // a))
+    return out
+
+
+def schedule(sv, nreg, chosen, level):
+    import collections
+    starts = list(sv); sset = set(starts)
+    users = collections.defaultdict(list)
+    for v, (op, a, b) in chosen.items():
+        users[a].append(v)
+        if b != a: users[b].append(v)
+    remaining = {v: len(users[v]) for v in list(chosen) + starts}
+    indeg = {v: sum(1 for x in {chosen[v][1], chosen[v][2]} if x not in sset) for v in chosen}
+    ready = [v for v in chosen if indeg[v] == 0]
+    done = set(sset); order = []
+    while ready:
+        def key(v):
+            op, a, b = chosen[v]
+            fr = (remaining[a] == 1) + (b != a and remaining[b] == 1)
+            return ((1 if users[v] else 0) - fr, level.get(v, 0))
+        ready.sort(key=key); v = ready.pop(0); order.append(v); done.add(v)
+        op, a, b = chosen[v]
+        remaining[a] -= 1
+        if b != a: remaining[b] -= 1
+        for u in users[v]:
+            indeg[u] -= 1
+        for u in users[v]:
+            if indeg[u] == 0 and u not in done and u not in ready:
+                if chosen[u][1] in done and chosen[u][2] in done: ready.append(u)
+    if len(order) != len(chosen): return None
+    last = {}
+    for k, v in enumerate(order):
+        op, a, b = chosen[v]; last[a] = k; last[b] = k
+    reg_of = {}; occ = [None] * nreg
+    for k, s0 in enumerate(starts):
+        if s0 not in reg_of: reg_of[s0] = k; occ[k] = s0
+    for s0 in list(reg_of):
+        if s0 not in last: occ[reg_of[s0]] = None
+    prog = []
+    for k, v in enumerate(order):
+        op, a, b = chosen[v]; ra, rb = reg_of[a], reg_of[b]
+        if occ[ra] != a or occ[rb] != b: return None
+        if last.get(a) == k: occ[ra] = None
+        if last.get(b) == k: occ[rb] = None
+        try: d = occ.index(None)
+        except ValueError: return None
+        prog.append([op, ra, rb, d]); reg_of[v] = d; occ[d] = v
+        if last.get(v, -1) <= k: occ[d] = None
+    return prog
+
+
+def recombine(sv, targets, limit, nreg, recipes, hint_prog, time_limit):
+    import collections
+    from ortools.sat.python import cp_model
+    sset = set(sv); T = set(targets) - sset
+    values = {v for (_, a, b, v) in recipes} | {a for (_, a, b, v) in recipes} | {b for (_, a, b, v) in recipes} | sset
+    recipes = set(recipes) | cross_recipes(limit, values)
+    rec_by_v = collections.defaultdict(list)
+    for r in recipes:
+        op, a, b, v = r
+        if v in sset or v == a or v == b: continue
+        rec_by_v[v].append(r)
+    V = list(rec_by_v)
+    m = cp_model.CpModel()
+    x = {v: m.NewBoolVar('') for v in V}
+    lvl = {v: m.NewIntVar(1, len(V) + 1, '') for v in V}
+    for t in T:
+        if t not in x: return None
+        m.Add(x[t] == 1)
+    for v in V:
+        ys = []
+        for (op, a, b, _) in rec_by_v[v]:
+            if (a not in sset and a not in x) or (b not in sset and b not in x): continue
+            y = m.NewBoolVar(''); ys.append(((op, a, b), y))
+            for o in {a, b}:
+                if o in sset: continue
+                m.AddImplication(y, x[o]); m.Add(lvl[v] >= lvl[o] + 1).OnlyEnforceIf(y)
+        if not ys: m.Add(x[v] == 0); rec_by_v[v] = []; continue
+        m.Add(sum(y for _, y in ys) == x[v])
+        rec_by_v[v] = ys
+    m.Minimize(sum(x.values()))
+    hr = {}
+    for (op, a, b, v) in program_recipes(sv, nreg, hint_prog): hr.setdefault(v, (op, a, b))
+    need, st = set(), list(T)
+    while st:
+        v = st.pop()
+        if v in need or v in sset: continue
+        need.add(v); op, a, b = hr[v]; st += [a, b]
+    depth = {}
+    def dep(v):
+        if v in sset: return 0
+        if v not in depth: op, a, b = hr[v]; depth[v] = 1 + max(dep(a), dep(b))
+        return depth[v]
+    for v in V:
+        m.AddHint(x[v], 1 if v in need else 0)
+        if v in need: m.AddHint(lvl[v], dep(v))
+        for rec, y in rec_by_v[v]:
+            m.AddHint(y, 1 if (v in need and rec == hr.get(v)) else 0)
+    sol = cp_model.CpSolver(); sol.parameters.max_time_in_seconds = time_limit; sol.parameters.num_workers = 1
+    status = sol.Solve(m)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE): return None
+    chosen, level = {}, {}
+    for v in V:
+        if sol.Value(x[v]):
+            for rec, y in rec_by_v[v]:
+                if sol.Value(y): chosen[v] = rec; level[v] = sol.Value(lvl[v]); break
+    return schedule(sv, nreg, chosen, level)
+
+
+def recomb_subprocess():
+    d = json.load(sys.stdin)
+    rec = [tuple(r) for r in d['recipes']]
+    try:
+        prog = recombine(d['sv'], d['targets'], d['limit'], d['nreg'], rec, d['hint'], float(d['time']))
+    except ImportError as ex:
+        print(json.dumps({'error': 'import: %s' % ex})); return
+    print(json.dumps({'program': prog}))
+
+
+HAVE_CPSAT = [None]
+SELF_PATH = [None]   # script to run with --recomb (this file, else the dataset copy)
+
+
+def run_recomb(e, exe, p, prog, variants, seed, deadline, t0, newvars):
+    tl = min(float(e.get('time', 15)), max(5.0, deadline - time.time() - 60))
+    dump = '/tmp/elfdump_%d_%d.txt' % (os.getpid(), seed)
+    cmd = [exe, '--time', '%.1f' % tl, '--seed', str(seed), '--kicks', '1000', '--kslack', '2', '--hall', '1',
+           '--dump', dump] + list(e.get('args', []))
+    best = None
+    try:
+        r = subprocess.run(cmd, input=enc_elf(p, prog), capture_output=True, text=True, timeout=tl * 2 + 120)
+        vv = []
+        best = parse_elf(r.stdout, vv).get(p.id)
+        newvars.extend(q for k, q in vv if k == p.id)
+    except subprocess.TimeoutExpired:
+        pass
+    if best is not None and (len(best) >= len(prog) or p.check(best)): best = None
+    hint = best or prog
+    recs = read_dump(dump)
+    try: os.remove(dump)
+    except OSError: pass
+    cp = min(float(e.get('cp', 25)), deadline - time.time() - 30)
+    if HAVE_CPSAT[0] is False or cp < 5 or not SELF_PATH[0]:
+        return best, time.time() - t0
+    for q in [prog] + list(variants[:int(e.get('max_seeds', 4))]) + ([best] if best else []):
+        recs |= program_recipes(p.sv, p.nreg, q)
+    inp = json.dumps({'sv': p.sv, 'targets': p.targets, 'limit': p.limit, 'nreg': p.nreg, 'hint': hint,
+                      'recipes': [list(r) for r in recs], 'time': cp})
+    try:
+        r = subprocess.run([sys.executable, SELF_PATH[0], '--recomb'], input=inp, capture_output=True,
+                           text=True, timeout=cp * 3 + 120)
+        out = json.loads(r.stdout.strip().split('\n')[-1]) if r.stdout.strip() else {'error': r.stderr[-300:]}
+    except (subprocess.TimeoutExpired, ValueError) as ex:
+        out = {'error': repr(ex)[:200]}
+    if 'error' in out:
+        if HAVE_CPSAT[0] is None and 'import' in out['error']:
+            HAVE_CPSAT[0] = False; log('CP-SAT unavailable (%s); recomb runs LNS only' % out['error'])
+        return best, time.time() - t0
+    HAVE_CPSAT[0] = True
+    rp = out.get('program')
+    if rp and len(rp) < len(hint) and not p.check(rp):
+        best = rp
+    return best, time.time() - t0
 
 
 # ------------------------------------------------------------------ main loop
@@ -192,10 +433,27 @@ class State:
             self.busy.add(k); self.passes[k] += 1
             return k, self.passes[k], [list(map(list, v)) for v in self.variants[k]], self.best[k]
 
-    def report(self, k, ename, new, cpu):
+    def sig(self, k, prog):
+        p = self.P[k]
+        return frozenset(r[3] for r in program_recipes(p.sv, p.nreg, prog))
+
+    def add_variant(self, k, prog, front=True):
+        """Keep distinct (by value set) valid programs within 3 of the best; at most 8 per puzzle."""
+        if len(prog) > len(self.best[k]) + 3 or self.P[k].check(prog): return False
+        sg = self.sig(k, prog)
+        if sg == self.sig(k, self.best[k]) or any(sg == self.sig(k, v) for v in self.variants[k]): return False
+        if front: self.variants[k].insert(0, prog)
+        else: self.variants[k].append(prog)
+        self.variants[k] = [v for v in self.variants[k] if len(v) <= len(self.best[k]) + 3][:8]
+        return True
+
+    def report(self, k, ename, new, cpu, newvars=()):
         with self.lock:
             self.busy.discard(k)
             st = self.stats[ename]; st['runs'] += 1; st['cpu_s'] += cpu; self.spent[k] += cpu
+            for v in newvars:
+                if len(v) == len(self.best[k]) and self.add_variant(k, v):
+                    st['donors'] = st.get('donors', 0) + 1
             if new is None: return
             cur = self.best[k]
             if len(new) >= len(cur):
@@ -204,8 +462,8 @@ class State:
             if err:
                 st['invalid'] += 1; log('INVALID from', ename, k, err); return
             st['gain'] += len(cur) - len(new); st['hits'] += 1
-            self.variants[k] = ([cur] + self.variants[k])[:6]
             self.best[k] = new; self.who[k] = ename
+            self.variants[k] = [v for v in ([cur] + self.variants[k]) if len(v) <= len(new) + 3][:8]
             self.timeline.append([round(time.time() - T_START), k, ename, len(cur), len(new)])
             log('GAIN %s %s %d -> %d (base %d)' % (k, ename, len(cur), len(new), len(self.base[k])))
 
@@ -215,7 +473,8 @@ class State:
                     for k in self.ids if len(self.best[k]) < len(self.base[k])]
             stats = {'engines': self.stats, 'elapsed_s': time.time() - T_START, 'final': final,
                      'shard': self.ids, 'spent_s': self.spent, 'timeline': self.timeline,
-                     'gain': sum(r[2] - r[1] for r in rows), 'tag': self.cfg.get('tag', '')}
+                     'gain': sum(r[2] - r[1] for r in rows), 'tag': self.cfg.get('tag', ''),
+                     'env': self.cfg.get('_env', {})}
         tmp = os.path.join(self.outdir, '.improved.csv.tmp')
         with open(tmp, 'w', newline='', encoding='utf-8') as f:
             w = csv.writer(f); w.writerow(['id', 'len', 'base_len', 'engine', 'program'])
@@ -230,7 +489,7 @@ class State:
 
 def main(cfg, dirs, outdir):
     os.makedirs(outdir, exist_ok=True)
-    bindir = cfg.get('bindir') or '/tmp/elfbin'
+    bindir = os.path.abspath(cfg.get('bindir') or '/tmp/elfbin')
     os.makedirs(bindir, exist_ok=True)
     pz = find_file(dirs, 'puzzles.csv')
     if not pz: raise SystemExit('puzzles.csv not found in %s' % dirs)
@@ -247,7 +506,22 @@ def main(cfg, dirs, outdir):
     ids = [k for k in ids if k not in bad]
     log('shard %d puzzles, %d instructions, budget %.0f s, cpus %s' % (
         len(ids), sum(len(start[k]) for k in ids), cfg['budget_s'], os.cpu_count()))
+    env = {'python': sys.version.split()[0], 'cpus': os.cpu_count()}
+    try:
+        env['cpu'] = [l.split(':', 1)[1].strip() for l in open('/proc/cpuinfo') if l.startswith('model name')][0]
+    except Exception:
+        pass
+    try:
+        import ortools; env['ortools'] = ortools.__version__
+    except Exception as ex:
+        env['ortools'] = 'missing: %r' % (ex,)
+    f = globals().get('__file__')
+    SELF_PATH[0] = os.path.abspath(f) if f and os.path.exists(f) else find_file(dirs, 'runner.py')
+    env['self'] = SELF_PATH[0]
+    log('env', env)
+    cfg['_env'] = env
     exes = build_engines(cfg, dirs, bindir)
+    cfg['engines'] = [e for e in cfg['engines'] if e['name'] in exes]
     S = State(P, ids, start, outdir, cfg)
     vp = find_file(dirs, cfg.get('variants_file', 'variants.csv'))
     if vp:   # near-length public variants: crossover seeds for the seeded strategies
@@ -258,8 +532,7 @@ def main(cfg, dirs, outdir):
                 if k not in S.variants: continue
                 try: prog = json.loads(row['program'])
                 except ValueError: continue
-                if prog != S.best[k] and len(prog) <= len(S.best[k]) + 3 and not P[k].check(prog):
-                    S.variants[k].append(prog); nv += 1
+                if S.add_variant(k, prog, front=False): nv += 1
         log('loaded %d variants' % nv)
     S.write()
     deadline = T_START + float(cfg['budget_s'])
@@ -279,10 +552,11 @@ def main(cfg, dirs, outdir):
                     else engines[(npass - 1) % len(engines)]
                 seed = rng.randrange(1, 2 ** 31)
             try:
-                new, cpu = run_engine(e, exes[e['name']], P[k], prog, variants, seed, deadline)
+                nv = []
+                new, cpu = run_engine(e, exes[e['name']], P[k], prog, variants, seed, deadline, nv)
             except Exception as ex:  # keep the worker alive
-                log('engine error', e['name'], k, repr(ex)[:200]); new, cpu = None, 1.0
-            S.report(k, e['name'], new, cpu)
+                log('engine error', e['name'], k, repr(ex)[:200]); new, cpu, nv = None, 1.0, []
+            S.report(k, e['name'], new, cpu, nv)
 
     nw = int(cfg.get('workers') or os.cpu_count() or 4)
     th = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(nw)]
@@ -302,7 +576,9 @@ def main(cfg, dirs, outdir):
 
 
 if __name__ == '__main__':
-    if 'CONFIG' in globals():
+    if '--recomb' in sys.argv:
+        recomb_subprocess()
+    elif 'CONFIG' in globals():
         main(CONFIG, ['/kaggle/input'], '/kaggle/working')
     else:
         import argparse

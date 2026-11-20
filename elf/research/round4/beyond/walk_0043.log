@@ -1,0 +1,9 @@
+scored_0043 210 potential (disjoint sum, best group gain, #groups): (1, 1, 7)
+1 accepted 1 len 210 potential (1, 1, 7) 11s
+4 accepted 2 len 210 potential (1, 1, 7) 37s
+6 accepted 3 len 210 potential (1, 1, 7) 48s
+8 accepted 4 len 210 potential (1, 1, 5) 61s
+10 accepted 5 len 210 potential (1, 1, 5) 79s
+12 accepted 6 len 210 potential (1, 1, 5) 99s
+19 accepted 7 len 210 potential (1, 1, 5) 157s
+23 accepted 8 len 210 potential (1, 1, 5) 192s

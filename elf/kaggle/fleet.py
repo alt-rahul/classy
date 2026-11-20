@@ -153,15 +153,30 @@ def kernel_text(cfg, ids, st, tag, seed):
 
 def choose_shard(cfg, s, st, n, exclude):
     P = load_puzzles()
-    minlen = cfg.get('min_len', 0)
+    minlen, maxlen = cfg.get('min_len', 0), cfg.get('max_len', 10 ** 9)
     only = set(cfg.get('only_ids') or [])
-    cand = [p.id for p in P if st[p.id]['len'] >= minlen and p.id not in exclude and (not only or p.id in only)]
+    cand = [p.id for p in P if minlen <= st[p.id]['len'] <= maxlen and p.id not in exclude and (not only or p.id in only)]
     cov = s.get('coverage', {})
     gains = s.get('gains', {})
-    # least covered first (core-seconds spent / priority); priority grows with program length and past gains
+    # adaptive band weights: merged gains per core-hour by program-length band, with a prior
+    edges = cfg.get('band_edges', [60, 100, 140, 180, 220])
+    band = lambda L: sum(1 for e in edges if L >= e)
+    G, H = {}, {}
+    for p in P:
+        b = band(st[p.id]['len'])
+        G[b] = G.get(b, 0) + gains.get(p.id, 0)
+        H[b] = H.get(b, 0.0) + cov.get(p.id, 0.0) / 3600
+    a0, h0 = float(cfg.get('band_prior_gain', 1)), float(cfg.get('band_prior_hours', 20))
+    w = {b: (G.get(b, 0) + a0) / (H.get(b, 0.0) + h0) for b in range(len(edges) + 1)}
+    c0 = float(cfg.get('pseudo_coverage_s', 0))
+
+    # least covered first, relative to priority (length^p, band gain rate, past gains of the puzzle)
     def key(k):
-        pr = st[k]['len'] ** float(cfg.get('len_power', 1.0)) * (1.0 + float(cfg.get('gain_bonus', 0.5)) * gains.get(k, 0))
-        return (cov.get(k, 0.0) / pr, -st[k]['len'], k)
+        L = st[k]['len']
+        pr = L ** float(cfg.get('len_power', 1.0)) * (1.0 + float(cfg.get('gain_bonus', 0.5)) * gains.get(k, 0))
+        if cfg.get('adaptive', False):
+            pr *= w[band(L)]
+        return ((cov.get(k, 0.0) + c0) / pr, -L, k)
     cand.sort(key=key)
     return cand[:n]
 
@@ -307,8 +322,11 @@ def cmd_poll():
         sl = s['slots'].get(slot, {})
         if sl.get('state') in ('pushed', 'queued', 'running'):
             continue
-        if sl.get('state') == 'push_failed' and time.time() - sl.get('at', 0) < 1800:
-            continue
+        if sl.get('state') == 'push_failed':
+            # session-count refusals clear as soon as Kaggle releases a finished session: retry next poll
+            wait = 200 if 'Maximum batch' in str(sl.get('error', '')) else 1800
+            if time.time() - sl.get('at', 0) < wait:
+                continue
         try:
             launch(cfg, s, slot, st)
         except kapi.KaggleError as e:
@@ -334,9 +352,17 @@ def cmd_status():
                                                                                     t['gain_kernel'] / h if h else 0))
 
 
+def code_mtime():
+    return max(os.path.getmtime(os.path.join(HERE, f)) for f in ('fleet.py', 'kapi.py'))
+
+
 def cmd_loop(every):
     mlog('fleet loop started (pid %d)' % os.getpid())
+    t_code = code_mtime()
     while True:
+        if code_mtime() != t_code:   # fleet.py / kapi.py edited: restart with the new code (state is on disk)
+            mlog('fleet code changed, re-exec')
+            os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), 'loop', '--every', str(every)])
         try:
             cmd_poll()
         except Exception as e:  # keep the loop alive; everything is on disk
@@ -352,7 +378,7 @@ def cmd_localtest(ids, secs):
     build_dataset_dir(st)
     ids = ids.split(',')
     kc = {'ids': ids, 'budget_s': float(secs), 'workers': 1, 'engines': cfg['engines'], 'seed': 1, 'tag': 'local',
-          'write_every_s': 60, 'bindir': os.path.join(HERE, 'build', 'localbin'), 'random_engine': cfg.get('random_engine', True)}
+          'write_every_s': 60, 'bindir': os.path.join(HERE, 'build', 'localbin'), 'build_jobs': 1, 'random_engine': cfg.get('random_engine', True)}
     tdir = os.path.join(HERE, 'build', 'localtest')
     os.makedirs(tdir, exist_ok=True)
     json.dump(kc, open(os.path.join(tdir, 'cfg.json'), 'w'))

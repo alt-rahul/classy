@@ -71,10 +71,10 @@ static inline bool cheap(u64 n, int c, u64 cap3) { // cost(n) <= c ? (c capped a
     return false;
 }
 static const vector<u64> &setOf(int a) { return a == 0 ? V : a == 1 ? S1v : S2; }
-static int HEAVY = 1;
+static int HEAVY = 1; static int PHASE = 0; static double PT[16];
 static int ENUM = 0; static vector<Ops> SOLS;
 // at depth 0 in enumeration mode: record the solution and keep searching (returns true when the cap is reached)
-static inline bool done0(Ops &o, size_t s0, int depth) { if (!ENUM || depth > 0) return true; SOLS.push_back(o); o.resize(s0); return (int)SOLS.size() >= ENUM; }
+static inline bool done0(Ops &o, size_t s0, int depth) { if (depth == 0) fprintf(stderr, "sol phase %d at %.1fs (phase started %.1f)\n", PHASE, now() - T0, PT[PHASE] - T0); if (!ENUM || depth > 0) return true; SOLS.push_back(o); o.resize(s0); return (int)SOLS.size() >= ENUM; }
 static unordered_map<u64, int> failmemo; // n -> largest budget known to fail
 static bool solve(u64 n, int c, Ops &o, int depth);
 static inline int blen(u64 x) { return 64 - __builtin_clzll(x); }
@@ -124,26 +124,39 @@ static bool solve(u64 n, int c, Ops &o, int depth) {
     if (c >= 4) {
         static const int AB[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
         int kmax = depth == 0 ? (HEAVY > 0 ? 6 : 5) : depth == 1 ? (HEAVY >= 3 ? 6 : 5) : (HEAVY >= 2 ? 5 : 4);
-        for (int i = 0; i < kmax; i++) {
+        for (int i = 0; i < min(kmax, 5); i++) {
             int a = AB[i][0], b = AB[i][1];
             if (a + b + 1 > c) continue;
+            if (depth == 0) { PHASE = i; PT[i] = now(); }
             if (winr(n, a, b, c - 2 - a - b, o, depth)) return true;
             o.resize(s0);
             if (now() - T0 > TLIM) return false;
         }
         if (depth == 0 || (depth == 1 && (c <= 5 || HEAVY >= 2))) {
-            for (u64 u : V) {
-                if (u == n || u < (n >> 12)) continue;
+            if (depth == 0) { PHASE = 7; PT[7] = now(); }
+            if (depth == 0 && HEAVY >= 1 && c >= 5) {
+                // one-step values near n, closest first; the remainder must fit the budget c-2
+                int b = blen(n), cb = c - 2;
+                int sh = cb <= 2 ? b / 2 + 10 : cb == 3 ? b / 2 + 18 : cb == 4 ? (3 * b) / 4 + 8 : 63;
+                u64 M = 1ULL << min(62, sh); if (M > n - 1) M = n - 1;
+                auto lo = lower_bound(S1v.begin(), S1v.end(), n - M), hi = upper_bound(S1v.begin(), S1v.end(), (n + M < n) ? ~0ULL : n + M);
+                vector<pair<u64, u64>> cand;
+                for (auto it = lo; it != hi; ++it) if (*it != n) cand.push_back({*it > n ? *it - n : n - *it, *it});
+                sort(cand.begin(), cand.end());
+                for (auto &pr : cand) {
+                    u64 u = pr.second, m = pr.first;
+                    if (now() - T0 > TLIM) return false;
+                    if (solve(m, c - 2, o, depth + 1)) { build1(u, o); if (u > n) o.push_back({u, '-', m, n}); else o.push_back({u, '+', m, n}); if (done0(o, s0, depth)) return true; }
+                    o.resize(s0);
+                }
+            }
+            if (depth == 0) { PHASE = 6; PT[6] = now(); }
+            vector<pair<u64, u64>> vc; for (u64 u : V) if (u != n && u >= (n >> 12)) vc.push_back({u > n ? u - n : n - u, u});
+            sort(vc.begin(), vc.end());
+            for (auto &pv : vc) { u64 u = pv.second;
                 if (now() - T0 > TLIM) return false;
                 u64 m = u > n ? u - n : n - u;
                 if (solve(m, c - 1, o, depth + 1)) { if (u > n) o.push_back({u, '-', m, n}); else o.push_back({u, '+', m, n}); if (done0(o, s0, depth)) return true; }
-                o.resize(s0);
-            }
-            if (depth == 0 && HEAVY >= 1 && c >= 5) for (const E1 &e : S1) {
-                u64 u = e.v; if (u == n || u < (n >> 8)) continue;
-                if (now() - T0 > TLIM) return false;
-                u64 m = u > n ? u - n : n - u;
-                if (solve(m, c - 2, o, depth + 1)) { build1(u, o); if (u > n) o.push_back({u, '-', m, n}); else o.push_back({u, '+', m, n}); if (done0(o, s0, depth)) return true; }
                 o.resize(s0);
             }
             for (u64 s : V) {
@@ -151,6 +164,12 @@ static bool solve(u64 n, int c, Ops &o, int depth) {
                 if (solve(n / s, c - 1, o, depth + 1)) { o.push_back({n / s, '*', s, n}); if (done0(o, s0, depth)) return true; }
                 o.resize(s0);
             }
+        }
+        if (kmax == 6 && 5 <= c) { // heavy (2,2) window last
+            if (depth == 0) { PHASE = 5; PT[5] = now(); }
+            if (winr(n, 2, 2, c - 6, o, depth)) return true;
+            o.resize(s0);
+            if (now() - T0 > TLIM) return false;
         }
     }
     if (now() - T0 <= TLIM) { int &f = failmemo[n]; if (f < c) f = c; }

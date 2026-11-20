@@ -1,0 +1,12 @@
+[{"stream_name":"stdout","time":1.847440049,"data":"[    0.0 min] shard 30 puzzles, 7846 instructions, budget 9000 s, cpus 4\n"}
+,{"stream_name":"stderr","time":24.392801616,"data":"compile wj_anneal failed: /usr/bin/ld: /usr/lib/gcc/x86_64-linux-gnu/13/../../../x86_64-linux-gnu/Scrt1.o: in function `_start':\n"}
+,{"stream_name":"stderr","time":24.392840935,"data":"(.text+0x1b): undefined reference to `main'\n"}
+,{"stream_name":"stderr","time":24.392846416,"data":"collect2: error: ld returned 1 exit status\n"}
+,{"stream_name":"stderr","time":24.392851125,"data":"\n"}
+,{"stream_name":"stderr","time":27.769323053,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":27.769367091,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":28.216637122,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":28.21669945,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":30.506670812,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":32.249728668,"data":"[NbConvertApp] Writing 481417 bytes to __results__.html\n"}
+]
