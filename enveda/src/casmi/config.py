@@ -63,7 +63,7 @@ class Config:
     # WP8 additions (4.2; casmi.libmatch, the "lib" pipeline stage)
     lib_dir: str = ""                        # library directory; "" = paths.PROCESSED/library, relative = under PROCESSED
     lib_mass_tol_ppm: float = 10.0           # LIB candidate window (min width mass_tol_min_da)
-    lib_sim: str = "cos_max"                 # lib_best_cos source: cos_max | ent_max | cons_cos | max_cos_cons | mean_cos_ent | cos_or_cons
+    lib_sim: str = "cos_max"                 # lib_best_cos source: cos_max | ent_max | cons_cos | max_cos_cons | mean_cos_ent | graded
 
     # --- Analog search (4.3) ----------------------------------------------------------
     analog_bin_da: float = 0.05
@@ -216,6 +216,55 @@ class Config:
     val_np_other_mass_match: bool = True     # initial: NP-OTHER also follows the mass target (risk 17)
     val_query_max_abs_ppm: float = 20.0      # initial: organisers' precursor cut (set from DATA_AUDIT)
     val_query_peak_cut_da: float = 2.0       # test cleaning: drop peaks above precursor + this
+
+    # --- Contrastive transformer encoder (RESEARCH.md roadmap item 1; casmi.encoder) ----
+    # Architecture (saved with the checkpoint as EncoderSpec; these are the defaults).
+    enc_d_model: int = 512
+    enc_n_layers: int = 6
+    enc_n_heads: int = 8
+    enc_d_ff: int = 2048
+    enc_dropout: float = 0.1
+    enc_n_freq: int = 64                     # Fourier features per scalar (sin + cos each)
+    enc_lambda_min: float = 0.01             # shortest Fourier wavelength (Da)
+    enc_lambda_max: float = 2000.0           # longest Fourier wavelength (Da)
+    enc_max_tokens: int = 150                # peak tokens per query (most intense over members)
+    enc_max_members: int = 4                 # spectra merged into one query (1 to this)
+    enc_max_peaks: int = 100                 # peaks read per member spectrum (= top_n_peaks)
+    enc_emb_dim: int = 512                   # contrastive embedding width
+    enc_tower_hidden: int = 1024             # molecule tower hidden width
+    # Bundle (scripts/build_encoder_bundle.py)
+    enc_neg_window_ppm: float = 10.0         # same-mass negative window (min width mass_tol_min_da)
+    enc_neg_max: int = 256                   # stored negatives per structure (subsampled above)
+    enc_neg_min: int = 16                    # topped up with nearest-mass candidates below
+    enc_lib_shares: tuple = (("enveda-180", 0.20), ("pluskal_ms2", 0.12), ("gnps", 0.20),
+                             ("riken", 0.135), ("mona", 0.10), ("massbank", 0.065),
+                             ("msdial", 0.07), ("spectraverse", 0.07))   # sample share per library; rest pro rata n_groups^0.75
+    # Training (scripts/train_encoder.py)
+    enc_batch_size: int = 256
+    enc_n_neg: int = 48                      # sampled same-mass negatives per query (+ in-batch)
+    enc_lr: float = 3e-4
+    enc_lr_min_frac: float = 0.02            # cosine (in wall time) decays to lr * this
+    enc_weight_decay: float = 0.05
+    enc_warmup_steps: int = 1000
+    enc_grad_clip: float = 1.0
+    enc_hours: float = 4.0                   # wall budget for the training loop
+    enc_temperature: float = 0.05            # initial InfoNCE temperature (learned)
+    enc_focal_gamma: float = 2.0
+    enc_fp_loss_scale: float = 64.0          # fingerprint loss = sum over bits / this, mean over batch
+    enc_k_probs: tuple = (0.35, 0.25, 0.2, 0.2)   # P(query merges k = 1..4 spectra)
+    enc_aug_peak_drop: float = 0.1
+    enc_aug_intensity_sigma: float = 0.25
+    enc_aug_mz_ppm: float = 3.0
+    enc_aug_noise_prob: float = 0.5          # per member spectrum
+    enc_aug_noise_max: int = 8
+    enc_aug_noise_int_min: float = 0.005
+    enc_aug_noise_int_max: float = 0.03
+    enc_eval_every_min: float = 30.0         # class 2 evaluation and checkpoint interval
+    enc_log_every_steps: int = 100
+    enc_query_mode: str = "all"              # inference aggregation: all | groups | singles
+    enc_model_path: str = ""                 # pipeline stage "encoder": checkpoint, relative = under MODELS
+    enc_device: str = "cpu"                  # pipeline stage "encoder": torch device
+    enc_batch_queries: int = 256             # queries per forward pass at inference
 
     def __post_init__(self) -> None:
         for f in dataclasses.fields(self):

@@ -11,7 +11,7 @@ db_tiers: [np, pubchem]
 n_jobs: 2                 # mkey worker processes
 batch_molecules: 50       # about 10k candidates per molecule with PubChem (PLAN risk 14)
 lib_mass_tol_ppm: 10.0
-lib_sim: cos_or_cons
+lib_sim: graded
 fusion_lib_cos_min: 0.7
 fusion_lib_min_matched: 4
 fusion_lib_weak: true

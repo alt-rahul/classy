@@ -30,11 +30,16 @@ What the stage does, per batch
    - ``lib_best_cos`` / ``lib_n_matched``: the similarity fusion reads (``cfg.lib_sim``:
      cos_max = best (query spectrum, reference) cosine; ent_max = same for entropy;
      cons_cos = query consensus vs reference consensus; max_cos_cons = the larger of
-     cos_max and cons_cos; mean_cos_ent = (cos_max + ent_max) / 2; cos_or_cons = the
-     per-spectrum or the consensus evidence, whichever passes the stricter fusion rule (1,
-     then 1b), then the higher similarity: a best pair with only 2 matched peaks does not
-     hide a consensus match with 20) and the matched peaks of the pair it came from
-     (cons_n_matched for consensus, else n_matched_best);
+     cos_max and cons_cos; mean_cos_ent = (cos_max + ent_max) / 2; graded = over ALL pairs
+     of the candidate, (query spectrum, reference spectrum) and (query consensus, reference
+     consensus) of the same polarity (and adduct family for consensus), the pair that
+     passes the stricter fusion rule (1, then 1b), then has the higher cosine, then more
+     matched peaks (``graded_evidence``): the search's single best pair can be a 2-peak
+     spectrum with cosine 1.0 that hides a 20-peak match at 0.98) and the matched peaks of
+     the pair it came from (cons_n_matched for cons_cos, else n_matched_best);
+   - ``lib_graded_cos`` / ``lib_graded_n`` (the best-graded pair, ``graded_evidence``) and
+     ``lib_cos_n<k>`` for k in ``GRADED_KS`` (best cosine over the candidate's spectrum and
+     consensus pairs with at least k matched peaks; NaN if none);
    - pool context per molecule: ``lib_pool_n`` (LIB candidates), ``lib_pool_best`` and
      ``lib_pool_second`` (best and second-best lib_best_cos, NaN if absent), ``lib_rank``
      (1 = best lib_best_cos in the molecule, ties by search order), ``lib_gap`` (own
@@ -72,10 +77,12 @@ __all__ = [
     "LIB_FEATURE_MAP",
     "LIB_COLUMNS",
     "LIB_SIMS",
+    "GRADED_KS",
     "lib_dir",
     "get_library",
     "clear_library_cache",
     "lib_similarity",
+    "graded_evidence",
     "lib_candidates",
     "merge_pool",
     "stage_lib",
@@ -111,10 +118,12 @@ LIB_FEATURE_MAP: dict[str, str] = {
     "best_ref_lib": "lib_best_ref_lib",
     "ce_dist_best": "lib_ce_dist_best",
 }
-_DERIVED = ("lib_best_cos", "lib_n_matched", "lib_pool_n", "lib_pool_best", "lib_pool_second",
-            "lib_rank", "lib_gap")
+GRADED_KS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 8)
+_DERIVED = (("lib_graded_cos", "lib_graded_n") + tuple(f"lib_cos_n{k}" for k in GRADED_KS)
+            + ("lib_best_cos", "lib_n_matched", "lib_pool_n", "lib_pool_best", "lib_pool_second",
+               "lib_rank", "lib_gap"))
 LIB_COLUMNS: tuple[str, ...] = tuple(LIB_FEATURE_MAP.values()) + _DERIVED
-LIB_SIMS = ("cos_max", "ent_max", "cons_cos", "max_cos_cons", "mean_cos_ent", "cos_or_cons")
+LIB_SIMS = ("cos_max", "ent_max", "cons_cos", "max_cos_cons", "mean_cos_ent", "graded")
 _ROW_COLUMNS = ("molecule_id", "query_mass", "ik14", "smiles", "formula", "mono_mass", "ppm_err",
                 "tier", "is_lib")
 
@@ -200,21 +209,115 @@ def lib_similarity(res: pd.DataFrame, cfg: Config) -> tuple[np.ndarray, np.ndarr
     if how == "mean_cos_ent":
         with np.errstate(invalid="ignore"):
             return (cos + ent) / 2.0, nm
-    if how == "max_cos_cons":
-        # the larger of the two (cons wins only when strictly larger)
-        use_cons = np.nan_to_num(cons, nan=-np.inf) > np.nan_to_num(cos, nan=-np.inf)
-        return np.where(use_cons, cons, cos), np.where(use_cons, nmc, nm)
-    # cos_or_cons: per-spectrum (cos_max, n_matched_best) or consensus (cons_cos,
-    # cons_n_matched) evidence, whichever ranks higher by (passes fusion rule 1, passes rule
-    # 1b, similarity); ties keep the per-spectrum pair.
-    def grade(sim: np.ndarray, n: np.ndarray) -> np.ndarray:
-        s0 = np.nan_to_num(sim, nan=-1.0)
-        n0 = np.nan_to_num(n, nan=0.0)
-        r1 = (s0 >= cfg.fusion_lib_cos_min) & (n0 >= cfg.fusion_lib_min_matched)
-        rb = (s0 >= cfg.fusion_lib_weak_cos_min) & (n0 >= cfg.fusion_lib_weak_min_matched)
-        return r1 * 4.0 + rb * 2.0 + s0 / 2.0          # s0 in [-1, 1]: grades never overlap
-    use_cons = grade(cons, nmc) > grade(cos, nm)
+    if how == "graded":
+        if "_g_cos" not in res.columns:
+            raise ValueError("lib_sim 'graded' needs graded_evidence columns (_g_cos, _g_n)")
+        return num("_g_cos"), num("_g_n")
+    # max_cos_cons: the larger of the two (cons wins only when strictly larger)
+    use_cons = np.nan_to_num(cons, nan=-np.inf) > np.nan_to_num(cos, nan=-np.inf)
     return np.where(use_cons, cons, cos), np.where(use_cons, nmc, nm)
+
+
+def _grade(cos: np.ndarray, n: np.ndarray, cfg: Config) -> np.ndarray:
+    """Pair grade: 4 x (passes rule 1) + 2 x (passes rule 1b thresholds) + cos / 2."""
+    c = np.nan_to_num(cos, nan=-1.0)
+    k = np.nan_to_num(n, nan=0.0)
+    r1 = (c >= cfg.fusion_lib_cos_min) & (k >= cfg.fusion_lib_min_matched)
+    rb = (c >= cfg.fusion_lib_weak_cos_min) & (k >= cfg.fusion_lib_weak_min_matched)
+    return r1 * 4.0 + rb * 2.0 + c / 2.0
+
+
+def graded_evidence(lib: Any, qs: Any, struct_idx: np.ndarray, exclude_mask: np.ndarray | None,
+                    cfg: Config) -> tuple[np.ndarray, np.ndarray, dict[int, np.ndarray]]:
+    """(cosine, matched peaks) of each candidate structure's best-graded pair, plus
+    ``{k: best cosine over its pairs with >= k matched peaks}`` for k in ``GRADED_KS``.
+
+    Pairs: every non-excluded reference spectrum of the structure against every query
+    spectrum of the same polarity, and every non-excluded reference consensus against every
+    query consensus of the same polarity and adduct family; fragment tolerance as in
+    ``Library.search_by_mass`` (``frag_tol_same_da`` when both are timsTOF, else
+    ``frag_tol_cross_da``, from the library's config). Best = highest ``_grade``, then
+    cosine, then matched peaks, then lower pair index. NaN / 0 without pairs.
+
+    The best-graded pair follows from the per-k maxima: rule 1 holds iff cos_k[K1] >=
+    c1, then the chosen cosine is cos_k[K1]; else rule 1b iff cos_k[Kw] >= cw (cosine
+    cos_k[Kw]); else the overall best cosine. So thresholds with K in ``GRADED_KS`` can be
+    tuned offline from the ``lib_cos_n<k>`` columns.
+    """
+    from .library import _expand_ranges
+    from .similarity import pair_scores_batch
+
+    cand = np.asarray(struct_idx, dtype=np.int64)
+    nc = cand.size
+    best_cos = np.full(nc, np.nan)
+    best_n = np.zeros(nc, dtype=np.float64)
+    at_k = {k: np.full(nc, np.nan) for k in GRADED_KS}
+    if nc == 0 or qs is None or len(qs) == 0:
+        return best_cos, best_n, at_k
+    lcfg = lib.cfg
+    same, cross = float(lcfg.frag_tol_same_da), float(lcfg.frag_tol_cross_da)
+    ex = None if exclude_mask is None else np.asarray(exclude_mask, dtype=bool)
+    owners, coss, ns = [], [], []
+
+    def run(qstore, q_pol, q_tims, q_fam, rstore, r_rows, r_own, r_pol, r_tims, r_fam):
+        pq_l, pr_l, po_l, tol_l = [], [], [], []
+        for q in range(len(qstore)):
+            if qstore.n_peaks[q] == 0:
+                continue
+            sel = r_pol[r_rows] == q_pol[q]
+            if q_fam is not None:
+                sel &= r_fam[r_rows] == q_fam[q]
+            sel = np.flatnonzero(sel)
+            if not sel.size:
+                continue
+            pq_l.append(np.full(sel.size, q, np.int64))
+            pr_l.append(r_rows[sel])
+            po_l.append(r_own[sel])
+            tol_l.append(np.where(r_tims[r_rows[sel]] & bool(q_tims[q]), same, cross))
+        if not pq_l:
+            return
+        pq_, pr_ = np.concatenate(pq_l), np.concatenate(pr_l)
+        cos, ncos, _, _ = pair_scores_batch(
+            qstore.mz, qstore.intensity, qstore.offsets, rstore.mz, rstore.intensity,
+            rstore.offsets, pq_, pr_, np.concatenate(tol_l), weighted=lcfg.entropy_weighted)
+        owners.append(np.concatenate(po_l))
+        coss.append(np.asarray(cos, dtype=np.float64))
+        ns.append(np.asarray(ncos, dtype=np.float64))
+
+    refs, own = _expand_ranges(lib.struct_spec[cand, 0], lib.struct_spec[cand, 1])
+    if ex is not None:
+        k = ~ex[refs]
+        refs, own = refs[k], own[k]
+    q_tims = np.asarray(qs.instrument_family == "timstof", dtype=bool)
+    run(qs.store, qs.polarity, q_tims, None, lib.store, refs, own, lib.spec_pol, lib.spec_tims,
+        None)
+    if len(qs.cons_store):
+        cr, cown = _expand_ranges(lib.struct_cons[cand, 0], lib.struct_cons[cand, 1])
+        if ex is not None:
+            k = ~lib.consensus_mask(ex)[cr]
+            cr, cown = cr[k], cown[k]
+        cq_tims = np.asarray(qs.cons_instrument_family == "timstof", dtype=bool)
+        run(qs.cons_store, qs.cons_polarity, cq_tims, qs.cons_family, lib.cons_store, cr, cown,
+            lib.cons_pol, lib.cons_tims, lib.cons_family)
+    if not owners:
+        return best_cos, best_n, at_k
+    o = np.concatenate(owners)
+    c = np.concatenate(coss)
+    n = np.concatenate(ns)
+    g = _grade(c, n, cfg)
+    order = np.lexsort((np.arange(o.size), -n, -np.nan_to_num(c, nan=-1.0), -g, o))
+    first = np.ones(order.size, dtype=bool)
+    first[1:] = o[order][1:] != o[order][:-1]
+    b = order[first]
+    best_cos[o[b]] = c[b]
+    best_n[o[b]] = n[b]
+    for k in GRADED_KS:
+        sel = n >= k
+        if sel.any():
+            m = np.full(nc, -np.inf)
+            np.maximum.at(m, o[sel], c[sel])
+            at_k[k] = np.where(np.isfinite(m), m, np.nan)
+    return best_cos, best_n, at_k
 
 
 def _pool_context(df: pd.DataFrame) -> pd.DataFrame:
@@ -260,7 +363,12 @@ def _search_one(lib: Any, mid: str, masses: list[float], sub: pd.DataFrame, cfg:
         r = lib.search_by_mass(float(M), tol_ppm=cfg.lib_mass_tol_ppm, queries=sub,
                                exclude_mask=mask, min_da=cfg.mass_tol_min_da)
         if len(r):
-            r = r.assign(_M=float(M))
+            from .library import prepare_queries
+
+            qs = prepare_queries(sub, lib.cfg, M=float(M))
+            gc, gn, gk = graded_evidence(lib, qs, r["struct_idx"].to_numpy(np.int64), mask, cfg)
+            r = r.assign(_M=float(M), _g_cos=gc, _g_n=gn,
+                         **{f"_gk{k}": v for k, v in gk.items()})
             parts.append(r)
     if not parts:
         return None
@@ -307,6 +415,10 @@ def lib_candidates(lib: Any, test_df: pd.DataFrame, molecules: pd.DataFrame, cfg
         })
         for src, dst in LIB_FEATURE_MAP.items():
             f[dst] = r[src].to_numpy()
+        f["lib_graded_cos"] = r["_g_cos"].to_numpy(dtype=np.float64)
+        f["lib_graded_n"] = r["_g_n"].to_numpy(dtype=np.float64)
+        for k in GRADED_KS:
+            f[f"lib_cos_n{k}"] = r[f"_gk{k}"].to_numpy(dtype=np.float64)
         f["lib_best_cos"] = sim
         f["lib_n_matched"] = nm
         frames.append(f)

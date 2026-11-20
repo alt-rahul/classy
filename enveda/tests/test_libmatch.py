@@ -106,6 +106,53 @@ def test_lib_similarity_options():
     assert s[0] == pytest.approx(0.8) and np.isnan(s[1])
     with pytest.raises(ValueError):
         libmatch.lib_similarity(r, Config(lib_sim="bogus"))
+    with pytest.raises(ValueError):                    # graded needs graded_evidence columns
+        libmatch.lib_similarity(r, Config(lib_sim="graded"))
+    g = r.assign(_g_cos=[0.95, 0.5, np.nan], _g_n=[12, 3, 0])
+    s, n = libmatch.lib_similarity(g, Config(lib_sim="graded"))
+    assert s[0] == 0.95 and n.tolist() == [12, 3, 0]
+
+
+def test_grade_orders_rule_then_cosine():
+    cfg = Config(fusion_lib_cos_min=0.7, fusion_lib_min_matched=4, fusion_lib_weak_cos_min=0.5,
+                 fusion_lib_weak_min_matched=2)
+    g = libmatch._grade(np.array([1.0, 0.71, 0.99, 0.5, np.nan]), np.array([2, 4, 1, 2, 0]), cfg)
+    # 0.71 with 4 peaks (rule 1) > 1.0 with 2 peaks (1b) > 0.5 with 2 peaks (1b) > 0.99 with 1
+    assert g[1] > g[0] > g[3] > g[2] > g[4]
+
+
+def test_graded_evidence_dominates_search_best_pair(synthetic_train):
+    lib = synthetic_train["library"]
+    cfg = _cfg()
+    st = lib.structures
+    multi = st[st["n_spectra"] >= 3].head(15)
+    for row in multi.itertuples(index=False):
+        a, b = int(row.spec_start), int(row.spec_end)
+        qs = lib.queries_from_library(np.arange(a, b), M=float(row.mono_mass))
+        r = lib.search_by_mass(float(row.mono_mass), queries=qs)
+        gc, gn, gk = libmatch.graded_evidence(lib, qs, r["struct_idx"].to_numpy(np.int64), None,
+                                              cfg)
+        gg = libmatch._grade(gc, gn, cfg)
+        for col_c, col_n in (("cos_max", "n_matched_best"), ("cons_cos", "cons_n_matched")):
+            ok = r[col_c].notna().to_numpy()
+            ref = libmatch._grade(r[col_c].to_numpy(float), r[col_n].to_numpy(float), cfg)
+            assert (gg[ok] >= ref[ok] - 1e-9).all()
+        own = r["ik14"].to_numpy() == row.ik14
+        assert own.sum() == 1 and gc[own][0] > 0.999
+        # excluding all its spectra leaves no evidence for it
+        mask = lib.spectra_mask(ik14=[row.ik14])
+        gc2, gn2, gk2 = libmatch.graded_evidence(lib, qs, r["struct_idx"].to_numpy(np.int64),
+                                                 mask, cfg)
+        assert np.isnan(gc2[own][0]) and gn2[own][0] == 0 and np.isnan(gk2[4][own][0])
+        # per-k maxima are non-increasing in k and reproduce the graded choice
+        ks = libmatch.GRADED_KS
+        for i in range(len(ks) - 1):
+            a_, b_ = gk[ks[i]], gk[ks[i + 1]]
+            both = ~np.isnan(b_)
+            assert (a_[both] >= b_[both] - 1e-12).all()
+        c4 = gk[cfg.fusion_lib_min_matched]
+        r1 = np.nan_to_num(c4, nan=-1) >= cfg.fusion_lib_cos_min
+        assert np.allclose(gc[r1], c4[r1])
 
 
 def test_pool_context():

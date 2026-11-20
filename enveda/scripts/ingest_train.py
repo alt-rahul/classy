@@ -1101,6 +1101,21 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
     L.append("Columns `abs ...` are quantiles of the absolute given error. `abs M err` is recomputed here: neutral mass from precursor m/z and the parsed adduct "
              "versus the formula mass of `molecular_formula`, in ppm of M (the quantity the "
              "retrieval window applies to).")
+    lim = float(cfg.fpm_max_precursor_error_ppm)
+    dis = meta[(meta["precursor_error_ppm"].abs() > lim) & (meta["m_err_ppm"].abs() <= 5.0)]
+    if len(dis):
+        top = (dis.groupby(["ingest_lib", "adduct"]).agg(
+            spectra=("ik14", "size"), given_median=("precursor_error_ppm", "median"),
+            recomputed_median=("m_err_ppm", "median")).reset_index()
+            .sort_values(["spectra", "ingest_lib", "adduct"], ascending=[False, True, True]).head(10))
+        L += ["", f"Given and recomputed errors disagree: {len(dis):,} kept spectra have |given "
+              f"precursor_error_ppm| > {lim:g} but |recomputed M error| <= 5 ppm (the label and "
+              "precursor agree; the given column is off). Largest groups:", ""]
+        L.append(_table(top.rename(columns={"ingest_lib": "library"}), 2))
+        L.append("")
+        L.append("A label-quality filter on the given `precursor_error_ppm` (WP9 "
+                 "`fpm_max_precursor_error_ppm`) would drop these good spectra; filter on "
+                 "`m_err_ppm` from meta.parquet / the spectra files instead.")
     tims = meta[meta["instrument_family"].eq("timstof") & meta["adduct_test"].notna()]
     if len(tims):
         L += ["", "timsTOF libraries (the test instrument), test adducts only, recomputed M error "
@@ -1264,8 +1279,22 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
         pl = pairs.merge(st[["ik14", "mkey"]], on="ik14")
         pl = pl[pl["mkey"].notna()]
         r2 = pl.assign(d=pl["mkey"] != pl["ik14"]).groupby("ingest_lib")["d"].mean().reset_index()
+        # structures that meet another library only through the mkey (different ik14)
+        pk = pl[["ik14", "ingest_lib", "mkey"]].drop_duplicates()
+        alias = []
+        for lib, g in pk.groupby("ingest_lib"):
+            o = pk[pk["ingest_lib"] != lib]
+            same_ik = g["ik14"].isin(set(o["ik14"]))
+            same_mk = g["mkey"].isin(set(o["mkey"]))
+            alias.append(int((same_mk & ~same_ik).sum()))
+        r2["in another library only under another ik14"] = alias
         L.append("")
         L.append(_table(r2.rename(columns={"ingest_lib": "library", "d": "fraction mkey != ik14"}), 4))
+        L.append("")
+        L.append("Last column: structures of the library whose mkey occurs in some other library "
+                 "but never under the same ik14 (tautomer or protonation variants labelled "
+                 "differently). Library matching, splits and the C1/C2 masks must group by mkey, "
+                 "not ik14 (`splits` and `validation` do).")
     else:
         L.append("Pending (mkey stage not run).")
     # 10. public test join

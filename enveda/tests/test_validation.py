@@ -89,6 +89,16 @@ def test_truth_keys_contain_groups(synthetic_train, keys):
             assert set(g.split(";")) <= keys[s][mid]
 
 
+def test_truth_keys_chunking_is_exact(synthetic_train, cfg, keys, tmp_path):
+    """Chunked lookups (bounded memory on the real holdout) give the one-chunk answer."""
+    _, t = load_queries("NP-OTHER", synthetic_train["val_dir"])
+    small = truth_keys(t, cfg, db=synthetic_train["db"], cache_path=tmp_path / "tk3.parquet",
+                       chunk=3)
+    assert small == keys["NP-OTHER"]
+    c = pd.read_parquet(tmp_path / "tk3.parquet")
+    assert set(c["mkey"]) == set(t["mkey"]) and c["mkey"].is_unique
+
+
 def test_self_check(synthetic_train, cfg):
     res = self_check(cfg, val_dir=synthetic_train["val_dir"], library=synthetic_train["library"],
                      train_dir=synthetic_train["out"], db=synthetic_train["db"])

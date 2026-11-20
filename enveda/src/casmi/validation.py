@@ -492,10 +492,47 @@ def _formula_counts(f: Any) -> tuple | None:
     return tuple(sorted(c.items())) if c else None
 
 
+def _truth_key_rows(dbh: Any, todo: pd.DataFrame, tiers: tuple, n_jobs: int) -> tuple[pd.DataFrame, dict]:
+    """Same-formula, same-ring-count, same-skeleton DB rows for the molecules of ``todo``
+    (columns query = truth mkey, ik14, smiles) and the funnel counts."""
+    from .chem import parallel_map
+
+    res = dbh.lookup_batch(todo["mono_mass"].to_numpy(np.float64), tol_ppm=1.0, tiers=tiers,
+                           min_tol_da=0.001, keys=todo["mkey"].tolist())
+    n_window = len(res)
+    tf = dict(zip(todo["mkey"], [_formula_counts(f) for f in todo["formula"]]))
+    tsk = dict(zip(todo["mkey"], [skeleton_key(s) for s in todo["smiles"]]))
+    trc = dict(zip(todo["mkey"], [ring_closures(s) for s in todo["smiles"]]))
+    fmap = {f: _formula_counts(f) for f in pd.unique(res["formula"].astype(object))}
+    q = res["query"].astype(object).to_numpy(object)
+    ok = np.fromiter((fmap.get(f) is not None and fmap.get(f) == tf.get(k)
+                      for k, f in zip(q, res["formula"].astype(object))), bool, len(res))
+    res = res.loc[ok, ["query", "ik14", "smiles"]]
+    n_formula = len(res)
+    q = res["query"].astype(object).to_numpy(object)
+    ok = np.fromiter((ring_closures(sm) == trc.get(k) for k, sm in
+                      zip(q, res["smiles"].astype(object))), bool, len(res))
+    res = res[ok]
+    n_ring = len(res)
+    uniq = sorted(set(res["smiles"].astype(object)) - {None})
+    chunks = [uniq[i:i + 5000] for i in range(0, len(uniq), 5000)]
+    skm = dict(zip(uniq, [k for part in parallel_map(_skeleton_chunk, chunks, n_jobs)
+                          for k in part]))
+    res = res[[skm.get(sm) is not None and skm.get(sm) == tsk.get(k)
+               for k, sm in zip(res["query"], res["smiles"])]].reset_index(drop=True)
+    return res, {"window": n_window, "formula": n_formula, "ring": n_ring,
+                 "unique_smiles": len(uniq), "skeleton": len(res)}
+
+
 def truth_keys(truth: pd.DataFrame, cfg: Config | None = None, db: Any = None, n_jobs: int = 1,
-               cache_path: Path | str | None = None) -> dict[str, frozenset]:
+               cache_path: Path | str | None = None, chunk: int = 200) -> dict[str, frozenset]:
     """molecule_id -> ik14 that are the truth: the ik14 group plus DB rows (all tiers
-    present) with the truth's formula, skeleton and mkey. Cached by (mkey, tiers)."""
+    present) with the truth's formula, skeleton and mkey. Cached by (mkey, tiers).
+
+    Molecules are processed ``chunk`` at a time in mass order and the cache is written after
+    every chunk: the 1 ppm window (at least 0.001 Da) holds about 6,000 PubChem rows per
+    molecule, so one lookup for thousands of molecules does not fit in RAM (13 GB and an
+    OOM kill for 3,000 SYN-TIMS molecules)."""
     from . import db as cdb
     from .metric import mkeys
 
@@ -509,51 +546,37 @@ def truth_keys(truth: pd.DataFrame, cfg: Config | None = None, db: Any = None, n
         c = pd.read_parquet(cp)
         c = c[c["tiers"] == tiers_s]
         cache = {k: frozenset(v.split(";")) if v else _EMPTY for k, v in zip(c["mkey"], c["db_ik14"])}
-    todo = truth[~truth["mkey"].isin(set(cache))].drop_duplicates("mkey")
-    new_rows = []
-    if len(todo):
-        t0 = time.perf_counter()
-        res = dbh.lookup_batch(todo["mono_mass"].to_numpy(np.float64), tol_ppm=1.0, tiers=tiers,
-                               min_tol_da=0.001, keys=todo["mkey"].tolist())
-        from .chem import parallel_map
-
-        n_window = len(res)
-        tf = dict(zip(todo["mkey"], [_formula_counts(f) for f in todo["formula"]]))
-        tsk = dict(zip(todo["mkey"], [skeleton_key(s) for s in todo["smiles"]]))
-        trc = dict(zip(todo["mkey"], [ring_closures(s) for s in todo["smiles"]]))
-        fmap = {f: _formula_counts(f) for f in pd.unique(res["formula"].astype(object))}
-        q = res["query"].astype(object).to_numpy(object)
-        ok = np.fromiter((fmap.get(f) is not None and fmap.get(f) == tf.get(k)
-                          for k, f in zip(q, res["formula"].astype(object))), bool, len(res))
-        res = res[ok]
-        n_formula = len(res)
-        q = res["query"].astype(object).to_numpy(object)
-        ok = np.fromiter((ring_closures(sm) == trc.get(k) for k, sm in
-                          zip(q, res["smiles"].astype(object))), bool, len(res))
-        res = res[ok]
-        uniq = sorted(set(res["smiles"].astype(object)) - {None})
-        chunks = [uniq[i:i + 5000] for i in range(0, len(uniq), 5000)]
-        skm = dict(zip(uniq, [k for part in parallel_map(_skeleton_chunk, chunks, n_jobs)
-                              for k in part]))
-        res = res[[skm.get(sm) is not None and skm.get(sm) == tsk.get(k)
-                   for k, sm in zip(res["query"], res["smiles"])]]
-        log.info("truth keys: %d window rows, %d same formula, %d same ring count (%d unique "
-                 "SMILES), %d same skeleton", n_window, n_formula, int(ok.sum()), len(uniq), len(res))
+    todo_all = truth[~truth["mkey"].isin(set(cache))].drop_duplicates("mkey")
+    todo_all = todo_all.iloc[np.lexsort((todo_all["mkey"].astype(str).to_numpy(),
+                                         todo_all["mono_mass"].to_numpy(np.float64)))]
+    step = max(1, int(chunk))
+    t0 = time.perf_counter()
+    tot: dict[str, int] = defaultdict(int)
+    for start in range(0, len(todo_all), step):
+        todo = todo_all.iloc[start:start + step]
+        res, cnt = _truth_key_rows(dbh, todo, tiers, n_jobs)
+        for k, v in cnt.items():
+            tot[k] += v
         keys = mkeys(res["smiles"].tolist(), cfg, n_jobs=n_jobs, cache=True) if len(res) else []
         res = res.assign(_mk=keys)
         hit = res[res["_mk"] == res["query"]]
+        tot["hit"] += len(hit)
         found = hit.groupby("query")["ik14"].agg(lambda s: frozenset(map(str, s))).to_dict()
+        new_rows = []
         for k in todo["mkey"]:
             v = found.get(k, _EMPTY)
             cache[k] = v
             new_rows.append({"mkey": k, "db_ik14": ";".join(sorted(v)), "tiers": tiers_s})
-        log.info("truth keys: %d molecules, %d same-formula same-skeleton DB rows, %d with the "
-                 "truth mkey (%.1f s)", len(todo), len(res), len(hit), time.perf_counter() - t0)
         old = pd.read_parquet(cp) if cp.exists() else pd.DataFrame(columns=["mkey", "db_ik14", "tiers"])
         allc = pd.concat([old, pd.DataFrame(new_rows)], ignore_index=True)
         allc = allc.drop_duplicates(["mkey", "tiers"], keep="last").sort_values(["tiers", "mkey"])
         cp.parent.mkdir(parents=True, exist_ok=True)
         allc.to_parquet(cp, index=False)
+        log.info("truth keys: %d of %d molecules; window %d, same formula %d, same ring count %d "
+                 "(%d unique SMILES), same skeleton %d, truth mkey %d (%.1f s)",
+                 min(start + step, len(todo_all)), len(todo_all), tot["window"], tot["formula"],
+                 tot["ring"], tot["unique_smiles"], tot["skeleton"], tot["hit"],
+                 time.perf_counter() - t0)
     out = {}
     for mid, key, grp in zip(truth["molecule_id"], truth["mkey"], truth["ik14_group"]):
         g = frozenset(str(grp).split(";")) if isinstance(grp, str) else frozenset(grp)
