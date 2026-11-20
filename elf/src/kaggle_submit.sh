@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submit submissions/submission.csv to Kaggle santa-2026 if it validates, beats our best Kaggle score,
-# and at least 90 minutes have passed since our last submission. Auth is injected by the session proxy.
+# and at least $GAP minutes (default 50) have passed since our last submission. Auth is injected by the session proxy.
 # Usage: bash src/kaggle_submit.sh "description"   (add FORCE=1 to skip the score check)
 cd /home/user/classy/elf
 F=submissions/submission.csv
@@ -21,7 +21,8 @@ ages=[(now-datetime.datetime.fromisoformat(s['date'].replace('Z','+00:00'))).tot
 pend=sum(1 for s in d if s.get('status')=='pending')
 print(min(sc) if sc else 10**9, int(min(ages)) if ages else 10**6, pend)")
 echo "local $LOCAL, best kaggle $BEST, minutes since last submission $AGE, pending $PENDING"
-if [ "$AGE" -lt 90 ]; then echo "last submission was $AGE min ago (<90), not submitting"; exit 0; fi
+GAP=${GAP:-50}
+if [ "$AGE" -lt "$GAP" ]; then echo "last submission was $AGE min ago (<$GAP), not submitting"; exit 0; fi
 if [ "$PENDING" -gt 0 ]; then echo "a submission is still pending, not submitting"; exit 0; fi
 if [ -z "$FORCE" ] && [ "$LOCAL" -ge "$BEST" ]; then echo "not better than $BEST, not submitting"; exit 0; fi
 SZ=$(stat -c %s $F); MT=$(stat -c %Y $F)

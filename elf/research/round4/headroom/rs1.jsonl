@@ -16,3 +16,7 @@
 {"id": "practice_0015", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.1, "sig": 0.3, "ajit": 0.05}, "n": 207, "t": 123.0}
 {"id": "practice_0027", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.15, "sig": 1.0, "ajit": 0.0}, "n": 188, "t": 107.0}
 {"id": "practice_0029", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.1, "sig": 0.0, "ajit": 0.05}, "n": 197, "t": 112.6}
+{"id": "practice_0023", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.1, "sig": 0.3, "ajit": 0.0}, "n": 169, "t": 74.0}
+{"id": "practice_0001", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.1, "sig": 0.0, "ajit": 0.05}, "n": 136, "t": 50.8}
+{"id": "practice_0032", "k": 1, "name": "rp", "kw": {"seed": 1007, "regret": 0.15, "sig": 0.3, "ajit": 0.0}, "n": 128, "t": 44.1}
+{"id": "practice_0006", "k": 2, "name": "rp", "kw": {"seed": 2007, "regret": 0.08, "sig": 0.0, "ajit": 0.0}, "n": 28, "t": 0.3}
