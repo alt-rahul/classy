@@ -31,6 +31,11 @@ if hasattr(_lib, 'set_pair_eps'):
 if hasattr(_lib, 'regret_pick'):
     _lib.regret_pick.restype = C.c_int
     _lib.regret_pick.argtypes = [u64p, C.c_int, C.c_int, C.c_double, u64p, C.c_int, C.POINTER(C.c_int)]
+if hasattr(_lib, 'set_peel'):
+    _lib.set_peel.argtypes = [C.c_int]
+    _lib.peel_stats.restype = C.c_int64
+    _lib.peel_stats.argtypes = [C.c_int]
+    _lib.last_pick_chain.restype = C.c_int
 _RC = C.c_int(0)
 
 OPS = '+-*/'
@@ -125,3 +130,19 @@ def regret_pick(ts, maxc, alpha):
     if i < 0:
         return None
     return _RC.value, ts[i], _steps(_lib.get_outn())
+
+
+def set_peel(ntiers):
+    """Chain ("peel") plans inside regret_pick: number of tiers used (0 = off, 4 = all)."""
+    if hasattr(_lib, 'set_peel'):
+        _lib.set_peel(int(ntiers))
+    elif ntiers:
+        raise RuntimeError('core library has no chain search')
+
+
+def last_pick_chain():
+    return _lib.last_pick_chain() if hasattr(_lib, 'last_pick_chain') else 0
+
+
+def peel_stats():
+    return (_lib.peel_stats(0), _lib.peel_stats(1)) if hasattr(_lib, 'peel_stats') else (0, 0)

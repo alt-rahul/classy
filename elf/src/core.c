@@ -785,6 +785,133 @@ void level_hist(int k, i64 *h) {
     for (i64 i = 0; i < LN[k]; i++) h[64 - __builtin_clzll(LV[k][i])]++;
 }
 
+// ---------------- chain ("peel") plans (round 3, S1) ----------------
+// t = (y op1 v1) op2 v2 with v1 in L[la], v2 in L[lb], y in L<=ly: tree shapes with a deep subtree next
+// to cheap leaves, invisible to the pair search. full=1: all op forms; full=0: only t = y*v1 +- v2 and
+// t = (y +- v1)*v2. Cost = lev(y) + la + lb + 2. (Ported from research/round3/ideas/core3.c.)
+static inline int inv_forms(u64 t, u64 v, u64 *r) {
+    int n = 0;
+    if (v < t) r[n++] = t - v;                 // t = r + v
+    if (v + t <= LIM) r[n++] = t + v;          // t = r - v
+    if (v > t) r[n++] = v - t;                 // t = v - r
+    if (v >= 2) {
+        if (v < t && t % v == 0) r[n++] = t / v;         // t = r * v
+        u128 p = (u128)t * v;
+        if (p <= LIM) r[n++] = (u64)p;                    // t = r / v
+        if (v > t && v % t == 0 && v / t >= 2) r[n++] = v / t;   // t = v / r
+    }
+    return n;
+}
+// best chain over y in L0..ly (prototype interface, kept for experiments)
+int peel2(u64 t, int la, int lb, int ly, int full, int maxcost, u64 *out) {
+    int best = maxcost + 1; i64 idx;
+    if (la >= NLEV || lb >= NLEV) return -1;
+    for (i64 b = 0; b < LN[lb]; b++) {
+        u64 v2 = LV[lb][b];
+        u64 r1s[6]; int n1;
+        if (full) n1 = inv_forms(t, v2, r1s);
+        else {
+            n1 = 0;
+            if (v2 < t) r1s[n1++] = t - v2;
+            if (v2 + t <= LIM) r1s[n1++] = t + v2;
+            if (v2 >= 2 && v2 < t && t % v2 == 0) r1s[n1++] = t / v2;
+        }
+        for (int q = 0; q < n1; q++) {
+            u64 r1 = r1s[q];
+            int mulform = (!full && v2 >= 2 && r1 * v2 == t);   // r1 = t / v2 -> y = r1 +- v1
+            for (i64 a = 0; a < LN[la]; a++) {
+                u64 v1 = LV[la][a];
+                u64 ys[6]; int n2;
+                if (full) n2 = inv_forms(r1, v1, ys);
+                else if (mulform) { n2 = 0; if (v1 < r1) ys[n2++] = r1 - v1; if (r1 + v1 <= LIM) ys[n2++] = r1 + v1; }
+                else { n2 = 0; if (v1 >= 2 && v1 < r1 && r1 % v1 == 0) ys[n2++] = r1 / v1; }
+                for (int z = 0; z < n2; z++) {
+                    int k = lookup_fast(ys[z], ly, &idx);
+                    if (k < 0) continue;
+                    int c = k + la + lb + 2;
+                    if (c < best) { best = c; out[0] = ys[z]; out[1] = v1; out[2] = r1; out[3] = v2; }
+                }
+            }
+        }
+    }
+    return best <= maxcost ? best : -1;
+}
+// first chain with y in exactly level ky (same scan order as peel2). Writes y idx, v1/v2 idx, r1.
+typedef struct { int la, lb, ky; i64 iy, i1, i2; u64 r1; } ChainRes;
+static int chain_exact(u64 t, int la, int lb, int ky, int full, ChainRes *res) {
+    if (la >= NLEV || lb >= NLEV || ky >= NLEV) return 0;
+    const u64 *Y = LV[ky]; i64 ny = LN[ky];
+    for (i64 b = 0; b < LN[lb]; b++) {
+        u64 v2 = LV[lb][b];
+        u64 r1s[6]; int n1;
+        if (full) n1 = inv_forms(t, v2, r1s);
+        else {
+            n1 = 0;
+            if (v2 < t) r1s[n1++] = t - v2;
+            if (v2 + t <= LIM) r1s[n1++] = t + v2;
+            if (v2 >= 2 && v2 < t && t % v2 == 0) r1s[n1++] = t / v2;
+        }
+        for (int q = 0; q < n1; q++) {
+            u64 r1 = r1s[q];
+            int mulform = (!full && v2 >= 2 && r1 * v2 == t);
+            for (i64 a = 0; a < LN[la]; a++) {
+                u64 v1 = LV[la][a];
+                u64 ys[6]; int n2;
+                if (full) n2 = inv_forms(r1, v1, ys);
+                else if (mulform) { n2 = 0; if (v1 < r1) ys[n2++] = r1 - v1; if (r1 + v1 <= LIM) ys[n2++] = r1 + v1; }
+                else { n2 = 0; if (v1 >= 2 && v1 < r1 && r1 % v1 == 0) ys[n2++] = r1 / v1; }
+                for (int z = 0; z < n2; z++) {
+                    if (!lf_maybe(ky, ys[z])) continue;
+                    i64 j = bsearch_u64(Y, ny, ys[z]);
+                    if (j < 0) continue;
+                    res->la = la; res->lb = lb; res->ky = ky; res->iy = j; res->i1 = a; res->i2 = b; res->r1 = r1;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+// emit the step producing r from a and b (either order); same preference order as the prototype
+static void emit_op_of(u64 a, u64 b, u64 r) {
+    if (a + b == r) { emit_step(OP_ADD, a, b, r); return; }
+    if (a > b && a - b == r) { emit_step(OP_SUB, a, b, r); return; }
+    if (b > a && b - a == r) { emit_step(OP_SUB, b, a, r); return; }
+    if ((u128)a * b == (u128)r) { emit_step(OP_MUL, a, b, r); return; }
+    if (b && a % b == 0 && a / b == r) { emit_step(OP_DIV, a, b, r); return; }
+    if (a && b % a == 0 && b / a == r) { emit_step(OP_DIV, b, a, r); return; }
+    DERIVE_FAIL = 1;
+}
+static void emit_chain(u64 t, const ChainRes *c) {
+    u64 y = LV[c->ky][c->iy], v1 = LV[c->la][c->i1], v2 = LV[c->lb][c->i2];
+    expand(c->ky, c->iy);
+    expand(c->la, c->i1);
+    emit_op_of(y, v1, c->r1);
+    expand(c->lb, c->i2);
+    emit_op_of(c->r1, v2, t);
+}
+// chain tiers (la, lb, full) in the prototype's order; RP_PEEL = number of tiers used (0 = off)
+static const int PT_LA[4] = {0, 1, 0, 1}, PT_LB[4] = {0, 0, 1, 1}, PT_FULL[4] = {1, 1, 1, 0};
+static int RP_PEEL = 0;
+static i64 RP_PEEL_CALLS = 0, RP_PEEL_HITS = 0;
+static int RP_LAST_CHAIN = 0;
+int last_pick_chain(void) { return RP_LAST_CHAIN; }
+void set_peel(int ntiers) { RP_PEEL = ntiers < 0 ? 0 : (ntiers > 4 ? 4 : ntiers); }
+i64 peel_stats(int which) { return which ? RP_PEEL_HITS : RP_PEEL_CALLS; }
+// chains of exact cost c for t (y level ky = c - la - lb - 2 <= 3); skips (tier, ky) combinations that
+// are pair plans already (y op v1 in L<=3, i.e. ky + la <= 2), so it only runs after the pair search
+// at cost c failed.
+static int chain_at_cost(u64 t, int c, ChainRes *res) {
+    for (int q = 0; q < RP_PEEL; q++) {
+        int la = PT_LA[q], lb = PT_LB[q];
+        int ky = c - la - lb - 2;
+        if (ky < 0 || ky > 3 || ky + la <= 2) continue;
+        RP_PEEL_CALLS++;
+        if (chain_exact(t, la, lb, ky, PT_FULL[q], res)) { RP_PEEL_HITS++; return 1; }
+    }
+    return 0;
+}
+
 // ---------------- regret pick (batch over all uncovered targets) ----------------
 // For each target the cheapest plan (direct lookup, or pair search at cost 4..maxc, the same search
 // order as find_pair). Commits argmin of (cost - alpha * bitlen, cost, t) lexicographically.
@@ -795,6 +922,7 @@ void set_pair_eps(double e) { RP_EPS = e; }
 int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outcap, int *cost_out) {
     OUT = out; OUTN = 0; OUTCAP = outcap;
     static int st_lev[4096]; static i64 st_idx[4096]; static int st_c[4096]; static PairRes st_r[4096];
+    static ChainRes st_ch[4096];
     static char alive[4096];
     if (n > 4096) n = 4096;
     int bi = -1; double bsc = 0; int bc = 0;
@@ -812,6 +940,7 @@ int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outc
             }
         }
     }
+    int usechain = (RP_PEEL > 0 && NLEV >= 4);
     for (int c = (NLEV < 4 ? NLEV : 4); c <= maxc; c++) {
         for (int i = 0; i < n; i++) {
             if (!alive[i]) continue;
@@ -831,10 +960,24 @@ int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outc
                 }
             }
         }
+        if (!usechain || c < 5) continue;
+        // chain plans of cost c for the targets that are still alive (no pair plan of cost <= c)
+        for (int i = 0; i < n; i++) {
+            if (!alive[i]) continue;
+            u64 t = ts[i];
+            double sc = (double)c - alpha * (double)(64 - __builtin_clzll(t));
+            if (!BETTER(sc, c, t)) { alive[i] = 0; continue; }
+            if (chain_at_cost(t, c, &st_ch[i])) {
+                st_c[i] = c; st_lev[i] = -2; alive[i] = 0;
+                bi = i; bsc = sc; bc = c;
+            }
+        }
     }
 #undef BETTER
+    RP_LAST_CHAIN = 0;
     if (bi < 0) return -1;
     if (st_lev[bi] >= 0) expand(st_lev[bi], st_idx[bi]);
+    else if (st_lev[bi] == -2) { emit_chain(ts[bi], &st_ch[bi]); RP_LAST_CHAIN = 1; }
     else {
         PairRes r = st_r[bi];
         expand(r.la, r.ia); expand(r.lb, r.ib);

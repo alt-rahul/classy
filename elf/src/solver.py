@@ -145,6 +145,9 @@ class Cfg:
         self.regret_deep = 0      # pool size below which regret rounds build cfg.maxlev levels
         self.regret_deep_extra = 2  # ... and allow pair plans this much costlier than regret_maxc
         self.regret_jit = 0.0     # >0: per-round alpha drawn uniformly from regret +- regret_jit (restarts)
+        self.peel = 0             # round 3 S1: 1 = chain plans t = (y op v1) op v2 inside regret_pick
+        self.peel_tiers = 4       # number of chain tiers (v1,v2 levels): (0,0) (1,0) (0,1) (1,1 restricted)
+        self.peel_minpool = 10    # no chains while the pool has fewer values (as in the prototype)
         self.__dict__.update(kw)
 
 
@@ -156,6 +159,7 @@ class Solver:
         engine.set_seed(cfg.seed + 1)
         engine.set_wemin(cfg.wemin)
         engine.set_pair_eps(cfg.pair_eps)
+        engine.set_peel(0)
         self.stats = {}
         self.times = {}
         self.uses = {}
@@ -345,6 +349,8 @@ class Solver:
         a = cfg.regret
         if cfg.regret_jit > 0:
             a = max(0.0, a + cfg.regret_jit * (2 * self.rng.random() - 1))
+        # chain plans (cost >= 5) only in the full pick; the cost <= 3 shortcut below is unaffected
+        engine.set_peel(cfg.peel_tiers if cfg.peel and len(pool_order) >= cfg.peel_minpool else 0)
         # exact shortcut: costs <= 3 are exact on L0..L2 (pairs (2,0), (1,1)); if the best such
         # score beats every possible cost-4 score, the full pick would choose the same plan.
         engine.build(pool_order, limit, 2, 0)
@@ -382,7 +388,7 @@ class Solver:
                     rest = [u for u in rest if u != b2[1] and u not in got]
                     self.stats['multi'] = self.stats.get('multi', 0) + 1
                 return (c, t, st, 'reg')
-            return (best[0], best[1], best[2], 'reg')
+            return (best[0], best[1], best[2], 'peel' if engine.last_pick_chain() else 'reg')
         if self.deep_age == 0 and len(sz) <= 4 and cfg.regret_maxc >= 7:
             # every pair plan on L0..L3 (cost <= 7) was already searched for all targets
             return self.deep_rest(ts, None)

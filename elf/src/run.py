@@ -60,10 +60,12 @@ def main():
     ap.add_argument('--classes', default='')
     ap.add_argument('--redo', action='store_true')
     ap.add_argument('--skip', default='', help='comma list of tags whose done puzzles are skipped')
-    ap.add_argument('--order', default='id', help="id | len (longest stored program first) | opt (highest ops/target first) | optasc (lowest first)")
+    ap.add_argument('--order', default='id', help="id | len (longest stored program first) | opt (highest ops/target first) | optasc (lowest first) | bits (largest target first)")
     ap.add_argument('--repair', action='store_true', help='apply the repair post-pass to each result')
     ap.add_argument('--top', type=int, default=0, help='keep only the first N puzzles after ordering')
     ap.add_argument('--nstarts', default='', help='comma list of allowed numbers of distinct start values')
+    ap.add_argument('--minbits', type=int, default=0, help='only puzzles whose largest target has >= this many bits')
+    ap.add_argument('--maxbits', type=int, default=99)
     a = ap.parse_args()
     cfgd = json.loads(a.cfg)
     puzzles = load_puzzles(a.which)
@@ -81,6 +83,7 @@ def main():
     if a.nstarts:
         ns = set(int(x) for x in a.nstarts.split(','))
         ids = [i for i in ids if len(set(P[i].sv)) in ns]
+    ids = [i for i in ids if a.minbits <= max(P[i].targets).bit_length() <= a.maxbits]
     if not a.redo:
         ids = [i for i in ids if i not in done]
     for tg in a.skip.split(','):
@@ -92,6 +95,8 @@ def main():
         ids.sort(key=lambda i: -st[i]['len'])
     elif a.order == 'opt' and st:
         ids.sort(key=lambda i: -st[i]['len'] / len(P[i].targets))
+    elif a.order == 'bits':
+        ids.sort(key=lambda i: (-max(P[i].targets).bit_length(), i))
     elif a.order == 'optasc' and st:
         ids.sort(key=lambda i: st[i]['len'] / len(P[i].targets))
     if a.top:
@@ -118,10 +123,10 @@ def main():
                 nimp += 1
                 gain += (old - len(prog)) if old else 0
             done[pid] = len(prog)
-            if (k + 1) % 10 == 0 or time.time() - last_save > 60:
+            if (k + 1) % 10 == 0 or time.time() - last_save > 15:
                 print('%d/%d %s len %d old %s %.1fs elapsed %.0fs improved %d gain %d' % (
                     k + 1, len(ids), pid, len(prog), old, dt, time.time() - t0, nimp, gain), flush=True)
-            if time.time() - last_save > 60:
+            if time.time() - last_save > 15:
                 if a.which == 'scored':
                     save_store(st)
                 json.dump(runs, open(RUNS + '.tmp', 'w'))
