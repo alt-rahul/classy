@@ -1,0 +1,4 @@
+scored_0003 196 196
+dfs resched ok: False orig order ok: True
+target 546383138199087491 59 cone 8 pool 190 -> None 69s
+    V 190 S1 43969 S2 9877127 build 2.5s | c=6 none t=65.3s | c=7 none t=69.3s

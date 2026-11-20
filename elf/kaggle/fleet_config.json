@@ -1,0 +1,26 @@
+{
+  "dataset": "elf-compute",
+  "dataset_title": "elf compute",
+  "slot_prefix": "elf-c",
+  "max_kernels": 1,
+  "workers": 4,
+  "budget_s": 600,
+  "puzzles_per_kernel": 8,
+  "min_len": 0,
+  "len_power": 1.0,
+  "gain_bonus": 0.5,
+  "write_every_s": 300,
+  "dataset_every_s": 3600,
+  "random_engine": true,
+  "engines": [
+    {"name": "elfopt", "kind": "elf", "main": "elfopt.cpp", "time": 60, "args": ["--kicks", "1000", "--kslack", "2"], "weight": 2},
+    {"name": "wj_anneal", "kind": "wj", "main": "anneal.cpp", "rounds": 1000, "weight": 1,
+     "includes": ["common.inc", "compact.inc", "cross.inc", "recipe_lookup.inc", "fast_perturb.inc", "main.inc"]},
+    {"name": "wj_incremental", "kind": "wj", "main": "incremental.cpp", "rounds": 1000, "weight": 1,
+     "includes": ["common.inc", "compact.inc", "cross.inc", "cache_lookup.inc", "cache_perturb.inc", "main.inc"]},
+    {"name": "wj_compact_rotate", "kind": "wj", "main": "compact_rotate.cpp", "rounds": 300, "weight": 1,
+     "includes": ["common.inc", "neutral.inc", "compact.inc", "cross.inc", "main.inc"]},
+    {"name": "wj_anneal_seeded", "kind": "wj", "main": "anneal_seeded.cpp", "rounds": 700, "weight": 1, "seeded": true,
+     "includes": ["common.inc", "compact.inc", "cross.inc", "recipe_lookup.inc", "fast_perturb.inc", "main.inc"]}
+  ]
+}

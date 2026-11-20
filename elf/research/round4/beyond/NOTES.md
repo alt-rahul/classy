@@ -17,3 +17,18 @@
     60-bit 7 (248) and 8 (52). Same in mixed and in the random-like tail of shared. If every cone > 6 became 6: -695;
     if every cone > 5 became 5: -2327. Public LNS is exact to depth 4 and partial at 5 over the whole DAG.
     => lever A: exact wide-pool (all DAG values) cone rebuild at depth 6-7 (wide.cpp).
+- 19:00-19:55 Lever A (deeper single-cone rebuild over the whole DAG pool) built and measured: wide.cpp (flat shapes
+  T = X*Y +- R, X,Y in S0..S2 with window scans, R of cost <= 3, exact-division shapes, chains), wide2.cpp (recursive:
+  R solved recursively, chains on big pool values at depth 0/1, enumeration mode), drivers wlib.py / wrun.py / wtest.py.
+  Sanity: both reproduce the existing cone cost instantly (cost 6 at 50 bits in 3 s; cost 8 at 60 bits in 1 s).
+  RESULTS (negative):
+  * 50-bit independent, cone 6 -> 5: 0 of 16 targets (4 puzzles, 50 s per target).
+  * 60-bit independent, cone 7 -> 6: 0 of 10; cone 8 -> 7: found for 7 of 13 targets in < 30 s, but EVERY rebuild
+    needs 50-54 registers (best of all block positions / DFS orders / target-order local search); none could be emitted.
+    The original 60-bit programs sit at 48 live and a target-order local search cannot get the unchanged DAG below 48
+    (0002: 52, 0020: 48, 0001: 47), so there is no slack to hold extra leaves alive.
+  * Equal-cost alternatives per cone-6 target (50-bit, full enumeration 40 s): only 6-14, so pairs of targets
+    sharing a new node: 0 found on scored_0001. (My a-priori estimate of 50-100 alternatives was 5-10x too high.)
+  * Public elfopt on 60-bit independents with 48 vs 64 vs 200 registers, 40 s per puzzle: no gain in any, 0 strict
+    moves rejected for pressure. Registers do not block the PUBLIC neighbourhoods; they block deeper ones.
+  => single-cone / pair moves are exhausted even two levels deeper than public. Lever A is dead (worth < 50).

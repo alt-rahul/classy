@@ -1,0 +1,62 @@
+{
+ "dataset": {
+  "slug": "elf-compute",
+  "total": 133966,
+  "engines": "54a46aa86736",
+  "at": 1795201261.3040226,
+  "ref": "/datasets/ograhulrajkumar/elf-compute"
+ },
+ "slots": {
+  "elf-c01": {
+   "state": "pushed",
+   "ids": [
+    "scored_0051",
+    "scored_0321",
+    "scored_0218",
+    "scored_0183",
+    "scored_0450",
+    "scored_0744",
+    "scored_0069",
+    "scored_0729"
+   ],
+   "tag": "elf-c01_1795201408",
+   "version": 2,
+   "pushed_at": 1795201410.5077603,
+   "budget_s": 600,
+   "base_total": 2198,
+   "engines": [
+    "elfopt",
+    "wj_anneal",
+    "wj_incremental",
+    "wj_compact_rotate",
+    "wj_anneal_seeded"
+   ],
+   "url": "https://www.kaggle.com/code/ograhulrajkumar/elf-c01"
+  }
+ },
+ "coverage": {
+  "scored_0051": 300.0,
+  "scored_0321": 300.0,
+  "scored_0218": 300.0,
+  "scored_0183": 300.0,
+  "scored_0450": 300.0,
+  "scored_0744": 300.0,
+  "scored_0069": 300.0,
+  "scored_0729": 300.0
+ },
+ "launches": {
+  "scored_0051": 1,
+  "scored_0321": 1,
+  "scored_0218": 1,
+  "scored_0183": 1,
+  "scored_0450": 1,
+  "scored_0744": 1,
+  "scored_0069": 1,
+  "scored_0729": 1
+ },
+ "gains": {},
+ "history": [],
+ "engine_totals": {},
+ "total_gain": 0,
+ "total_cpu_s": 0.0
+}
