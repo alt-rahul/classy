@@ -31,3 +31,26 @@ Rebuild: `gcc -O3 -march=native -shared -fPIC -o src/core.so.new src/core.c && m
 
 Reproduction check (peel off): practice_0004 and practice_0007 with the round-2 config give
 byte-identical programs with the old library + old solver and the new ones (121 / 91 ops).
+
+Practice check, peel on (`{"pool_cap":46,"evict_size":1,"regret":0.1,"peel":1}`), C's 12 structured puzzles:
+0015 200, 0001 130, 0004 117, 0014 130, 0020 98, 0021 124, 0027 184, 0017 155, 0032 126, 0022 129,
+0026 142, 0036 124: total 1659 (base 1698, C's PEEL prototype 1660; 10 of 12 identical to the prototype,
+0032 126 vs 128, 0036 124 vs 123). All programs valid.
+Same-load timing (two processes side by side), 0001/0032/0017: peel off 137/129/158 in 108 s, peel on
+130/126/155 in 107 s: no time overhead (prototype 1.5-1.9x).
+
+## Seeding (task 3): built, not run
+`src/seed.py` (CF relations, constant miner = A's seeded.mine top 20 <= 1e5, B's fam + 30% relation
+test = `shared_like`, B's hub miner mine2 + seed_proto.pick STRICT, variants c / h / ch) and
+`src/seed_run.py` (resumable runner, offers the best variant). Classifier on practice: shared 38 of 51
+flagged, multiplicative 0 of 40, mixed 7 of 48. The practice test of the variants with peel on was not
+run (stopped by the coordinator).
+
+## Stop (18:35): coordinator merged public programs, store 133,977
+S2 killed after 13 puzzles (store/runs_r3S2.json): 2,579 -> 2,490 ops, gain 89, 696 CPU-s, about 460
+ops/CPU-h. All 13 are now held by shorter public programs (pub:gp_frontier), so the net effect on the
+current store is 0. Checkpoint: `bash src/checkpoint.sh` -> invalid 0, score 133,977.
+Resume S2: `python3 src/grepair.py --tag r3S2 --classes 'indep>=20' --maxbits 44 --skip-tags r3C --workers 1`
+(46 puzzles left; note it now repairs the public programs, a different starting point).
+S1 scaled runs and seeding runs: not started.
+Other src changes: run.py `--order bits`, `--minbits` / `--maxbits`, saves every 15 s instead of 60 s.
