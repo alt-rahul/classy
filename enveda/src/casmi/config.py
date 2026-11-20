@@ -60,6 +60,10 @@ class Config:
     entropy_weighted: bool = True            # ms_entropy weighted entropy similarity (Li 2021)
     lib_min_peaks: int = 1                   # library keeps spectra with >= this many clean peaks
     lib_build_batch_rows: int = 20000        # rows per streamed parquet batch in Library.build
+    # WP8 additions (4.2; casmi.libmatch, the "lib" pipeline stage)
+    lib_dir: str = ""                        # library directory; "" = paths.PROCESSED/library, relative = under PROCESSED
+    lib_mass_tol_ppm: float = 10.0           # LIB candidate window (min width mass_tol_min_da)
+    lib_sim: str = "cos_max"                 # lib_best_cos source: cos_max | ent_max | cons_cos | max_cos_cons | mean_cos_ent
 
     # --- Analog search (4.3) ----------------------------------------------------------
     analog_bin_da: float = 0.05
@@ -149,6 +153,13 @@ class Config:
     fusion_w_collections: float = 0.25       # x log1p(n_collections)
     fusion_w_pmid: float = 1.0               # PubChem-only: x log1p(pmid_count)
     fusion_w_n_cids: float = 0.25            # PubChem-only: x log1p(n_cids)
+    # WP8 additions (4.6; off by default so other fusion users keep the plan rules)
+    fusion_lib_weak: bool = False            # rule 1b: LIB below rule 1 but meaningful similarity
+    fusion_lib_weak_cos_min: float = 0.5     # rule 1b: lib_best_cos >= this ...
+    fusion_lib_weak_min_matched: int = 2     # ... and lib_n_matched >= this: 2 + cap + (1 - cap) x cos
+    fusion_lib_demote: bool = False          # LIB with a measured similarity below the next value ...
+    fusion_lib_demote_cos_max: float = 0.2   # ... drops below every NP-tier candidate (score = factor x z)
+    fusion_lib_demote_factor: float = 1.0
 
     # --- Formula enumeration (3.4) ----------------------------------------------------
     formula_hc_min: float = 0.2

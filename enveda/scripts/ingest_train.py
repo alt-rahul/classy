@@ -40,7 +40,9 @@ Stages (``--stage``, default ``all`` = ingest + audit; ``mkey`` is a separate ba
 Drop reasons (first failing check wins, in this order): null_label (no inchikey14 or no
 normalized_smiles), bad_precursor (null, NaN or <= 0), bad_peak_arrays (null list or the two
 lists differ in length), no_raw_peaks, no_polarity (neither ionization_mode nor the adduct sign
-gives one), duplicate_spectrum_id (the first occurrence is kept), empty_after_cleaning.
+gives one), duplicate_spectrum_id (the first occurrence is kept; only checked when the input
+has a spectrum_id column), empty_after_cleaning (sub-counts by ``_empty_kind`` in
+``ingest_info.json`` ``empty_after_cleaning_detail``).
 Kept rows are flagged (counted, not dropped): adduct_unparsed (``adducts.parse_adduct`` fails;
 the library keeps them, PLAN 3.1), abs_ppm_gt_<fpm_max_precursor_error_ppm>, peaks_above_precursor
 (raw peaks above precursor + ``clean_max_above_precursor_da``), bpi_null, ce_unresolved.
@@ -238,6 +240,24 @@ def _float32_lists(values: np.ndarray, offsets: np.ndarray) -> pa.ListArray:
                                     pa.array(values.astype(np.float32, copy=False)))
 
 
+EMPTY_KINDS = ("precursor_window_only", "nothing_below_precursor", "below_floor_or_other")
+
+
+def _empty_kind(raw_mz: np.ndarray, prec: float, cfg: Config) -> str:
+    """Why a spectrum has no peak left after cleaning (raw m/z of the spectrum):
+    ``precursor_window_only`` - every raw peak lies in [precursor - precursor_window_low_da,
+    precursor + clean_max_above_precursor_da] (a precursor-only spectrum, no fragment);
+    ``nothing_below_precursor`` - no raw peak below the window but some above the cut (only
+    peaks at higher m/z than the precursor: a precursor or label problem);
+    ``below_floor_or_other`` - fragments existed but none survived the other rules."""
+    lo = prec - float(cfg.precursor_window_low_da)
+    if (raw_mz < lo).any():
+        return EMPTY_KINDS[2]
+    if (raw_mz > prec + float(cfg.clean_max_above_precursor_da)).any():
+        return EMPTY_KINDS[1]
+    return EMPTY_KINDS[0]
+
+
 def _rss_now_mb() -> float:
     try:
         for line in Path("/proc/self/status").read_text().splitlines():
@@ -394,6 +414,7 @@ class Ingest:
         self.n_raw_peaks = 0
         self.n_clean_peaks = 0
         self.max_rows: int | None = None     # stop after this many input rows (RSS probes)
+        self.empty_detail: dict[str, Counter] = defaultdict(Counter)
         self.has_sid = self.has_mid = True
 
     def _writer(self, lib: str, schema: pa.Schema) -> pq.ParquetWriter:
@@ -492,6 +513,8 @@ class Ingest:
                                                 cfg, ok_pre)
             n_clean = np.diff(co)
             mark(ok_pre & (n_clean == 0), "empty_after_cleaning")
+            for r in np.flatnonzero(ok_pre & (n_clean == 0)):
+                self.empty_detail[lib[r]][_empty_kind(mz[off[r]:off[r + 1]], prec[r], cfg)] += 1
             keep = reason == None  # noqa: E711
             # ---- derived
             ainfo = [_adduct_info(a, m) for a, m in zip(adduct, mode)]
@@ -646,6 +669,8 @@ class Ingest:
             "rows_kept": {L: int(v) for L, v in sorted(self.file_rows.items())},
             "drops": {L: dict(sorted(c.items())) for L, c in sorted(self.drops.items())},
             "flags": {L: dict(sorted(c.items())) for L, c in sorted(self.flags.items())},
+            "empty_after_cleaning_detail": {L: dict(sorted(c.items()))
+                                            for L, c in sorted(self.empty_detail.items())},
             "n_raw_peaks": int(self.n_raw_peaks), "n_clean_peaks": int(self.n_clean_peaks),
             "pass1_seconds": round(t_pass, 2), "pass1_rows_per_s": round(row0 / max(t_pass, 1e-9), 1),
             "rss_max_mb_pass1": round(rss_max, 1),
@@ -873,30 +898,72 @@ def _table(df: pd.DataFrame, nd: int = 2) -> str:
     return "\n".join(lines)
 
 
+TOL_WINDOWS = (3.0, 5.0, 7.5, 10.0, 15.0, 20.0)
+
+
+def _per_molecule_err(err: pd.Series, groups: list[pd.Series]) -> pd.Series:
+    """Signed per-molecule median of a per-spectrum M error (ppm). ``io.mass_tables`` puts M
+    at the median neutral mass of a molecule's spectra, so this is the error of M (without the
+    outlier clustering, which only ever removes spectra)."""
+    return err.groupby(groups).median().dropna()
+
+
 def tolerance_recommendation(meta: pd.DataFrame, matches: pd.DataFrame, floor_ppm: float = 5.0,
-                             q: float = 99.5) -> dict:
-    """PLAN 3.3: per-molecule median |M error| (ppm) over test-adduct spectra of the two Enveda
-    libraries, and over the public test spectra joined to their train labels; window =
-    q-th percentile, rounded up, at least ``floor_ppm``."""
-    out: dict[str, Any] = {}
+                             q: float = 99.5, coverage: float = 0.995) -> dict:
+    """PLAN 3.3: error of the molecule mass M (median over a molecule's test-adduct spectra,
+    as ``io.mass_tables``) against the label mass, in ppm, for each timsTOF source: the two
+    Enveda libraries separately (molecule = structure) and the public test joined to its train
+    labels. ``recommended_ppm`` = the smallest window in ``TOL_WINDOWS`` (at least
+    ``floor_ppm``) that holds at least ``coverage`` of the molecules of every source.
+    ``enveda_*`` keys pool both libraries (kept for comparison with earlier runs)."""
+    out: dict[str, Any] = {"windows": list(TOL_WINDOWS), "coverage_target": coverage}
     e = meta[meta["ingest_lib"].isin(ENVEDA_LIBS) & meta["adduct_test"].notna()]
     for name, col in (("m_err", "m_err_ppm"), ("given", "precursor_error_ppm")):
         med = e.groupby(["ingest_lib", "ik14"])[col].median().abs().dropna()
         out[f"enveda_{name}_n"] = int(len(med))
         out[f"enveda_{name}_p{q:g}"] = float(np.percentile(med, q)) if len(med) else float("nan")
         out[f"enveda_{name}_max"] = float(med.max()) if len(med) else float("nan")
+    sources: dict[str, pd.Series] = {}
+    for lib in ENVEDA_LIBS:
+        g = e[e["ingest_lib"] == lib]
+        if len(g):
+            sources[lib] = _per_molecule_err(g["m_err_ppm"], [g["ik14"]])
     if matches is not None and len(matches):
         b = matches[matches["best"]]
-        per_mol = b.groupby("molecule_id")["test_m_err_ppm"].median().abs().dropna()
+        sources["public test"] = _per_molecule_err(b["test_m_err_ppm"], [b["molecule_id"]])
+        per_mol = sources["public test"].abs()
         out["public_n"] = int(len(per_mol))
         out[f"public_p{q:g}"] = float(np.percentile(per_mol, q)) if len(per_mol) else float("nan")
         out["public_max"] = float(per_mol.max()) if len(per_mol) else float("nan")
         spec = b["test_m_err_ppm"].abs().dropna()
         out["public_spectrum_max"] = float(spec.max()) if len(spec) else float("nan")
-    cands = [out.get(f"enveda_m_err_p{q:g}"), out.get(f"public_p{q:g}")]
-    cands = [c for c in cands if c is not None and math.isfinite(c)]
-    out["recommended_ppm"] = float(max([floor_ppm] + [math.ceil(c) for c in cands]))
+    per: dict[str, dict] = {}
+    need = []
+    for name, v in sources.items():
+        a = v.abs().to_numpy(np.float64)
+        if not a.size:
+            continue
+        cov = {f"{w:g}": float((a <= w).mean()) for w in TOL_WINDOWS}
+        per[name] = {"n": int(a.size), "signed_median": float(np.median(v)),
+                     "signed_p0.5": float(np.percentile(v, 0.5)),
+                     "signed_p99.5": float(np.percentile(v, 99.5)),
+                     "abs_p50": float(np.percentile(a, 50)), "abs_p99": float(np.percentile(a, 99)),
+                     f"abs_p{q:g}": float(np.percentile(a, q)), "abs_max": float(a.max()),
+                     "n_above": {f"{w:g}": int((a > w).sum()) for w in TOL_WINDOWS},
+                     "coverage": cov}
+        ok = [w for w in TOL_WINDOWS if w >= floor_ppm and cov[f"{w:g}"] >= coverage]
+        need.append(ok[0] if ok else max(TOL_WINDOWS))
+    out["sources"] = per
+    out["recommended_ppm"] = float(max([floor_ppm] + need))
     return out
+
+
+def _test_bpi_min() -> float:
+    try:
+        t = pq.read_table(paths.TEST_PARQUET, columns=["base_peak_intensity"])
+        return float(pc.min(t.column(0)).as_py())
+    except Exception:  # noqa: BLE001
+        return float("nan")
 
 
 def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
@@ -936,22 +1003,43 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
         kept = info["rows_kept"].get(lib, 0)
         dr = sum(info["drops"].get(lib, {}).values())
         u = int(nst.get(lib, 0))
-        dev = (kept - exp_s) / exp_s * 100 if exp_s else float("nan")
+        dev = (rin - exp_s) / exp_s * 100 if exp_s else float("nan")
         devu = (u - exp_u) / exp_u * 100 if exp_u else float("nan")
-        rows.append([lib, rin, dr, kept, exp_s, dev, u, exp_u, devu])
-    df = pd.DataFrame(rows, columns=["library", "rows in", "dropped", "kept", "expected spectra",
-                                     "kept vs expected %", "structures", "expected structures",
-                                     "structures vs expected %"])
+        rows.append([lib, rin, exp_s, dev, dr, kept, kept / max(rin, 1) * 100, u, exp_u, devu])
+    df = pd.DataFrame(rows, columns=["library", "rows in", "expected spectra", "rows in vs expected %",
+                                     "dropped", "kept", "kept % of rows in", "structures kept",
+                                     "expected structures", "structures vs expected %"])
     L.append(_table(df, 2))
     within = df.dropna(subset=["expected spectra"])
-    ok = bool((within["kept vs expected %"].abs() <= 1.0).all()) if len(within) else False
+    off = within[within["rows in vs expected %"].abs() > 1.0]
+    ok = not len(off) and len(within) > 0
     L.append("")
-    L.append(f"Within 1 percent of COMPETITION.md for every library: **{ok}** "
-             f"(total kept {info['kept_rows']:,} of {info['input_rows']:,}).")
+    L.append(f"Rows read within 1 percent of COMPETITION.md for every library: **{ok}**"
+             + ("" if ok else " (outside: " + ", ".join(
+                 f"{r['library']} {int(r['rows in']):,} vs {int(r['expected spectra']):,}, "
+                 f"{r['rows in vs expected %']:+.2f} percent" for _, r in off.iterrows()) + ")")
+             + f". Total kept {info['kept_rows']:,} of {info['input_rows']:,} "
+             f"({info['kept_rows'] / max(info['input_rows'], 1) * 100:.2f} percent); every "
+             "dropped row has a reason below. Structures are counted after the drops.")
+    if "enveda-np-examples" in set(off["library"]):
+        L.append("")
+        L.append("enveda-np-examples: COMPETITION.md says 1,151 spectra but the file has more; its "
+                 "structure count is checked in the table (expected 250). The extra rows are "
+                 "kept: they are the NP-TIMS query pool.")
     L += ["", "Drop reasons (first failing check, order as in the ingest docstring):", ""]
     dd = pd.DataFrame([[lib] + [info["drops"].get(lib, {}).get(r, 0) for r in DROP_REASONS]
                        for lib in libs], columns=["library", *DROP_REASONS])
     L.append(_table(dd))
+    det = info.get("empty_after_cleaning_detail") or {}
+    if det:
+        L += ["", "`empty_after_cleaning` by cause (`_empty_kind`: precursor_window_only = every "
+              f"raw peak within [precursor - {cfg.precursor_window_low_da:g}, precursor + "
+              f"{cfg.clean_max_above_precursor_da:g}] Da, i.e. no fragment; "
+              "nothing_below_precursor = no peak below that window but some above it; "
+              "below_floor_or_other = fragments existed but none survived):", ""]
+        L.append(_table(pd.DataFrame([[lib] + [det.get(lib, {}).get(k, 0) for k in EMPTY_KINDS]
+                                      for lib in libs if det.get(lib)],
+                                     columns=["library", *EMPTY_KINDS])))
     fl_names = sorted({k for v in info["flags"].values() for k in v})
     L += ["", "Flags on kept rows (not dropped):", ""]
     ff = pd.DataFrame([[lib] + [info["flags"].get(lib, {}).get(k, 0) for k in fl_names]
@@ -1010,6 +1098,32 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
     L.append("Columns `abs ...` are quantiles of the absolute given error. `abs M err` is recomputed here: neutral mass from precursor m/z and the parsed adduct "
              "versus the formula mass of `molecular_formula`, in ppm of M (the quantity the "
              "retrieval window applies to).")
+    tims = meta[meta["instrument_family"].eq("timstof") & meta["adduct_test"].notna()]
+    if len(tims):
+        L += ["", "timsTOF libraries (the test instrument), test adducts only, recomputed M error "
+              "per spectrum (signed, ppm). Molecule-level numbers and the window are in section 11.", ""]
+        rows = []
+        for (lib, ad), g in tims.groupby(["ingest_lib", "adduct_test"], sort=True):
+            v = g["m_err_ppm"].to_numpy(np.float64)
+            v = v[np.isfinite(v)]
+            if not v.size:
+                continue
+            a = np.abs(v)
+            rows.append([lib, ad, int(v.size), *np.percentile(v, [0.5, 5, 50, 95, 99.5]),
+                         float(np.percentile(a, 99)), float(a.max()), int((a > 5).sum()),
+                         int((a > 10).sum())])
+        for lib, g in tims.groupby("ingest_lib", sort=True):
+            v = g["m_err_ppm"].to_numpy(np.float64)
+            v = v[np.isfinite(v)]
+            a = np.abs(v)
+            if v.size:
+                rows.append([lib, "all test adducts", int(v.size),
+                             *np.percentile(v, [0.5, 5, 50, 95, 99.5]),
+                             float(np.percentile(a, 99)), float(a.max()), int((a > 5).sum()),
+                             int((a > 10).sum())])
+        L.append(_table(pd.DataFrame(rows, columns=[
+            "library", "adduct", "spectra", "p0.5", "p5", "median", "p95", "p99.5", "abs p99",
+            "abs max", "abs > 5", "abs > 10"]), 2))
     # 5. overlap
     L += ["", "## 5. Structure overlap between libraries (by inchikey14)", ""]
     pairs = meta[["ik14", "ingest_lib"]].drop_duplicates()
@@ -1026,15 +1140,47 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
                                      columns=["library", *names])))
     # 6. C1 eligibility
     L += ["", "## 6. C1 eligibility [5.3]: Enveda structures also in other libraries", ""]
+    lcp = out / "structure_lib_counts.parquet"
+    lcs = pd.read_parquet(lcp) if lcp.exists() else None
+    mk = dict(zip(st["ik14"], st["mkey"])) if mk_done else {}
     rows = []
     for lib in ENVEDA_LIBS:
-        s = sets.get(lib, set())
+        s_ = sets.get(lib, set())
         others = set().union(*[v for k, v in sets.items() if k != lib]) if sets else set()
         public = set().union(*[v for k, v in sets.items() if k not in ENVEDA_LIBS]) if sets else set()
-        rows.append([lib, len(s), len(s & others), len(s & others) / max(len(s), 1),
-                     len(s & public), len(s & public) / max(len(s), 1)])
-    L.append(_table(pd.DataFrame(rows, columns=["library", "structures", "in any other library",
-                                                "fraction", "in a non-Enveda library", "fraction"]), 3))
+        row = [lib, len(s_), len(s_ & others), len(s_ & others) / max(len(s_), 1),
+               len(s_ & public), len(s_ & public) / max(len(s_), 1)]
+        if lcs is not None:
+            o = lcs[(lcs["ingest_lib"] != lib) & ~lcs["ingest_lib"].isin(ENVEDA_LIBS)
+                    & lcs["ik14"].isin(s_)]
+            ta = set(o.loc[o["n_test_adduct"] > 0, "ik14"])
+            row += [len(ta), len(ta) / max(len(s_), 1)]
+        else:
+            row += [np.nan, np.nan]
+        if mk_done:
+            pub_mk = {mk.get(k) for k in public} - {None}
+            own_mk = {mk.get(k) for k in s_} - {None}
+            row += [len(own_mk), len(own_mk & pub_mk), len(own_mk & pub_mk) / max(len(own_mk), 1)]
+        else:
+            row += [np.nan, np.nan, np.nan]
+        rows.append(row)
+    L.append(_table(pd.DataFrame(rows, columns=[
+        "library", "structures", "in any other library", "fraction", "in a non-Enveda library",
+        "fraction", "with a test-adduct spectrum there", "fraction", "mkeys",
+        "mkeys in a non-Enveda library", "fraction"]), 3))
+    if lcs is not None:
+        npx = sets.get("enveda-np-examples", set())
+        o = lcs[lcs["ik14"].isin(npx) & ~lcs["ingest_lib"].isin(ENVEDA_LIBS)]
+        nlib = o.groupby("ik14")["ingest_lib"].nunique()
+        nsp = o.groupby("ik14")["n_spectra"].sum()
+        if len(nlib):
+            L.append("")
+            L.append(f"enveda-np-examples structures (the NP-TIMS set) in non-Enveda libraries: "
+                     f"median {nlib.median():.0f} other libraries and {nsp.median():.0f} reference "
+                     f"spectra per structure (min {int(nsp.min())}, p10 {np.percentile(nsp, 10):.0f}); "
+                     "per library: " + ", ".join(
+                         f"{k} {v}" for k, v in o.groupby("ingest_lib")["ik14"].nunique()
+                         .sort_values(ascending=False).items()) + ".")
     # 7. DB recall
     L += ["", "## 7. Candidate recall ceiling: train structures in the NP and PubChem tiers [2, 5.5]", ""]
     rows = []
@@ -1129,6 +1275,17 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
                      f"spectra) p99.5 {tol.get('public_p99.5', float('nan')):.2f}, max {tol.get('public_max', float('nan')):.2f}.")
         ke = b["max_kept_excess"].max()
         de = b["min_dropped_excess"].min()
+        cut = float(cfg.clean_max_above_precursor_da)
+        same = int(((b["frac_test_matched"] >= 1.0) & (b["frac_train_matched"] >= 1.0)
+                    & (b["int_ratio_spread"].fillna(1.0) == 0.0)).sum())
+        L.append("")
+        L.append(f"Identical copies (every test peak matched, every train peak matched, same "
+                 f"intensities): {same:,} of {len(b):,} matched spectra. Test spectra keeping peaks "
+                 f"above precursor + {cut:g} Da: {int((b['max_kept_excess'] > cut).sum()):,}; train "
+                 f"peaks above the precursor missing from the test copy: "
+                 f"{int(b['n_dropped_above'].sum()):,}."
+                 + (f" Public test base_peak_intensity minimum {_test_bpi_min():,.0f}." if
+                    _test_bpi_min() == _test_bpi_min() else ""))
         L.append("")
         L.append(f"Peak cut evidence: largest kept peak above precursor {ke:+.4f} Da; smallest "
                  f"train peak above precursor missing from the test spectrum {de:+.4f} Da; "
@@ -1155,19 +1312,35 @@ def write_audit(out: Path, audit_path: Path, cfg: Config, lg) -> None:
         L.append("No public test spectrum was found in train.")
     # 11. tolerance
     L += ["", "## 11. Retrieval tolerance recommendation [3.3]", ""]
-    L.append("Per-molecule median |M error| over the ten test adducts, 99.5th percentile:")
+    L.append("Error of the molecule mass M (median over a molecule's test-adduct spectra, as "
+             "`io.mass_tables` computes it; molecule = structure for the two Enveda libraries, "
+             "molecule_id for the public test) against the label's formula mass, in ppm. "
+             "Coverage = fraction of molecules with |M error| within the window.")
     L.append("")
-    L.append(f"- enveda libraries, recomputed M error: {tol.get('enveda_m_err_p99.5', float('nan')):.2f} ppm "
-             f"over {tol.get('enveda_m_err_n', 0):,} (library, structure) groups (max "
-             f"{tol.get('enveda_m_err_max', float('nan')):.2f}); with the given precursor_error_ppm: "
-             f"{tol.get('enveda_given_p99.5', float('nan')):.2f} ppm.")
-    L.append(f"- public test joined to train labels: {tol.get('public_p99.5', float('nan')):.2f} ppm over "
-             f"{tol.get('public_n', 0):,} molecules (single spectrum max "
-             f"{tol.get('public_spectrum_max', float('nan')):.2f} ppm).")
+    rows = []
+    for name, d in tol.get("sources", {}).items():
+        rows.append([name, d["n"], d["signed_median"], d["abs_p50"], d["abs_p99"],
+                     d.get("abs_p99.5", float("nan")), d["abs_max"]]
+                    + [d["coverage"][f"{w:g}"] for w in TOL_WINDOWS]
+                    + [d["n_above"]["5"], d["n_above"]["10"]])
+    L.append(_table(pd.DataFrame(rows, columns=[
+        "source", "molecules", "signed median", "abs p50", "abs p99", "abs p99.5", "abs max",
+        *[f"cov {w:g}" for w in TOL_WINDOWS], "n > 5 ppm", "n > 10 ppm"]), 3))
     L.append("")
-    L.append(f"Recommended `mass_tol_ppm`: **{tol['recommended_ppm']:g}** (larger of the two, rounded up, "
-             f"floor 5; current default {cfg.mass_tol_ppm:g}). `val_query_max_abs_ppm` (query "
-             "emulation, organisers' precursor cut) should not be below the public single-spectrum "
+    L.append(f"Pooled Enveda libraries (earlier definition): p99.5 "
+             f"{tol.get('enveda_m_err_p99.5', float('nan')):.2f} ppm over "
+             f"{tol.get('enveda_m_err_n', 0):,} groups (max {tol.get('enveda_m_err_max', float('nan')):.2f}); "
+             f"public test single-spectrum max {tol.get('public_spectrum_max', float('nan')):.2f} ppm.")
+    L.append("")
+    L.append(f"Recommended `mass_tol_ppm`: **{tol['recommended_ppm']:g}** (smallest of "
+             f"{', '.join(f'{w:g}' for w in TOL_WINDOWS)} ppm, at least 5, that holds "
+             f"{tol['coverage_target'] * 100:g} percent of the molecules of every source; current "
+             f"default {cfg.mass_tol_ppm:g}). The enveda-np-examples row decides it: it comes from "
+             "the hidden test's pipeline and chemistry, the public test and enveda-180 are "
+             "tighter. The signed medians show a positive bias on timsTOF (M too heavy by about "
+             "1.5 to 2 ppm, largest for [M+H]+), so a window centred at M - bias would be "
+             "narrower for the same coverage. `val_query_max_abs_ppm` (query emulation, "
+             "organisers' precursor cut) should not be below the public single-spectrum "
              "maximum above.")
     # 12. structures table summary
     L += ["", "## 12. structures.parquet", ""]

@@ -29,6 +29,15 @@ Score = first applicable rule (PLAN 4.6):
 3. PubChem-only candidate: z.
 4. GEN candidate: ``cfg.fusion_gen_factor`` x z.
 
+WP8 extension (``lib_extra_rules``, both off by default, so the rules above are unchanged
+unless a config turns them on): rule 1b (``fusion_lib_weak``) scores a LIB candidate that
+misses rule 1 but has lib_best_cos >= ``fusion_lib_weak_cos_min`` and lib_n_matched >=
+``fusion_lib_weak_min_matched`` at 2 + cap + (1 - cap) x lib_best_cos (cap =
+``fusion_prior_cap``): above every rule 2 score, below every rule 1 score. Demotion
+(``fusion_lib_demote``): a LIB candidate left for rule 2 whose lib_best_cos is measured and
+below ``fusion_lib_demote_cos_max`` scores ``fusion_lib_demote_factor`` x z instead, i.e.
+below every NP-tier candidate (its reference spectra contradict the query).
+
 z is in [0, 1]. Fingerprint branch: in a pool where any candidate has ``fp_ll``, z is
 the rank-normalised fp_ll within the pool (average ranks, (rank - 1) / (n - 1), a
 single scored candidate gets 1; candidates without fp_ll get 0). Prior-only branch
@@ -264,6 +273,7 @@ def fuse(df: pd.DataFrame, cfg: Config | None = None, group: str | None = "molec
         [3.0 + np.nan_to_num(cos, nan=0.0), 1.0 + z + bonus, cfg.fusion_gen_factor * z],
         default=z,
     ).astype(np.float64)
+    score = lib_extra_rules(score, z, cos, matched, is_lib, rule1, cfg)  # WP8; no-op by default
     return (score, z) if return_z else score
 
 
@@ -291,3 +301,32 @@ def sort_pool(df: pd.DataFrame, score_col: str = "score", group: str | None = "m
     asc += [False, True, True, True]
     out = tmp.sort_values(keys, ascending=asc, kind="mergesort", na_position="last")
     return out.drop(columns=["_score", "_ik14"]).reset_index(drop=True)
+
+
+# --- WP8: optional LIB rules (rule 1b and demotion; see the module docstring) ----------
+
+def lib_extra_rules(score: np.ndarray, z: np.ndarray, cos: np.ndarray, matched: np.ndarray,
+                    is_lib: np.ndarray, rule1: np.ndarray, cfg: Config) -> np.ndarray:
+    """Apply rule 1b and the low-similarity demotion to LIB rows outside rule 1.
+
+    Returns ``score`` unchanged (the same array) when both are off (the default).
+    """
+    weak_on = bool(getattr(cfg, "fusion_lib_weak", False))
+    demote_on = bool(getattr(cfg, "fusion_lib_demote", False))
+    if not (weak_on or demote_on) or not is_lib.any():
+        return score
+    out = score.copy()
+    rest = is_lib & ~rule1
+    measured = ~np.isnan(cos)
+    weak = np.zeros(len(score), dtype=bool)
+    if weak_on:
+        with np.errstate(invalid="ignore"):
+            weak = (rest & measured & (cos >= cfg.fusion_lib_weak_cos_min)
+                    & (np.nan_to_num(matched, nan=0.0) >= cfg.fusion_lib_weak_min_matched))
+        cap = float(cfg.fusion_prior_cap)
+        out[weak] = 2.0 + cap + (1.0 - cap) * np.clip(cos[weak], 0.0, 1.0)
+    if demote_on:
+        with np.errstate(invalid="ignore"):
+            low = rest & ~weak & measured & (cos < cfg.fusion_lib_demote_cos_max)
+        out[low] = cfg.fusion_lib_demote_factor * z[low]
+    return out
