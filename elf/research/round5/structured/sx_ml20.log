@@ -1,0 +1,49 @@
+scored_0335 n0 184 U 2671 usednew 2479 recipes 8883 gen 0.1s
+scored_0335 status INFEASIBLE obj None bound 0.0 t 2.5
+none scored_0335 184 INFEASIBLE 
+scored_0264 n0 214 U 2281 usednew 2062 recipes 8375 gen 0.2s
+scored_0264 status INFEASIBLE obj None bound 0.0 t 5.4
+none scored_0264 214 INFEASIBLE 
+scored_0965 n0 192 U 3209 usednew 3014 recipes 11607 gen 0.1s
+scored_0965 status INFEASIBLE obj None bound 0.0 t 19.3
+none scored_0965 192 INFEASIBLE 
+scored_0380 n0 158 U 2017 usednew 1850 recipes 7059 gen 0.1s
+scored_0380 status INFEASIBLE obj None bound 0.0 t 3.5
+none scored_0380 158 INFEASIBLE 
+scored_0157 n0 157 U 2912 usednew 2735 recipes 9246 gen 0.1s
+scored_0157 status UNKNOWN obj None bound 149.0 t 40.4
+none scored_0157 157 UNKNOWN 
+scored_0336 n0 154 U 2694 usednew 2532 recipes 9258 gen 0.1s
+scored_0336 status INFEASIBLE obj None bound 0.0 t 7.1
+none scored_0336 154 INFEASIBLE 
+scored_0795 n0 182 U 2501 usednew 2310 recipes 8350 gen 0.1s
+scored_0795 status INFEASIBLE obj None bound 0.0 t 2.1
+none scored_0795 182 INFEASIBLE 
+scored_0154 n0 163 U 3359 usednew 3193 recipes 11491 gen 0.1s
+scored_0154 status INFEASIBLE obj None bound 0.0 t 2.5
+none scored_0154 163 INFEASIBLE 
+scored_0546 n0 148 U 2050 usednew 1892 recipes 7040 gen 0.1s
+scored_0546 status INFEASIBLE obj None bound 0.0 t 16.5
+none scored_0546 148 INFEASIBLE 
+scored_0498 n0 116 U 1482 usednew 1360 recipes 5534 gen 0.1s
+scored_0498 status INFEASIBLE obj None bound 0.0 t 1.4
+none scored_0498 116 INFEASIBLE 
+scored_0407 n0 155 U 1726 usednew 1565 recipes 5723 gen 0.1s
+scored_0407 status INFEASIBLE obj None bound 0.0 t 1.0
+none scored_0407 155 INFEASIBLE 
+scored_0827 n0 182 U 3095 usednew 2908 recipes 10464 gen 0.1s
+scored_0827 status UNKNOWN obj None bound 171.0 t 40.4
+none scored_0827 182 UNKNOWN 
+scored_0080 n0 147 U 2190 usednew 2038 recipes 7979 gen 0.1s
+scored_0080 status INFEASIBLE obj None bound 0.0 t 7.4
+none scored_0080 147 INFEASIBLE 
+scored_0045 n0 160 U 2352 usednew 2185 recipes 7952 gen 0.1s
+scored_0045 status INFEASIBLE obj None bound 0.0 t 0.8
+none scored_0045 160 INFEASIBLE 
+scored_0369 n0 230 U 2346 usednew 2109 recipes 7756 gen 0.1s
+scored_0369 status INFEASIBLE obj None bound 0.0 t 0.9
+none scored_0369 230 INFEASIBLE 
+scored_0415 n0 156 U 1771 usednew 1611 recipes 6434 gen 0.1s
+scored_0415 status INFEASIBLE obj None bound 0.0 t 1.2
+none scored_0415 156 INFEASIBLE 
+scored_0819 n0 226 U 3092 usednew 2861 recipes 10797 gen 0.2s

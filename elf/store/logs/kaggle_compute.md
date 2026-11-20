@@ -58,3 +58,11 @@ engines on shards of our store; a local loop harvests their outputs and merges t
 - 2026-11-20 20:59:25 UTC coordinator request: lever B deep group rebuild (research/round4/beyond, FLEET_SPEC.md) added as runner mode 'pydriver' (kernel rebuilds src/ + beyond/ tree, kernel-local store, grun.py 8 4 ids 8 10, then jrun.py on 60-bit; skips puzzles in runs_g50/g60 resp. runs_j60). Sources frozen in kaggle/engines/leverB (refresh: python3 kaggle/fleet.py snapshot-leverb). Slots from the next launches: c01-c04 leverB_g (40 puzzles, 3.5 h), c05 public engines on the 80-180 band. Local pydriver test: scored_0001 229 -> 228 in 5 min on 1 core.
 - 2026-11-20 21:01:16 UTC fleet code changed, re-exec
 - 2026-11-20 21:01:16 UTC fleet loop started (pid 16470)
+- 2026-11-20 21:46:26 UTC harvested elf-c02 v1 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
+- 2026-11-20 21:46:27 UTC harvested elf-c03 v1 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
+- 2026-11-20 21:46:28 UTC harvested elf-c04 v1 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
+- 2026-11-20 21:46:29 UTC harvested elf-c05 v1 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
+- 2026-11-20 21:46:31 UTC launched elf-c02 v2 [leverB_g]: 40 puzzles (len 229..276, 9854 instr), budget 3.5 h, engines leverB_grun
+- 2026-11-20 21:46:32 UTC launched elf-c03 v2 [leverB_g]: 40 puzzles (len 218..229, 8952 instr), budget 3.5 h, engines leverB_grun
+- 2026-11-20 21:46:34 UTC launched elf-c04 v2 [leverB_g]: 40 puzzles (len 209..217, 8520 instr), budget 3.5 h, engines leverB_grun
+- 2026-11-20 21:46:36 UTC launched elf-c05 v2 [public]: 30 puzzles (len 175..180, 5327 instr), budget 2.5 h, engines elfopt,recomb,wj_anneal,wj_anneal_seeded,wj_incremental,wj_incremental_seeded,wj_compact_rotate,wj_quartet,wj_anneal_div,wj_incremental_div

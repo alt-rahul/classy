@@ -5,6 +5,7 @@ import numpy as np, time, random, wlib
 from ortools.sat.python import cp_model
 TAG=os.environ.get('SX_TAG','sx1'); CAP=int(os.environ.get('SX_CAP','1500'))
 
+FAMSET=None
 def universe(p,nodes):
     L=p.limit; sv=list(dict.fromkeys(p.sv)); cur=sv+[v for v in nodes]
     curset=set(cur); c1={}
@@ -25,7 +26,15 @@ def universe(p,nodes):
                     q=hi//lo
                     if q not in curset: c1.setdefault(q,[]).append(('/',hi,lo))
     TH=int(os.environ.get('SX_TH','0'))
-    if TH: c1={v:r for v,r in c1.items() if v<TH}
+    if TH:
+        F=FAMSET
+        def keep(v,rs):
+            if v<TH: return True
+            if F is None: return False
+            for (op,a,b) in rs:
+                if (a in F and (b<TH or b in F)) or (b in F and (a<TH or a in F)): return True
+            return False
+        c1={v:r for v,r in c1.items() if keep(v,r)}
     return cur,c1
 
 def recipes_for(x,U,Uset,L):
@@ -100,8 +109,13 @@ def solve(p,prog,tl,verbose=1,seed=1):
         else: m.AddBoolOr(lits+[X[v].Not()])
         if v in T: m.Add(X[v]==1)
     obj=sum(X[v] for v in vals)
-    m.Add(obj<=n0-1)
-    m.Minimize(obj)
+    DIV=int(os.environ.get('SX_DIV','0'))
+    if DIV:
+        m.Add(obj<=n0); newv=[X[v] for v in vals if v not in nodes]
+        m.Add(sum(newv)<=DIV); m.Maximize(sum(newv))
+    else:
+        m.Add(obj<=n0-1)
+        m.Minimize(obj)
     # hint
     for v in vals:
         inc = v in nodes

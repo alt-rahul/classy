@@ -71,6 +71,7 @@ static int enumT(u64 T, const Dict& d, int cmax, vector<Rec>* out, int* cntAtMin
     return best;
 }
 struct Step { char op; u64 a, b, v; };
+static int CAP = 42, POLICY = 1; static u64 BIG, SMALL = 1 << 12; static set<u64> STARTS;
 static void expandVal(const Dict& d, u64 v, vector<Step>& out, set<u64>& have) {
     if (have.count(v)) return; const E* x = d.find(v); if (!x) { fprintf(stderr, "expand miss %llu\n", v); exit(3); }
     if (x->c == 0) return;
@@ -88,8 +89,44 @@ static vector<Step> expandRec(const Dict& d, const Rec& r) {
     }
     return out;
 }
-struct State { vector<u64> pool; map<u64, int> last; vector<u64> rem; vector<Step> steps; int clock = 0; };
-static int CAP = 42, POLICY = 1; static u64 BIG, SMALL = 1 << 12; static set<u64> STARTS;
+struct State { vector<u64> pool; map<u64, int> last; vector<u64> rem; vector<Step> steps; int clock = 0;
+    // exact liveness: lu[v] = index of the last step using v (-1 none), born[v] = defining step (-1 start); occ[b] = values live at boundary b (before step b)
+    unordered_map<u64, int> lu, born; vector<int> occ; };
+static int REGCAP = 47, PCAP = 110, EXACT = 0;
+// use value v at step index n (n == steps.size() at that moment): extends its live range. returns false if a boundary would exceed REGCAP
+static bool useVal(State& s, u64 v, int n) {
+    auto it = s.lu.find(v); if (it == s.lu.end()) return true;   // unknown (should not happen)
+    int b0 = s.born[v]; int l = it->second; int from = max(l, b0) + 1;  // boundaries from..n get +1
+    if ((int)s.occ.size() < n + 1) s.occ.resize(n + 1, 0);
+    bool ok = true;
+    for (int b = from; b <= n; b++) { if (++s.occ[b] > REGCAP) ok = false; }
+    if (n > l) it->second = n;
+    return ok;
+}
+static bool feasibleVal(const State& s, u64 v) {
+    auto it = s.lu.find(v); if (it == s.lu.end()) return false;
+    int n = s.steps.size(); int from = max(it->second, s.born.at(v)) + 1;
+    for (int b = from; b <= n && b < (int)s.occ.size(); b++) if (s.occ[b] + 1 > REGCAP - 1) return false;
+    return true;
+}
+static bool applyExact(State& s, const vector<Step>& ops, u64 T) {
+    bool ok = true; set<u64> made;
+    for (auto& o : ops) {
+        int n = s.steps.size();
+        if (!useVal(s, o.a, n)) ok = false; if (o.b != o.a && !useVal(s, o.b, n)) ok = false;
+        s.steps.push_back(o); if (!s.lu.count(o.v)) { s.lu[o.v] = n; s.born[o.v] = n; }
+        made.insert(o.v);
+    }
+    vector<u64> nr; for (u64 t : s.rem) if (t != T && !made.count(t)) nr.push_back(t); s.rem.swap(nr);
+    return ok;
+}
+static void makePool(State& s) {
+    vector<pair<int, u64>> c;
+    for (auto& kv : s.lu) { u64 v = kv.first; if (v >= BIG && !STARTS.count(v)) continue; if (!feasibleVal(s, v)) continue; c.push_back({-max(kv.second, s.born[v]), v}); }
+    sort(c.begin(), c.end()); if ((int)c.size() > PCAP) c.resize(PCAP);
+    s.pool.clear(); for (auto& x : c) s.pool.push_back(x.second);
+    for (u64 v : STARTS) if (find(s.pool.begin(), s.pool.end(), v) == s.pool.end() && feasibleVal(s, v)) s.pool.push_back(v);
+}
 static void applyRec(State& s, const vector<Step>& ops, u64 T) {
     s.clock++; set<u64> ps(s.pool.begin(), s.pool.end());
     for (auto& o : ops) {
@@ -111,25 +148,28 @@ int main(int argc, char** argv) {
     int kalt = 0, delta = 1, look = 0; u64 seed = 1; int rbits = 34; int cmaxBase = 8;
     if (argc > 1) CAP = atoi(argv[1]); if (argc > 2) kalt = atoi(argv[2]); if (argc > 3) delta = atoi(argv[3]); if (argc > 4) seed = atoll(argv[4]);
     if (argc > 5) POLICY = atoi(argv[5]); if (argc > 6) look = atoi(argv[6]); if (argc > 7) NB = atoi(argv[7]); if (argc > 8) rbits = atoi(argv[8]);
+    if (argc > 9) EXACT = atoi(argv[9]); if (argc > 10) REGCAP = atoi(argv[10]); if (argc > 11) PCAP = atoi(argv[11]);
     RMAX = 1ULL << rbits; mt19937_64 rng(seed);
     size_t ns, nt, ni; if (scanf("%llu %zu", &LIM, &ns) != 2) return 1;
     State S; vector<u64> sv(ns); for (auto& x : sv) { scanf("%llu", &x); STARTS.insert(x); }
     scanf("%zu", &nt); vector<u64> T(nt); for (auto& x : T) scanf("%llu", &x);
     BIG = *min_element(T.begin(), T.end()) >> 3;
     scanf("%zu", &ni); set<u64> known(sv.begin(), sv.end());
-    for (u64 v : sv) if (!S.last.count(v)) { S.pool.push_back(v); S.last[v] = 0; }
+    for (u64 v : sv) if (!S.last.count(v)) { S.pool.push_back(v); S.last[v] = 0; S.lu[v] = -1; S.born[v] = -1; }
     for (size_t i = 0; i < ni; i++) { char op[4]; u64 a, b, v; scanf("%s %llu %llu %llu", op, &a, &b, &v); S.steps.push_back({op[0], a, b, v}); known.insert(v);
         if (v < BIG && !S.last.count(v)) { S.pool.push_back(v); S.last[v] = 0; } }
     for (u64 t : T) if (!known.count(t)) S.rem.push_back(t);
-    { vector<Step> none; State tmp = S; applyRec(S, none, 0); S.steps = tmp.steps; S.clock = 0; }
+    if (EXACT) { vector<Step> init = S.steps; S.steps.clear(); applyExact(S, init, 0); }
+    else { vector<Step> none; State tmp = S; applyRec(S, none, 0); S.steps = tmp.steps; S.clock = 0; }
     double t0 = now(); int total = 0;
     auto evalState = [&](const State& s, Dict& d, vector<int>& mins) {
-        int ml = s.pool.size() >= 30 ? 2 : s.pool.size() >= 14 ? 3 : s.pool.size() >= 8 ? 4 : 5;
+        int ml = s.pool.size() >= 30 ? 2 : s.pool.size() >= 14 ? 3 : s.pool.size() >= 8 ? 4 : 14;
         buildDict(s.pool, d, 2, ml, 6000000, BIG);
         mins.clear(); for (u64 t : s.rem) mins.push_back(enumT(t, d, cmaxBase, nullptr));
     };
     while (!S.rem.empty()) {
-        Dict d; int ml = S.pool.size() >= 30 ? 2 : S.pool.size() >= 14 ? 3 : S.pool.size() >= 8 ? 4 : 5;
+        if (EXACT) makePool(S);
+        Dict d; int ml = S.pool.size() >= 30 ? 2 : S.pool.size() >= 14 ? 3 : S.pool.size() >= 8 ? 4 : 14;
         buildDict(S.pool, d, 2, ml, 6000000, BIG);
         vector<Rec> recs; int gmin = 99; int cm = 2 + 3 * d.levels; if (d.levels == 2) cm = cmaxBase;
         for (u64 t : S.rem) { int m = enumT(t, d, cm, nullptr); gmin = min(gmin, m); }
@@ -155,7 +195,26 @@ int main(int argc, char** argv) {
                 if (sc < bs) { bs = sc; bi = c; char buf[100]; snprintf(buf, 100, "next %d x%d pot %.0f", m1, cnt, pot); binfo = buf; }
             }
         }
-        vector<Step> ops = expandRec(d, recs[bi]); applyRec(S, ops, recs[bi].T); total += ops.size();
+        vector<Step> ops;
+        if (EXACT) {
+            // among the cheapest feasible recipes take the one with the smallest register-time extension
+            long bestKey = LONG_MAX; State bestS; bool found = false;
+            for (int extra = 0; extra <= 4 && !found; extra++) {
+                if (extra > 0) { recs.clear(); for (u64 t : S.rem) enumT(t, d, gmin + extra, &recs);
+                    vector<Rec> f; for (auto& r : recs) if (r.cost == gmin + extra) f.push_back(r); recs.swap(f); shuffle(recs.begin(), recs.end(), rng); }
+                int tried = 0;
+                for (int c = 0; c < (int)recs.size() && tried < 600; c++) {
+                    if (found && recs[c].cost > recs[bi].cost) break;
+                    tried++; vector<Step> o = expandRec(d, recs[c]); State ch = S; long before = 0; for (int x : S.occ) before += x;
+                    if (!applyExact(ch, o, recs[c].T)) continue;
+                    long after = 0; for (int x : ch.occ) after += x; long key = (long)o.size() * 100000 + (after - before);
+                    if (key < bestKey) { bestKey = key; bestS = ch; ops = o; bi = c; found = true; }
+                }
+            }
+            if (!found) { fprintf(stderr, "NOFEASIBLE rem %zu\n", S.rem.size()); return 4; }
+            S = bestS;
+        } else { ops = expandRec(d, recs[bi]); applyRec(S, ops, recs[bi].T); }
+        total += ops.size();
         fprintf(stderr, "step cost %zu (gmin %d, cands %zu/%d) pool %zu rem %zu total %d %s t %.0f\n", ops.size(), gmin, recs.size(), ncand, S.pool.size(), S.rem.size(), total, binfo.c_str(), now() - t0);
     }
     for (auto& o : S.steps) printf("S %c %llu %llu %llu\n", o.op, o.a, o.b, o.v);
