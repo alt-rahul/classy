@@ -236,8 +236,10 @@ def _fetch_raw(raw: Path, rows: np.ndarray, batch_rows: int = 50000) -> pd.DataF
 
     want = np.unique(np.asarray(rows, np.int64))
     pf = pq.ParquetFile(raw, buffer_size=1 << 22, pre_buffer=False)
+    # the real train file has no spectrum_id (WP6 ids are t_<row>); only peaks are used here
+    cols = [c for c in _RAW_COLS if c in pf.schema_arrow.names]
     parts, row0 = [], 0
-    for batch in pf.iter_batches(batch_size=batch_rows, columns=list(_RAW_COLS)):
+    for batch in pf.iter_batches(batch_size=batch_rows, columns=cols):
         n = batch.num_rows
         a, b = np.searchsorted(want, [row0, row0 + n])
         if b > a:

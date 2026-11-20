@@ -99,6 +99,17 @@ TRAIN_COLUMNS = (
     "normalized_smiles", "inchikey", "inchikey14", "molecular_formula", "ingest_lib",
     "adduct_orig", "precursor_error_ppm", "num_peaks",
 )
+# The real train.parquet (18 columns) has neither id column; the synthetic file has both.
+# Without spectrum_id every row gets ``SPECTRUM_ID_PREFIX + <row index in the file>`` (stable,
+# file order) and molecule_id is written as null; the columns stay in every output.
+ID_COLUMNS = ("molecule_id", "spectrum_id")
+INPUT_COLUMNS = tuple(c for c in TRAIN_COLUMNS if c not in ID_COLUMNS)
+SPECTRUM_ID_PREFIX = "t_"
+
+
+def make_spectrum_ids(start: int, n: int) -> np.ndarray:
+    """Stable spectrum ids for rows ``start .. start + n - 1`` of an id-less train file."""
+    return np.array([f"{SPECTRUM_ID_PREFIX}{i}" for i in range(start, start + n)], dtype=object)
 # Derived per-spectrum columns written next to the train columns in spectra_<lib>.parquet.
 DERIVED = ("source_row", "polarity", "adduct_test", "adduct_known", "instrument_family",
            "mono_mass", "m_spec", "m_err_ppm", "collision_energy", "n_energies", "n_peaks_raw",
@@ -382,6 +393,8 @@ class Ingest:
         self.ppm_flag = float(cfg.fpm_max_precursor_error_ppm)
         self.n_raw_peaks = 0
         self.n_clean_peaks = 0
+        self.max_rows: int | None = None     # stop after this many input rows (RSS probes)
+        self.has_sid = self.has_mid = True
 
     def _writer(self, lib: str, schema: pa.Schema) -> pq.ParquetWriter:
         w = self.writers.get(lib)
@@ -401,20 +414,33 @@ class Ingest:
         pf = pq.ParquetFile(self.src, buffer_size=1 << 22, pre_buffer=False)
         md = pf.metadata
         names = pf.schema_arrow.names
-        missing = [c for c in TRAIN_COLUMNS if c not in names]
+        missing = [c for c in INPUT_COLUMNS if c not in names]
         if missing:
             raise ValueError(f"{self.src}: missing train columns {missing}")
+        read_cols = [c for c in TRAIN_COLUMNS if c in names]
+        self.has_sid = "spectrum_id" in names
+        self.has_mid = "molecule_id" in names
         self.lg.info("input %s: %d rows, %d row groups, %d columns; schema:\n%s", self.src,
                      md.num_rows, md.num_row_groups, md.num_columns, pf.schema_arrow)
+        if not self.has_sid:
+            self.lg.info("no spectrum_id column: ids are %s<row index>; no molecule_id: %s",
+                         SPECTRUM_ID_PREFIX, "written as null" if not self.has_mid else "kept")
         t0 = time.perf_counter()
         row0 = 0
         rss_max = 0.0
         cut = float(cfg.clean_max_above_precursor_da)
         for bi, batch in enumerate(pf.iter_batches(batch_size=self.batch_rows,
-                                                   columns=list(TRAIN_COLUMNS))):
+                                                   columns=read_cols)):
             n = batch.num_rows
             if n == 0:
                 continue
+            if self.max_rows is not None and row0 >= self.max_rows:
+                break
+            if not self.has_sid:
+                batch = batch.append_column("spectrum_id", pa.array(make_spectrum_ids(row0, n),
+                                                                    type=pa.string()))
+            if not self.has_mid:
+                batch = batch.append_column("molecule_id", pa.nulls(n, type=pa.string()))
             g = lambda c: batch.column(c)  # noqa: E731
             sid = _str_np(g("spectrum_id"), n)
             lib = _str_np(g("ingest_lib"), n)
@@ -448,7 +474,7 @@ class Ingest:
             pol = np.array([_polarity(m, a) for m, a in zip(mode, adduct)], dtype=np.int8)
             mark(pol == 0, "no_polarity")
             dup = np.zeros(n, bool)
-            for r in range(n):
+            for r in (range(n) if self.has_sid else ()):   # generated ids are unique
                 if reason[r] is None:
                     s = sid[r]
                     if s in self.seen:
@@ -613,6 +639,8 @@ class Ingest:
                          len(truth))
         info = {
             "input": str(self.src), "input_rows": int(row0), "input_row_groups": md.num_row_groups,
+            "spectrum_id_source": "input" if self.has_sid else f"generated {SPECTRUM_ID_PREFIX}<row>",
+            "molecule_id_source": "input" if self.has_mid else "absent (null)",
             "batch_rows": self.batch_rows, "kept_rows": int(len(meta)),
             "rows_in": dict(sorted(self.n_in.items())),
             "rows_kept": {L: int(v) for L, v in sorted(self.file_rows.items())},
@@ -1171,6 +1199,7 @@ def stage_ingest(args, cfg: Config, lg) -> dict:
     if test is None:
         lg.warning("no public test file: skipping the public test join")
     ing = Ingest(cfg, Path(args.input), out, args.batch_rows, test, lg)
+    ing.max_rows = getattr(args, "max_rows", None)
     res = ing.run()
     info = res["info"]
     info["public_test_spectra"] = int(len(test)) if test is not None else 0
@@ -1253,6 +1282,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--batch-rows", type=int, default=20000, help="rows per streamed batch")
     ap.add_argument("--n-jobs", type=int, default=2, help="processes for the RDKit structure pass")
     ap.add_argument("--mkey-jobs", type=int, default=4, help="processes for the mkey stage")
+    ap.add_argument("--max-rows", type=int, default=None,
+                    help="ingest: stop after about this many input rows (RAM / speed probe; use "
+                         "with a scratch --out)")
     args = ap.parse_args(argv)
     lg = get_logger(f"ingest_train_{args.stage}")
     log_run(lg, args)

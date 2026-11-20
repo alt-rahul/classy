@@ -208,9 +208,58 @@ def test_library_from_ingest_outputs(synthetic_train):
     assert all(fam[s] == f for s, f in zip(meta["spectrum_id"], meta["instrument_family"]))
 
 
+def test_ingest_without_id_columns(synthetic_train, tmp_path):
+    """The real train.parquet has no spectrum_id / molecule_id: ids become t_<row index>,
+    molecule_id is null, outputs keep their schema and the public test join falls back to
+    precursor m/z plus peak arrays."""
+    import logging
+
+    from casmi import db as cdb
+
+    ingest = synthetic_train["ingest"]
+    src = pq.read_table(synthetic_train["train"])
+    src = src.drop_columns(["spectrum_id", "molecule_id"])
+    raw = tmp_path / "train_noid.parquet"
+    pq.write_table(src, raw, row_group_size=900)
+
+    class Args:
+        pass
+
+    a = Args()
+    a.out, a.test, a.input, a.batch_rows, a.n_jobs = tmp_path / "out", paths.TEST_PARQUET, raw, 700, 1
+    empty = tmp_path / "nopc"
+    empty.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cdb, "pubchem_dir", lambda: empty)
+        info = ingest.stage_ingest(a, synthetic_train["cfg"], logging.getLogger("t"))
+    assert info["spectrum_id_source"].startswith("generated")
+    meta = pd.read_parquet(a.out / "meta.parquet")
+    assert (meta["spectrum_id"] == "t_" + meta["source_row"].astype(str)).all()
+    assert meta["molecule_id"].isna().all()
+    # no id, so no duplicate-id drops; every other drop reason as with ids
+    ref = synthetic_train["info"]
+    for lib, d in ref["drops"].items():
+        want = {k: v for k, v in d.items() if k != "duplicate_spectrum_id"}
+        got = info["drops"].get(lib, {})
+        assert {k: v for k, v in got.items() if v} == {k: v for k, v in want.items() if v}
+    for f in sorted((a.out / "spectra").glob("spectra_*.parquet")):
+        t = pq.read_table(f)
+        assert t.schema.names[:len(ingest.TRAIN_COLUMNS)] == list(ingest.TRAIN_COLUMNS)
+        assert t.schema.field("spectrum_id").type == pa.string()
+    m = pd.read_parquet(a.out / "public_test_matches.parquet")
+    best = m[m["best"]]
+    assert not best["by_id"].any() and best["test_spectrum_id"].is_unique
+    assert len(best) >= 1000
+    assert best["train_spectrum_id"].str.startswith("t_").all()
+    truth = pd.read_parquet(a.out / "public_test_truth.parquet")
+    lab = synthetic_train["labels"]
+    want = dict(zip(lab["molecule_id"], [k[:14] for k in lab["inchikey"]]))
+    assert all(want[m_] == k for m_, k in zip(truth["molecule_id"], truth["ik14"]))
+
+
 @pytest.mark.data
 def test_real_train_schema(train_parquet):
     ingest = __import__("conftest").load_script("ingest_train")
     pf = pq.ParquetFile(train_parquet)
-    missing = [c for c in ingest.TRAIN_COLUMNS if c not in pf.schema_arrow.names]
+    missing = [c for c in ingest.INPUT_COLUMNS if c not in pf.schema_arrow.names]
     assert not missing, missing
