@@ -45,3 +45,63 @@ def enum_pairs(t, c):
 def plan_steps(t, rec):
     op, x, y, lx, ly = rec
     return engine.expand(x) + engine.expand(y) + [(op, x, y, t)]
+
+if hasattr(_lib, 'peel2'):
+    _lib.peel2.restype = C.c_int
+    _lib.peel2.argtypes = [C.c_uint64, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, u64p]
+_PB = (C.c_uint64 * 4)()
+
+def _op_of(a, b, r):
+    """step producing r from a and b (either order), or None."""
+    if a + b == r: return ('+', a, b, r)
+    if a - b == r: return ('-', a, b, r)
+    if b - a == r: return ('-', b, a, r)
+    if a * b == r: return ('*', a, b, r)
+    if b and a % b == 0 and a // b == r: return ('/', a, b, r)
+    if a and b % a == 0 and b // a == r: return ('/', b, a, r)
+    return None
+
+TIERS = ((0, 0, 1), (1, 0, 1), (0, 1, 1), (1, 1, 0))
+
+def peel(t, maxcost, tiers=TIERS, ly=3):
+    """Cheapest chain plan t = (y op v1) op v2 with cost <= maxcost. Returns (cost, steps) or None."""
+    best = None
+    for (la, lb, full) in tiers:
+        mc = maxcost if best is None else best[0] - 1
+        if mc < la + lb + 2:
+            continue
+        c = _lib.peel2(t, la, lb, ly, full, mc, _PB)
+        if c >= 0:
+            best = (c, _PB[0], _PB[1], _PB[2], _PB[3])
+    if best is None:
+        return None
+    c, y, v1, r1, v2 = best
+    s1 = _op_of(y, v1, r1); s2 = _op_of(r1, v2, t)
+    assert s1 and s2, (t, best)
+    return c, engine.expand(y) + engine.expand(v1) + [s1] + engine.expand(v2) + [s2]
+
+if hasattr(_lib, 'peel3_full'):
+    _lib.peel3_full.restype = C.c_int
+    _lib.peel3_full.argtypes = [C.c_uint64, C.c_int, C.c_int, u64p]
+    _lib.peel3_amc.restype = C.c_int
+    _lib.peel3_amc.argtypes = [C.c_uint64, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, u64p]
+_PB6 = (C.c_uint64 * 6)()
+AMC = ((0, 1, 0), (0, 0, 1), (1, 0, 0), (0, 1, 1), (1, 1, 0))
+
+def peel3(t, maxcost, amc=AMC, ly=3, full=True):
+    """Cheapest three-leaf chain t = ((y op v1) op v2) op v3 with cost <= maxcost: (cost, steps) or None."""
+    best = None
+    if full and maxcost >= 3:
+        c = _lib.peel3_full(t, ly, maxcost, _PB6)
+        if c >= 0: best = (c,) + tuple(_PB6)
+    for (la, lm, lc) in amc:
+        mc = maxcost if best is None else best[0] - 1
+        if mc < 3 + la + lm + lc: continue
+        c = _lib.peel3_amc(t, la, lm, lc, ly, mc, _PB6)
+        if c >= 0: best = (c,) + tuple(_PB6)
+    if best is None:
+        return None
+    c, y, v1, r1, v2, r2, v3 = best
+    s1 = _op_of(y, v1, r1); s2 = _op_of(r1, v2, r2); s3 = _op_of(r2, v3, t)
+    assert s1 and s2 and s3, (t, best)
+    return c, engine.expand(y) + engine.expand(v1) + [s1] + engine.expand(v2) + [s2] + engine.expand(v3) + [s3]

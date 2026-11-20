@@ -1,0 +1,5 @@
+practice_0004 shared 29 42 121 (24s ) | 117 (34s peel1)
+practice_0017 shared 29 50 158 (36s ) | 155 (68s peel5)
+practice_0001 multiplicative 30 49 137 (34s ) | 130 (45s peel3)
+practice_0015 shared 31 55 214 (66s ) | 200 (124s peel9)
+TOTAL [630, 602]

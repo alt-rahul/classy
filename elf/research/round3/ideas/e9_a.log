@@ -1,0 +1,30 @@
+  rnd 4 pool 22  pair 55556556555656656675779979
+               peel 55555556555656656675779979  (pair 0.0s peel 0.1s)
+  rnd 8 pool 39  pair 4445455455465656667779
+               peel 4445455455465656667779  (pair 0.1s peel 0.9s)
+  rnd 12 pool 46  pair 444455545656666677
+               peel 444455545655666677  (pair 0.2s peel 1.3s)
+  rnd 16 pool 46  pair 35554645667777
+               peel 35554545666667  (pair 0.4s peel 1.2s)
+  rnd 20 pool 46  pair 3444666677
+               peel 3444666667  (pair 0.3s peel 0.7s)
+  rnd 24 pool 46  pair 665777
+               peel 665666  (pair 0.2s peel 0.5s)
+  rnd 28 pool 46  pair 67
+               peel 66  (pair 0.1s peel 0.2s)
+practice_0004 shared 29 42 ops 121 {'targets': 98, 'improved': 11, 'saved': 11, 'base': 552, 't_pair': 1.249330759048462, 't_peel': 4.979267597198486}
+  rnd 4 pool 26  pair 67777747777777779999999999
+               peel 67767747777777769999999999  (pair 0.1s peel 0.2s)
+  rnd 8 pool 45  pair 6655465665666677779999
+               peel 6655465665666677767979  (pair 0.6s peel 1.7s)
+  rnd 12 pool 46  pair 565556467667679799
+               peel 555555466667669779  (pair 0.8s peel 1.6s)
+  rnd 16 pool 46  pair 56556667767799
+               peel 55556666767779  (pair 0.8s peel 1.8s)
+  rnd 20 pool 46  pair 5566679799
+               peel 5566669779  (pair 0.7s peel 1.1s)
+  rnd 24 pool 46  pair 766979
+               peel 566779  (pair 0.5s peel 0.6s)
+  rnd 28 pool 46  pair 79
+               peel 79  (pair 0.3s peel 0.2s)
+practice_0017 shared 29 50 ops 158 {'targets': 196, 'improved': 28, 'saved': 35, 'base': 1227, 't_pair': 4.950343132019043, 't_peel': 12.049631595611572}

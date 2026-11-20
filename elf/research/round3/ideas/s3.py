@@ -118,6 +118,98 @@ class EV(Solver):
         pool[:] = [v for v in pool if v not in drop]
 
 
+class BIG(Solver):
+    """Wide pool: no eviction (run with a fake nreg), the search pool is the whole history.
+    Regret rounds use L3 while the pool is small (<= big_l3 values), else L2 only (pairs to cost 5);
+    if nothing is found on L2, fall back to the normal round on the 46 most recent / smallest values."""
+    def regret_round(self, ts, pool_order, pool):
+        cfg, limit = self.cfg, self.p.limit
+        if len(pool_order) <= getattr(cfg, 'big_l3', 52):
+            return Solver.regret_round(self, ts, pool_order, pool)
+        sz = engine.build(pool_order, limit, 2, 0)
+        self.deep_age = None
+        best = engine.regret_pick(ts, 5, cfg.regret)
+        if cfg.verbose:
+            print('   BIG pool', len(pool_order), 'levels', sz, 'costs', eng3.all_costs(ts, 5, 9))
+        if best is not None:
+            return (best[0], best[1], best[2], 'big')
+        self.stats['bigfail'] = self.stats.get('bigfail', 0) + 1
+        sub = sorted(pool, key=lambda v: (-v.bit_length(), 0))[-46:]
+        sub = self.pool_order(sub, {})
+        return Solver.regret_round(self, ts, sub, pool)
+
+
+def width(sv, steps, targets):
+    """Registers actually needed by the DCE'd program (regalloc with unlimited registers)."""
+    prog = regalloc(sv, steps, targets, 100000)
+    return max(max(i, j, d) for (_, i, j, d) in prog) + 1, len(prog)
+
+
+class PEEL(Solver):
+    """Regret ordering on min(pair cost, chain cost). Chain (peel) plans: t = (y op v1) op v2 with
+    y in L<=3 and v1, v2 in L<=1: shapes the pair search cannot see. peel_min: only targets whose pair
+    cost is >= peel_min (or unknown) get the peel search."""
+    def regret_round(self, ts, pool_order, pool):
+        cfg, limit = self.cfg, self.p.limit
+        if len(pool_order) < getattr(cfg, 'peel_minpool', 10):
+            return Solver.regret_round(self, ts, pool_order, pool)
+        engine.build(pool_order, limit, 3, 0)
+        self.n_l3 += 1
+        self.deep_age = None
+        base = eng3.all_costs(ts, cfg.regret_maxc, None)
+        pmin = getattr(cfg, 'peel_min', 6); pmax = getattr(cfg, 'peel_max', 7)
+        tiers = eng3.TIERS[:getattr(cfg, 'peel_tiers', 4)]
+        best = None
+        for t, b in zip(ts, base):
+            plan = None; c = b
+            if b is None or b >= pmin:
+                r = eng3.peel(t, min(pmax, (b - 1) if b is not None else pmax), tiers)
+                if r is not None:
+                    c, plan = r
+                p3 = getattr(cfg, 'peel3', 0)
+                if p3 and (c is None or c >= 7):
+                    r = eng3.peel3(t, min(p3, (c - 1) if c is not None else p3))
+                    if r is not None:
+                        c, plan = r
+                        self.stats['p3hit'] = self.stats.get('p3hit', 0) + 1
+            if c is None:
+                continue
+            key = (c - cfg.regret * t.bit_length(), c, t)
+            if best is None or key < best[0]:
+                best = (key, c, t, plan)
+        if best is None:
+            return Solver.regret_round(self, ts, pool_order, pool)
+        _, c, t, plan = best
+        if plan is None:
+            r = engine.find_pair(t, c)
+            return (r[0], t, r[1], 'reg')
+        self.stats['peelsave'] = self.stats.get('peelsave', 0) + 1
+        return (c, t, plan, 'peel')
+
+    # optional: protect chain bases from eviction (peel_protect=1). A pool value y is a base for an
+    # uncovered target t if t = (y op v1) op v2 with v1, v2 in L<=1 (levels of the pre-commit pool).
+    def commit(self, pool, st, last_use, created, rnd, uncovered, steps):
+        self._unc = uncovered
+        return Solver.commit(self, pool, st, last_use, created, rnd, uncovered, steps)
+
+    def evict(self, pool, last_use, created, cap, protect):
+        if len(pool) <= cap or not getattr(self.cfg, 'peel_protect', 0):
+            return Solver.evict(self, pool, last_use, created, cap, protect)
+        prot = set(protect)
+        pset = set(pool)
+        for t in self._unc:
+            for (la, lb, full) in eng3.TIERS:
+                c = eng3._lib.peel2(t, la, lb, 0, full, 4, eng3._PB)
+                if c >= 0:
+                    if eng3._PB[0] in pset and eng3._PB[0] > self.cfg.keep_small:
+                        prot.add(eng3._PB[0])
+                    break
+        self.stats['protected'] = self.stats.get('protected', 0) + len(prot) - len(protect)
+        if len(pool) - len([v for v in pool if v in prot]) < len(pool) - cap:
+            prot = set(protect)
+        return Solver.evict(self, pool, last_use, created, cap, prot)
+
+
 def solve3(p, cls=S3, **kw):
     s = cls(p, Cfg(**kw))
     st = s.run()
@@ -138,11 +230,11 @@ if __name__ == '__main__':
         for k, c in enumerate(cfgs):
             t0 = time.time()
             kw = dict(pool_cap=46, evict_size=1, regret=0.1); kw.update(c)
-            cls = {'S3': S3, 'LA': LA, 'EV': EV}[kw.pop('cls', 'S3')]
+            cls = {'S3': S3, 'LA': LA, 'EV': EV, 'BIG': BIG, 'PEEL': PEEL}[kw.pop('cls', 'S3')]
             prog, stats, st = solve3(p, cls, **kw)
             err = check(p, prog) if prog else 'regalloc'
             n = len(prog) if prog and not err else 10**6
             tot[k] += n
-            row.append('%d (%.0fs%s)' % (n, time.time() - t0, ' hub%d' % stats.get('hub', 0) if stats.get('hub') else ''))
+            row.append('%d (%.0fs%s)' % (n, time.time() - t0, ' ' + ','.join('%s%d' % (k, stats[k]) for k in ('hub', 'peel', 'la') if stats.get(k))))
         print(i, p.family, len(p.targets), max(p.targets).bit_length(), ' | '.join(row), flush=True)
     print('TOTAL', tot)

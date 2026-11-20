@@ -1,0 +1,6 @@
+practice_0001 [3, 5, 12, 15] 30 base 137 cofactors-as-targets 152 None +shared primes as starts 157 None nx 25 nsm 3 150s
+practice_0022 [3, 15] 30 base 131 cofactors-as-targets 140 None +shared primes as starts 147 None nx 21 nsm 5 120s
+practice_0066 [16, 28, 30] 30 base 99 cofactors-as-targets 112 None +shared primes as starts 108 None nx 9 nsm 4 73s
+practice_0109 [3, 11, 16, 30] 32 base 132 cofactors-as-targets 141 None +shared primes as starts 146 None nx 23 nsm 3 106s
+practice_0156 [12, 14, 15, 25] 28 base 96 cofactors-as-targets 110 None +shared primes as starts 111 None nx 14 nsm 3 22s
+TOTAL [595, 655, 669]

@@ -24,3 +24,29 @@ Note agent B (generator_meta) independently found the hub hierarchy on practice_
 - M-H2 cofactors X are related to each other (twins / affine): REFUTED. After stripping primes <= 1000, only 4% of cofactors have a >=10-bit pair relation (shared: 23% on cofactors, 53% on raw targets) (m1.py).
 - M-H3 cofactor X = smooth +- tiny: REFUTED. P(X+-1 has largest prime < X^0.4) = 164/507 vs 152/507 for random odd numbers of the same size (m3.py). Shared cofactors show a mild signal (286 vs 211 of 817).
 - Surviving model: multiplicative target = product of a few reused small pool values (smooth multiplier, shared between targets) times at most one private random-looking factor of any size; or fully smooth. No hub structure to mine. The private factor costs what a random number of its size costs.
+- M-H4 building the private cofactor first helps: REFUTED. Largest prime cofactors added as extra targets (DCE'd if unused): 5 multiplicative practice puzzles 595 -> 655 (+10%); adding primes shared by >=2 targets as built starts: 669 (batch2.log). The solver's own decompositions beat the factor-split route, so the forced seeds distort greedy order. Forced seeding is harmful for multiplicative.
+
+## Hypothesis table (verdicts)
+1. lower_bound encodes planted length - REFUTED (equals number of targets not in starts).
+2. Fixed cross-puzzle multiplier table (31, 127, 509, ...) - REFUTED (multiplier frequencies: 1, 2, 3, 5, 7, 4, 8, 14, ...; puzzle-specific values come from that puzzle's pool).
+3. Targets are nodes of a dense random program (1 op from other targets) - REFUTED (pure multiples m*T_i never occur: 3 of 462 strong relations; only twins T_i + a).
+4. Targets are start-only chains (x op start) - REFUTED on hard (153, 511 offsets impossible from {16,30} by +-; medium depth-7 chain hits are chance, density 4%).
+5. Shared target = M*(B+a)+c around hidden base B - CONFIRMED (462 strong m-relations: 169 twins, 144 with c=0, 145 with c!=0).
+6. Bases are smooth products that share mid-size hidden factors - CONFIRMED on 0015 (13051 = 31*421 in h2 and T4-2; T0-127 = 2^6*3*5*7*47*101*2543) but NOT universal (T23/T30 base candidates are prime or non-smooth near the natural shift).
+7. Multipliers/offsets are reused pool values - CONFIRMED (509 in 3 targets + 1019 = 2*509+1; 127 as offset and multiplier; 480 = 16*30). Offsets a are mid-size (up to 1e4+), c tiny.
+8. Knowing pool constants is worth ops - CONFIRMED but modest: 0015 free smalls 172 vs 214; honest (built) 184-194.
+9. Knowing bases on top of constants - no further gain in my runs (171 vs 172).
+10. Deep relations are invisible pairwise (path of >=2 hidden levels gives multiplier/offset products as big as the base) - consistent with 48% unlinked shared targets; not directly testable without the pool.
+11-14. Multiplicative M-H1..M-H4 above: all refuted; multiplicative = reused smooth multiplier x private random-looking factor.
+15. Medium tier planted length: practice_0006 hand reconstruction 24 ops / 9 targets (2.7 per target) vs solver 28 (35 greedy, 27 best of 50 orders). Small numbers, so not decisive for hard.
+
+## Combined with agent B's hub miner (batch3.py, batch3.log), 4 shared practice puzzles, same cfg
+base 214/172/151/211 = 748
+B's hubs as extra targets, final regalloc on the ORIGINAL targets (unused hubs are dead-code eliminated): 182/169/160/205 = 716 (-4.3%)
+hubs + my mined constants as built starts: 174/161/146/213 = 694 (-7.2%)
+my mined constants only (batch1): 184/158/148/204 = 694 (-7.2%)
+best of the three per puzzle: 174/158/146/204 = 682 (-8.8%). Oracle reference on 0015 (true constants + true hubs): 165.
+Unlike B's "constants as extra targets" variant (which hurt), constants built up front by a separate small solve and then held as non-evictable starts help on 7 of 8 shared puzzles.
+
+## Bottom line
+No planted program of about 3 ops/target was recovered. Evidence points to a numeric template generator (hidden pool, hubs, 1-3 finishing steps), where a hub cluster member costs 2-3 ops plus amortised hub and pool cost. Realistic capture with seeding: 5-9% on shared, 0 or negative on multiplicative.

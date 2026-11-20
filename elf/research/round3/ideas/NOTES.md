@@ -33,3 +33,27 @@ Nothing under src/ or data/ is modified.
 - 16:40 E5 (e5_rootpeel.py, e5_a.log): root peel t = v op r, v in pool, r of pair cost <= 7 (a cost-8 shape the
   partial L4 cannot see) on the dumped 60-bit pool: 0 hits in 3 targets x 92 residuals; engine gives 10 via the
   window search. Killed (also kills "target = covered target +- cheap value" for independent targets).
+- 16:50 coordinator note (agent B): structured targets are where the gap is; forced seeding of mined hubs is
+  hit-or-miss; asked for "soft seeding". E3 above is a soft-seeding test with a naive criterion (negative).
+- 17:00 E7 (e7_grepair.py, e7b_diag.py): "global repair" = repair.improve with the 150-value threshold lifted, so
+  each target is re-derived from ALL values of the program with L2 over the whole history.
+  practice_0005 (212 ops): thr 150 -> 212, lifted -> 205 (-3.3%, 43 s).
+  Diagnosis: L2 over the 210 history values has 6.3M entries, and EVERY target has a cost <= 5 pair plan on it
+  (cost 6-7 on the 46-value pool). The saving is small only because private subtrees are small (avg 4.2 ops,
+  the rest of each target's 6.6 marginal ops is reused by later targets).
+  The base program really needs only 36 registers at its peak (mean 24.8): half of the 46-value pool is never
+  used again. => KEY IDEA "wide pool": search over a much larger leaf set than 46 values and fix register
+  feasibility afterwards (liveness), instead of capping the search pool at 46.
+- 17:15 E8 (e8_big.py, class BIG): wide pool, no eviction. practice_0005: 212 -> 199-205 ops, needs 49-54
+  registers. L2 over the history grows only like h^2.6 and a cost-5 plan needs L2 >= 2-6M (history >= 150-200
+  values), which a 30-target puzzle reaches only at its very end. So the wide pool is worth 3-6% at best on
+  40-bit independent, and needs a width-repair step. Parked; the cheap part of it is survivor S2 below.
+- 17:25 r1_grepair_scored.py (survivor S2, global repair with the threshold lifted): first 8 scored independent
+  40-bit puzzles: 8 of 8 improved, 1569 -> 1530 (-2.5%), 423 s, 332 ops/CPU-h. Stored with tag r3C.
+- 17:30 E9 (e9_peel.py): chain plans t = (y op v1) op v2, y in L<=3, v1/v2 in L<=1 (core3.c peel2). These are the
+  tree shapes with a deep subtree next to a cheap leaf ((4,0), (5,0), (4,1) ...), invisible to the pair search,
+  and exactly the shape of structured targets M*(B+a)+c. Snapshots during normal solves: practice_0004 11 of 98
+  target-states cheaper (each by 1), practice_0017 28 of 196 cheaper (35 ops), mostly the expensive targets
+  (7 -> 6, 9 -> 7). Peel time 1-2 s per round.
+- 17:40 E10 (class PEEL: regret ordering on min(pair, peel)): 0004 121 -> 117, 0017 158 -> 155, 0001 137 -> 130,
+  0015 214 -> 200. Total 630 -> 602 (-4.4%), 4 of 4 better, 1.5-1.9x time.

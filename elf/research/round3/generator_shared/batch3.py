@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0,'/home/user/classy/elf/research/round3/generator_meta')
+sys.path.append('/home/user/classy/elf/research/round3/generator_meta')
 from seeded import *
 import seed_proto as SP
 base={'practice_0015':214,'practice_0071':172,'practice_0084':151,'practice_0091':211}

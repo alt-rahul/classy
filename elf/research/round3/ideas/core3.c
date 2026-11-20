@@ -983,3 +983,106 @@ i64 enum_pairs(u64 t, int c, u64 *out, i64 outcap) {
     }
     return ENN / 5;
 }
+
+// ---- peel search (round 3): t = (y op1 v1) op2 v2 with v1 in L[la], v2 in L[lb], y in L<=ly ----
+// Shapes the pair search cannot see (root subtree of cost >= 4 next to a cheap leaf).
+// full=1: all op forms; full=0: only multiplicative-filtered forms t = y*v1 +- v2, t = (y +- v1)*v2,
+// t = y*v1*v2 is covered by pairs. Returns best cost (ly' + la + lb + 2) or -1; out = y, v1, r1, v2.
+static inline int inv_forms(u64 t, u64 v, u64 *r) {
+    int n = 0;
+    if (v < t) r[n++] = t - v;                 // t = r + v
+    if (v + t <= LIM) r[n++] = t + v;          // t = r - v
+    if (v > t) r[n++] = v - t;                 // t = v - r
+    if (v >= 2) {
+        if (v < t && t % v == 0) r[n++] = t / v;         // t = r * v
+        u128 p = (u128)t * v;
+        if (p <= LIM) r[n++] = (u64)p;                    // t = r / v
+        if (v > t && v % t == 0 && v / t >= 2) r[n++] = v / t;   // t = v / r
+    }
+    return n;
+}
+int peel2(u64 t, int la, int lb, int ly, int full, int maxcost, u64 *out) {
+    int best = maxcost + 1; i64 idx;
+    if (la >= NLEV || lb >= NLEV) return -1;
+    for (i64 b = 0; b < LN[lb]; b++) {
+        u64 v2 = LV[lb][b];
+        u64 r1s[6]; int n1;
+        if (full) n1 = inv_forms(t, v2, r1s);
+        else {
+            n1 = 0;
+            if (v2 < t) r1s[n1++] = t - v2;
+            if (v2 + t <= LIM) r1s[n1++] = t + v2;
+            if (v2 >= 2 && v2 < t && t % v2 == 0) r1s[n1++] = t / v2;
+        }
+        for (int q = 0; q < n1; q++) {
+            u64 r1 = r1s[q];
+            int mulform = (!full && v2 >= 2 && r1 * v2 == t);   // r1 = t / v2 -> y = r1 +- v1
+            for (i64 a = 0; a < LN[la]; a++) {
+                u64 v1 = LV[la][a];
+                u64 ys[6]; int n2;
+                if (full) n2 = inv_forms(r1, v1, ys);
+                else if (mulform) { n2 = 0; if (v1 < r1) ys[n2++] = r1 - v1; if (r1 + v1 <= LIM) ys[n2++] = r1 + v1; }
+                else { n2 = 0; if (v1 >= 2 && v1 < r1 && r1 % v1 == 0) ys[n2++] = r1 / v1; }
+                for (int z = 0; z < n2; z++) {
+                    int k = lookup_fast(ys[z], ly, &idx);
+                    if (k < 0) continue;
+                    int c = k + la + lb + 2;
+                    if (c < best) { best = c; out[0] = ys[z]; out[1] = v1; out[2] = r1; out[3] = v2; }
+                }
+            }
+        }
+    }
+    return best <= maxcost ? best : -1;
+}
+
+// ---- three-leaf chains (round 3) ----
+// full form: t = ((y op v1) op v2) op v3, all v in L0, any ops. cost lev(y) + 3.
+int peel3_full(u64 t, int ly, int maxcost, u64 *out) {
+    int best = maxcost + 1; i64 idx;
+    u64 r2s[6], r1s[6], ys[6];
+    for (i64 c = 0; c < LN[0]; c++) {
+        u64 v3 = LV[0][c]; int n3 = inv_forms(t, v3, r2s);
+        for (int q3 = 0; q3 < n3; q3++) for (i64 b = 0; b < LN[0]; b++) {
+            u64 v2 = LV[0][b]; int n2 = inv_forms(r2s[q3], v2, r1s);
+            for (int q2 = 0; q2 < n2; q2++) for (i64 a = 0; a < LN[0]; a++) {
+                u64 v1 = LV[0][a]; int n1 = inv_forms(r1s[q2], v1, ys);
+                for (int q1 = 0; q1 < n1; q1++) {
+                    int k = lookup_fast(ys[q1], ly, &idx);
+                    if (k < 0) continue;
+                    if (k + 3 < best) { best = k + 3; out[0] = ys[q1]; out[1] = v1; out[2] = r1s[q2]; out[3] = v2; out[4] = r2s[q3]; out[5] = v3; }
+                }
+            }
+        }
+    }
+    return best <= maxcost ? best : -1;
+}
+// structured form: t = (y +- a) * m +- c, a in L[la], m in L[lm] (m >= 2), c in L[lc]. cost lev(y)+3+la+lm+lc.
+int peel3_amc(u64 t, int la, int lm, int lc, int ly, int maxcost, u64 *out) {
+    int best = maxcost + 1; i64 idx;
+    if (la >= NLEV || lm >= NLEV || lc >= NLEV) return -1;
+    int add = 3 + la + lm + lc;
+    for (i64 ci = 0; ci < LN[lc]; ci++) {
+        u64 c = LV[lc][ci];
+        for (int sg = 0; sg < 2; sg++) {
+            u64 r2;
+            if (sg == 0) { if (c >= t) continue; r2 = t - c; } else { if (c + t > LIM) continue; r2 = t + c; }
+            for (i64 mi = 0; mi < LN[lm]; mi++) {
+                u64 m = LV[lm][mi];
+                if (m < 2 || m >= r2) continue;
+                if (r2 % m) continue;
+                u64 r1 = r2 / m;
+                for (i64 ai = 0; ai < LN[la]; ai++) {
+                    u64 a = LV[la][ai];
+                    for (int s2 = 0; s2 < 2; s2++) {
+                        u64 y;
+                        if (s2 == 0) { if (a >= r1) continue; y = r1 - a; } else { if (r1 + a > LIM) continue; y = r1 + a; }
+                        int k = lookup_fast(y, ly, &idx);
+                        if (k < 0) continue;
+                        if (k + add < best) { best = k + add; out[0] = y; out[1] = a; out[2] = r1; out[3] = m; out[4] = r2; out[5] = c; }
+                    }
+                }
+            }
+        }
+    }
+    return best <= maxcost ? best : -1;
+}
