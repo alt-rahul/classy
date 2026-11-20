@@ -1,0 +1,113 @@
+{
+  "built": "2026-11-20 21:09:44",
+  "git": "5ea6bafed28c-dirty",
+  "alpha": {
+    "A": 0.796,
+    "B": 0.522,
+    "C": 1.165
+  },
+  "calibration": {
+    "target": 0.154,
+    "panel": "full",
+    "alpha": {
+      "A": 0.796,
+      "B": 0.522,
+      "C": 1.165
+    },
+    "flags": {
+      "A": "ok",
+      "B": "ok",
+      "C": "above_range"
+    },
+    "curve": {
+      "A": {
+        "P_at_0": 0.2734372507492733,
+        "P_at_max": 0.14963332233629187,
+        "P_at_alpha": 0.15401086644609058
+      },
+      "B": {
+        "P_at_0": 0.23847947678989484,
+        "P_at_max": 0.1337376250349123,
+        "P_at_alpha": 0.15401117718005458
+      },
+      "C": {
+        "P_at_0": 0.34127781835944543,
+        "P_at_max": 0.1889139649141361,
+        "P_at_alpha": 0.18433619358241066
+      }
+    },
+    "c1_c2np_at_alpha": {
+      "A": [
+        0.5466642076742575,
+        0.20359317047155606
+      ],
+      "B": [
+        0.6021938322939971,
+        0.2402506833875627
+      ],
+      "C": [
+        0.5449965695015032,
+        0.17899152303355542
+      ]
+    }
+  },
+  "b0_source": "results_b0_npdb_prior.parquet",
+  "board_b0": 0.154,
+  "mixes": {
+    "A": [
+      0.17,
+      0.3,
+      0.15,
+      0.38
+    ],
+    "B": [
+      0.16,
+      0.24,
+      0.12,
+      0.48
+    ],
+    "C": [
+      0.22,
+      0.36,
+      0.17,
+      0.25
+    ]
+  },
+  "pmid_definition": "max over the molecule's ik14 of max(pmid_count, pubmed_count)",
+  "n_ext_lib_source": null,
+  "c2_zen_source": null,
+  "sid_count_filled": false,
+  "b0_check_fast": {
+    "A": 0.15513637706829592,
+    "B": 0.15473383462656662,
+    "C": 0.1859440428001661
+  },
+  "b0_check_full": {
+    "A": 0.15402717527802595,
+    "B": 0.15402422424560286,
+    "C": 0.18435467692527074
+  },
+  "counts": {
+    "molecules": {
+      "NP-OTHER": 3000,
+      "NP-TIMS": 250,
+      "SYN-TIMS": 3000
+    },
+    "fast": {
+      "NP-OTHER": 750,
+      "NP-TIMS": 250,
+      "SYN-TIMS": 500
+    },
+    "c2_cell": {
+      "NP-OTHER|NP": 3000,
+      "NP-TIMS|NP": 250,
+      "SYN-TIMS|PC": 2850,
+      "SYN-TIMS|none": 150
+    },
+    "has_public_spectra": {
+      "NP-OTHER": 1871,
+      "NP-TIMS": 250,
+      "SYN-TIMS": 44
+    }
+  }
+}

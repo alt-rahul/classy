@@ -1,0 +1,26 @@
+# Probe P4 (ROADMAP 2.6; R1): best pipeline, PubChem-only candidates (not in the NP tier, no
+# library spectra). NOT SUBMITTED.
+#   board(P4) = pi_2pc x MRR_C2-PC (+ the small C1 / C2-NP terms measured locally)
+# Today's best PubChem ranking is the prior (pmid_count, n_cids); with R3 priors and the R4
+# encoder this probe becomes informative (prior-only C2-PC MRR is about 0.001). Swap in the
+# newest milestone config, keep probe_assemble last and probe_rule pubchem_only.
+#   python scripts/evaluate.py --config configs/probe_p4_pubchem_only.yaml --tag probe_p4 --panel full
+submission_tag: probe_p4_pubchem_only
+pipeline_plugins: [casmi.libmatch, casmi.probes]
+pipeline_stages: [mass, pool, lib, features, score, probe_assemble]
+probe_rule: pubchem_only
+db_tiers: [np, pubchem]
+n_jobs: 2
+batch_molecules: 50
+lib_mass_tol_ppm: 10.0
+lib_sim: graded
+fusion_lib_cos_min: 0.95
+fusion_lib_min_matched: 4
+fusion_lib_weak: true
+fusion_lib_weak_additive: true
+fusion_lib_weak_weight: 1.0
+fusion_lib_weak_cos_min: 0.5
+fusion_lib_weak_min_matched: 2
+fusion_lib_demote: true
+fusion_lib_demote_cos_max: 0.2
+fusion_lib_demote_factor: 1.0

@@ -240,3 +240,16 @@ def test_final_file_builds_library(tmp_path):
         assert lib.n_spectra == 4 and lib.n_structures == 3
         assert set(lib.meta["ingest_lib"]) == {"ext_unit"}
         assert lib.meta["spectrum_id"].str.startswith("ext_unit:").all()
+
+
+def test_zip_stream_and_aliases():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.json", "[\n" + ",\n".join(json.dumps({"id": i}) for i in range(5000)) + "\n]")
+    lines = list(extlib.open_zip_stream(io.BytesIO(buf.getvalue())))
+    assert len(lines) == 5002 and json.loads(lines[-2]) == {"id": 4999}
+    m = extlib.AdductMapper(KNOWN)
+    assert [n for n, _ in m.candidates("[M+FA]-", None)] == ["[M+CH2O2-H]-"]   # MSnLib spelling
+    # acylcarnitine deposited as the cation with a free acid: read as the zwitterion
+    st, smi, ik, f, mass = extlib.resolve_structure(("smiles", "CCCC(=O)OC(CC(=O)O)C[N+](C)(C)C"))
+    assert st == "ok" and "[O-]" in smi and "[N+]" in smi and f == "C11H21NO4"

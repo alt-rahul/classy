@@ -92,6 +92,7 @@ __all__ = [
     "parse_collision_energy",
     "resolve_structure",
     "iter_json_array",
+    "open_zip_stream",
     "iter_gnps_json",
     "iter_massbank_msp",
     "massbank_licences",
@@ -345,6 +346,74 @@ def _open_text(path: Path) -> io.TextIOBase:
     return open(path, "r", encoding="utf-8", errors="replace")
 
 
+class _ZipStream(io.RawIOBase):
+    """The first member of a ZIP archive read from a forward-only binary stream (local
+    file header, then deflate or stored data), so a download can be parsed without being
+    written to disk."""
+
+    def __init__(self, raw: Any):
+        import struct
+        import zlib
+
+        self.raw = raw
+        head = self._exact(30)
+        sig, _ver, flag, method, _t, _d, _crc, csize, _usize, nlen, xlen = struct.unpack("<IHHHHHIIIHH", head)
+        if sig != 0x04034B50:
+            raise ValueError("not a ZIP local file header")
+        self.name = self._exact(nlen).decode("utf-8", "replace")
+        self._exact(xlen)
+        if method not in (0, 8):
+            raise ValueError(f"unsupported ZIP compression method {method}")
+        self.method = method
+        self.left = None if (flag & 0x08 or method == 8) else csize
+        self.dec = zlib.decompressobj(-zlib.MAX_WBITS) if method == 8 else None
+        self.buf = b""
+        self.done = False
+
+    def _exact(self, n: int) -> bytes:
+        out = b""
+        while len(out) < n:
+            b = self.raw.read(n - len(out))
+            if not b:
+                raise EOFError("truncated ZIP stream")
+            out += b
+        return out
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        while not self.buf and not self.done:
+            chunk = self.raw.read(1 << 20)
+            if self.dec is not None:
+                if not chunk:
+                    self.buf = self.dec.flush()
+                    self.done = True
+                else:
+                    self.buf = self.dec.decompress(chunk)
+                    if self.dec.eof:
+                        self.done = True
+            else:
+                if not chunk:
+                    self.done = True
+                if self.left is not None:
+                    chunk = chunk[: self.left]
+                    self.left -= len(chunk)
+                    if self.left <= 0:
+                        self.done = True
+                self.buf = chunk
+        n = min(len(b), len(self.buf))
+        b[:n] = self.buf[:n]
+        self.buf = self.buf[n:]
+        return n
+
+
+def open_zip_stream(raw: Any) -> io.TextIOBase:
+    """Text stream of the first member of a ZIP read from a forward-only binary stream."""
+    return io.TextIOWrapper(io.BufferedReader(_ZipStream(raw), buffer_size=1 << 20),
+                            encoding="utf-8", errors="replace")
+
+
 def _open_zip_member(path: Path) -> io.TextIOBase:
     zf = zipfile.ZipFile(path)
     names = [n for n in zf.namelist() if not n.endswith("/")]
@@ -505,7 +574,12 @@ def iter_mona_json(path: Path, skip_tags: Sequence[str] = ("Enveda-180",)) -> It
     in ``skip_tags`` are yielded as drop="skipped_subset" without decoding (Enveda-180 is
     staged from its own Zenodo release)."""
     needles = [f'"text":"{t}"' for t in skip_tags]
-    fh = _open_zip_member(path) if str(path).endswith(".zip") else _open_text(path)
+    if not isinstance(path, (str, Path)):
+        fh = path                      # an already open text stream (open_zip_stream)
+    elif str(path).endswith(".zip"):
+        fh = _open_zip_member(path)
+    else:
+        fh = _open_text(path)
     with fh:
         for line in fh:
             line = line.strip()
@@ -614,14 +688,14 @@ def iter_enveda_jsonl(path: Path) -> Iterator[RawRecord]:
     names are resolved case-insensitively from a list of aliases (checked against the file
     by ``scripts/build_extlib.py --stage headers``)."""
     alias = {
-        "id": ("spectrum_id", "spectrumid", "id", "identifier", "scan_id", "feature_id"),
+        "id": ("title", "spectrum_id", "spectrumid", "id", "identifier", "scan_id", "feature_id"),
         "smiles": ("smiles", "normalized_smiles", "canonical_smiles", "structure_smiles"),
         "inchi": ("inchi",),
         "adduct": ("adduct", "precursor_type", "ion_type", "precursortype"),
         "mode": ("ionization_mode", "ion_mode", "ionmode", "polarity", "mode"),
         "prec": ("precursor_mz", "precursormz", "pepmass", "precursor"),
-        "inst": ("instrument_type", "instrument", "source_instrument"),
-        "ce": ("collision_energy", "collision_energy_ev", "ce", "collisionenergy"),
+        "inst": ("instrument", "instrument_type", "source_instrument"),
+        "ce": ("collision_energies", "collision_energy", "collision_energy_ev", "ce", "collisionenergy"),
         "mzs": ("ms2_mzs", "mzs", "mz", "peaks_mz", "mz_array"),
         "ints": ("ms2_intensities", "intensities", "intensity", "peaks_intensity",
                  "intensity_array", "ms2_normalized_intensities"),
@@ -657,9 +731,10 @@ def iter_enveda_jsonl(path: Path) -> Iterator[RawRecord]:
             if isinstance(ce, (list, tuple)):
                 ce = ",".join(str(x) for x in ce)
             mode = _na(g("mode"))
-            if mode in ("+", "1", "pos"):
+            ml = (mode or "").lower()
+            if ml in ("+", "1") or "pos" in ml:
                 mode = "positive"
-            elif mode in ("-", "-1", "neg"):
+            elif ml in ("-", "-1") or "neg" in ml:
                 mode = "negative"
             lv = _float(g("level"))
             rec = RawRecord(
@@ -669,7 +744,7 @@ def iter_enveda_jsonl(path: Path) -> Iterator[RawRecord]:
                 instrument_type=_na(g("inst")) or "timsTOF",
                 ms_level=int(lv) if math.isfinite(lv) else None,
                 collision_energy=_na(ce), ce_units_hint="eV",
-                licence="CC BY 4.0", raw_intensities=None,
+                licence="CC BY 4.0", raw_intensities=True,
             )
             mz, it = g("mzs"), g("ints")
             if mz is not None and it is not None:
@@ -725,6 +800,9 @@ def known_adducts(train_meta: Path | None = None) -> dict[str, int]:
     return {str(d["values"]): int(d["counts"]) for d in vc if d["values"] is not None}
 
 
+_ACID_ADDUCT_RE = re.compile(r"FA|CH2O2|HCOOH|Hac|HAc|C2H4O2|CH3COOH|AcOH")
+
+
 class AdductMapper:
     """Map a source adduct string to the train spelling with the same numbers."""
 
@@ -774,6 +852,15 @@ class AdductMapper:
                 for z in (2, 3):
                     cands.append(Adduct(a.multiplier, terms - sign * z * ELECTRON_MASS, sign * z))
             for c in cands:
+                name = self.table.get(self._key(c))
+                if name is not None:
+                    out.append((name, c))
+            if not out and a.charge == -1 and _ACID_ADDUCT_RE.search(s):
+                # "[M+FA]-", "[M+CH2O2]-", "[M+Hac]-" (MSnLib, MS-DIAL): the deprotonated
+                # acid adduct, i.e. [M+CH2O2-H]- / [M+C2H4O2-H]-
+                from .adducts import element_mass
+
+                c = Adduct(a.multiplier, a.shift - element_mass("H"), a.charge)
                 name = self.table.get(self._key(c))
                 if name is not None:
                     out.append((name, c))
@@ -859,7 +946,9 @@ def resolve_structure(key: tuple[str, str]) -> tuple:
             return ("bad_structure", None, None, None, float("nan"))
         if len(Chem.GetMolFrags(std)) > 1:
             return ("multi_component", None, None, None, float("nan"))
-        if sum(a.GetFormalCharge() for a in std.GetAtoms()) != 0:
+        if sum(a.GetFormalCharge() for a in std.GetAtoms()) > 0:
+            std = _zwitterion(std)
+        if std is None or sum(a.GetFormalCharge() for a in std.GetAtoms()) != 0:
             return ("charged", None, None, None, float("nan"))
         try:
             smi = Chem.MolToSmiles(std)
@@ -871,6 +960,43 @@ def resolve_structure(key: tuple[str, str]) -> tuple:
     if not smi or not ik or len(ik) < 14:
         return ("bad_structure", None, None, None, float("nan"))
     return ("ok", smi, ik, formula, mass)
+
+
+_ACID_SMARTS = ("[SX4](=O)(=O)[OX2H1]", "[PX4](=O)[OX2H1]", "[CX3](=O)[OX2H1]")
+
+
+def _zwitterion(mol):
+    """A cation whose charge sits on quaternary atoms (no H, e.g. acylcarnitines and
+    betaines deposited as ``C[N+](C)(C)C...C(=O)O``) with as many acid groups: the
+    zwitterion, which is the neutral molecule (train keeps carnitine as
+    ``C[N+](C)(C)CC(O)CC(=O)[O-]``; the InChIKey first block is the same). None if the
+    charge cannot be balanced that way. Acids are deprotonated strongest class first
+    (sulfonic, phosphoric, carboxylic), lowest atom index first."""
+    from rdkit import Chem
+
+    charge = sum(a.GetFormalCharge() for a in mol.GetAtoms())
+    quats = [a for a in mol.GetAtoms() if a.GetFormalCharge() > 0 and a.GetTotalNumHs() == 0]
+    if charge <= 0 or sum(a.GetFormalCharge() for a in quats) < charge:
+        return None
+    sites: list[int] = []
+    for sm in _ACID_SMARTS:
+        patt = Chem.MolFromSmarts(sm)
+        hits = sorted({m[-1] for m in mol.GetSubstructMatches(patt)})
+        sites.extend(h for h in hits if h not in sites)
+    if len(sites) < charge:
+        return None
+    rw = Chem.RWMol(mol)
+    for idx in sites[:charge]:
+        at = rw.GetAtomWithIdx(idx)
+        at.SetFormalCharge(-1)
+        at.SetNumExplicitHs(0)
+        at.SetNoImplicit(True)
+    try:
+        out = rw.GetMol()
+        Chem.SanitizeMol(out)
+    except Exception:  # noqa: BLE001
+        return None
+    return out
 
 
 def _resolve_chunk(keys: list) -> list:

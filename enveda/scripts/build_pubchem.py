@@ -172,6 +172,18 @@ def peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
+def anon_rss_mb() -> float:
+    """Current anonymous RSS (excludes file-backed pages of memory-mapped arrays)."""
+    try:
+        with open("/proc/self/status") as fh:
+            for ln in fh:
+                if ln.startswith("RssAnon:"):
+                    return int(ln.split()[1]) / 1024.0
+    except OSError:  # pragma: no cover
+        pass
+    return float("nan")
+
+
 def git_commit() -> str:
     try:
         return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
@@ -894,9 +906,10 @@ def prior_stream(cfg: Cfg, name: str, url: str, colnames: list, types: dict, kee
             yield batch
             if time.time() - last > 120:
                 el = time.time() - t0
-                log.info("  %s: %s rows, %.1f%% of %s bytes, %.1f MB/s, restarts %d, rss %.0f MB, avail %.1f GB",
-                         name, fmt_n(n), 100.0 * stream.offset / size, fmt_n(size), stream.offset / el / 1e6,
-                         stream.restarts, peak_rss_mb(), mem_available_gb())
+                log.info("  %s: %s rows, %.1f%% of %s bytes, %.1f MB/s, restarts %d, anon rss %.0f MB, "
+                         "arrow pool %.0f MB, avail %.1f GB", name, fmt_n(n), 100.0 * stream.offset / size,
+                         fmt_n(size), stream.offset / el / 1e6, stream.restarts, anon_rss_mb(),
+                         pa.total_allocated_bytes() / 1e6, mem_available_gb())
                 last = time.time()
     finally:
         stream.close()
@@ -960,30 +973,55 @@ class PairCounter:
             fh.write(seg.tobytes())
             self.n_pairs_written += len(seg)
 
-    def reduce(self, chunk_keys: int = 40_000_000) -> np.ndarray:
+    CHUNK_KEYS = 20_000_000   # np.unique in one go up to this many keys (about 0.5 GB of temporaries)
+    SLICE_KEYS = 8_000_000    # streamed slices when a file must be split first
+
+    def _count_file(self, path: Path, c_out: np.ndarray, depth: int = 0) -> None:
+        """Add distinct-key counts per local group of one key file to c_out. Files above
+        CHUNK_KEYS are first split 8 ways on the next 3 bits of the local group id, in
+        streamed slices (memory stays bounded however skewed the groups are)."""
+        n = path.stat().st_size // 8
+        if n == 0:
+            return
+        keys = np.memmap(path, dtype=np.uint64, mode="r")
+        shift = ITEM_BITS + PART_BITS - 3 * (depth + 1)
+        if n <= self.CHUNK_KEYS or shift < ITEM_BITS:
+            u = np.unique(np.asarray(keys))
+            c_out += np.bincount((u >> np.uint64(ITEM_BITS)).astype(np.int64), minlength=len(c_out))
+            del keys, u
+            return
+        subs = [path.with_name(f"{path.stem}_{k}.bin") for k in range(8)]
+        fhs = [open(q, "wb") for q in subs]
+        try:
+            for s0 in range(0, n, self.SLICE_KEYS):
+                v = np.array(keys[s0:s0 + self.SLICE_KEYS])
+                sub = ((v >> np.uint64(shift)) & np.uint64(7)).astype(np.int8)
+                order = np.argsort(sub, kind="stable")
+                v, sub = v[order], sub[order]
+                cut = np.searchsorted(sub, np.arange(1, 8, dtype=np.int8))
+                for k, part in enumerate(np.split(v, cut)):
+                    fhs[k].write(part.tobytes())
+                del v, sub, order
+        finally:
+            for fh in fhs:
+                fh.close()
+        del keys
+        for q in subs:
+            self._count_file(q, c_out, depth + 1)
+            q.unlink()
+
+    def reduce(self) -> np.ndarray:
         for fh in self.fh.values():
             fh.close()
         self.fh = {}
         nloc = 1 << PART_BITS
-        for f in sorted(self.dir.glob("*.bin")):
+        for f in sorted(self.dir.glob("[0-9][0-9][0-9][0-9].bin")):
             p = int(f.stem)
-            keys = np.memmap(f, dtype=np.uint64, mode="r") if f.stat().st_size else np.zeros(0, np.uint64)
-            n_sub = max(1, -(-len(keys) // chunk_keys))
-            sub = -(-nloc // n_sub)
             c = np.zeros(nloc, dtype=np.int64)
-            for r in range(n_sub):  # large parts: split by group sub-range, one scan each
-                if n_sub == 1:
-                    sel = np.asarray(keys)
-                else:
-                    loc = keys >> np.uint64(ITEM_BITS)
-                    sel = np.asarray(keys[(loc >= np.uint64(r * sub)) & (loc < np.uint64((r + 1) * sub))])
-                u = np.unique(sel)
-                c += np.bincount((u >> np.uint64(ITEM_BITS)).astype(np.int64), minlength=nloc)
-                del sel, u
+            self._count_file(f, c)
             base = p << PART_BITS
             hi = min(base + nloc, self.n_groups)
             self.counts[base:hi] += c[:hi - base].astype(np.int32)
-            del keys
             f.unlink()
         shutil.rmtree(self.dir, ignore_errors=True)
         return self.counts
@@ -1209,6 +1247,10 @@ def priors_count(cfg: Cfg, pw: Path, step: str, gm: GroupMap) -> dict:
                 ctr.add_pairs(g[mul], item)
         info["rows_in_tier_or_np_groups"] = n_in
         info["pairs_spilled"] = ctr.n_pairs_written
+        pa.default_memory_pool().release_unused()
+        log.info("priors %s: %s pairs spilled for multi-CID groups; reducing (anon rss %.0f MB, avail %.1f GB)",
+                 step, fmt_n(ctr.n_pairs_written), anon_rss_mb(), mem_available_gb())
+        wait_for_memory(1.5, f"priors {step} reduce")
         info["single_group_rows"] = ctr.n_single_rows
         if by_type:
             info["rows_by_type"] = by_type
@@ -1261,6 +1303,8 @@ def priors_count(cfg: Cfg, pw: Path, step: str, gm: GroupMap) -> dict:
             "top_sources": [[names[i], src_sids[i], names[i] in vend] for i in top[:40]],
             "pairs_spilled": {"vendor": ctr_v.n_pairs_written, "depositor": ctr_d.n_pairs_written},
         })
+        pa.default_memory_pool().release_unused()
+        wait_for_memory(1.5, "priors sidmap reduce")
         log.info("priors sidmap: %s sources seen (%s vendors), %s SIDs with a CID, %s in groups; NIST excluded: %s",
                  fmt_n(len(names)), info["n_vendor_sources_seen"], fmt_n(n_with_cid), fmt_n(n_in),
                  info["nist_sources_excluded"])
@@ -1546,8 +1590,9 @@ def stage_priors(cfg: Cfg):
             ps["write"]["index_sha256"] = sha256_file(cfg.out / "_index.json")
             save_stats(cfg, stats)
         mk.write_text(datetime.now(timezone.utc).isoformat())
-        log.info("priors %s finished in %.0f s (peak rss %.0f MB, available %.1f GB)", step, time.time() - ts,
-                 peak_rss_mb(), mem_available_gb())
+        pa.default_memory_pool().release_unused()
+        log.info("priors %s finished in %.0f s (peak rss %.0f MB incl. mapped files, anon rss now %.0f MB, "
+                 "available %.1f GB)", step, time.time() - ts, peak_rss_mb(), anon_rss_mb(), mem_available_gb())
     if not cfg.keep_intermediates:
         freed = 0
         for p in list(pw.glob("*.npy")) + list(pw.glob("pairs_*")):

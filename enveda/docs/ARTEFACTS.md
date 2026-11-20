@@ -463,3 +463,27 @@ the run degrades to Baseline 0 behaviour.
 |---|---|---|---|---|---|---|
 | `submissions/20261120_b1_library_prior.csv` | 400 x 25 | 405,959 | `406b36df8a93532ceb7dd04fc4b1cc9c49c3e0bdedd52bf49e5e43943239c760` | `python scripts/predict.py --config configs/b1_library.yaml` (NP + PubChem tiers, 2 mkey workers, warm mkey cache, `nice -n 10`, other agents busy) | 120 s (pipeline 118 s) | 4.85 GB |
 <!-- WP8:b1:end -->
+
+## MetFrag-lite fragments (R7)
+
+Code: `src/casmi/fragments.py`; no artefact is needed at inference (fragments are enumerated on
+the fly; the cache only saves time). Files written by R7 (all reproducible by the commands in
+docs/EXPERIMENTS.md, "R7"):
+
+| file | bytes | sha256 (first 16) | content |
+|---|---|---|---|
+| `data/processed/cache/fragments/fragments.sqlite` | 432,230,400 | (cache, not checked) | fragment lists of 419,508 SMILES, table `frag_v1_c2_p20000` (key SMILES, zlib(int32 header, float64 masses, uint8 level masks)) |
+| `data/processed/fragments/calibration.json` | 64,560 | `0128271a1545cbca` | residual offsets per library, polarity, adduct, m/z bin, per-spectrum quantiles |
+| `data/processed/fragments/calibration_residuals.parquet` | 43,360,987 | `05c3079ccaecca5a` | one row per unambiguous peak (7 libraries, up to 40,000 spectra each) |
+| `data/processed/fragments/eval_v1_np_tims_C2.parquet` | 3,783,579 | `74b506f168554a80` | scored rows (top 100 by prior + truth), all `fragments.FEATURES` |
+| `data/processed/fragments/eval_v1_np_other_C2.parquet` | 38,490,019 | `2f8b629956f559e3` | same, NP-OTHER (299,378 rows) |
+| `data/processed/fragments/eval_v1_syn_tims_C2.parquet` | 39,249,531 | `c9026b4cf124ce0c` | same, SYN-TIMS |
+| `data/processed/fragments/eval_v1_C2_np_tims_np_other_summary.json` | 25,932 | `67b7206e5599dfc9` | AUC and MRR tables |
+| `data/processed/fragments/eval_v1_C2_syn_tims_summary.json` | 17,424 | `ba536475d6959bde` | same, SYN-TIMS |
+
+Cache location: `Config.frag_cache_dir` ("" = `PROCESSED/cache/fragments`; on Kaggle point it at
+a writable directory such as `/kaggle/working/fragcache`, or "none"; an unwritable location
+falls back to memory with a warning). The table name carries the enumeration version and
+settings, so a change of `frag_max_cuts`, `frag_max_pairs` or `ENUM_VERSION` never reads stale
+lists. Scoring settings (credits, tolerance, H shifts, offsets) are applied at match time and do
+not invalidate the cache.

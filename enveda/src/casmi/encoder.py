@@ -270,7 +270,13 @@ class EvalPack:
         m = len(self.mol)
         if n <= 0 or n >= m:
             return self
-        keep = np.sort(np.random.default_rng(seed).choice(m, n, replace=False))
+        return self.take(np.random.default_rng(seed).choice(m, n, replace=False))
+
+    def take(self, idx: np.ndarray) -> "EvalPack":
+        """The molecules ``idx`` (sorted, duplicates dropped), same layout."""
+        m = len(self.mol)
+        keep = np.unique(np.asarray(idx, np.int64))
+        n = len(keep)
         remap = np.full(m, -1, np.int64)
         remap[keep] = np.arange(n)
         qm = self.q["q_mol"].astype(np.int64)
@@ -551,11 +557,14 @@ def fp_hash(packed: np.ndarray) -> np.ndarray:
 
 
 def same_mass_negatives(st_mass: np.ndarray, st_uni: np.ndarray, st_hash: np.ndarray,
-              uni_mass: np.ndarray, uni_hash: np.ndarray, ppm: float, min_da: float,
-              n_max: int, n_min: int, seed: int) -> tuple[np.ndarray, np.ndarray, dict]:
+                        uni_mass: np.ndarray, uni_hash: np.ndarray, ppm: float, min_da: float,
+                        n_max: int, n_min: int, seed: int, uni_group: np.ndarray | None = None
+                        ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Per structure: universe rows within the mass window, minus its own row and rows with
     an identical fingerprint; random subsample (seeded per structure) to ``n_max``; topped up
-    with the nearest masses outside the window to ``n_min``. CSR (offsets, rows)."""
+    with the nearest masses outside the window to ``n_min``. CSR (offsets, rows).
+    ``uni_group`` (optional, per universe row): the structure index the row belongs to (-1
+    for none); rows of the structure itself (e.g. other ik14 of the same mkey) are excluded."""
     order = np.argsort(uni_mass, kind="mergesort")
     sm = uni_mass[order]
     tol = np.maximum(st_mass * ppm * 1e-6, min_da)
@@ -566,7 +575,10 @@ def same_mass_negatives(st_mass: np.ndarray, st_uni: np.ndarray, st_hash: np.nda
     topped = 0
     for i in range(len(st_mass)):
         c = order[lo[i]:hi[i]]
-        c = c[(c != st_uni[i]) & (uni_hash[c] != st_hash[i])]
+        keep = (c != st_uni[i]) & (uni_hash[c] != st_hash[i])
+        if uni_group is not None:
+            keep &= uni_group[c] != i
+        c = c[keep]
         n_window[i] = len(c)
         if len(c) > n_max:
             rng = np.random.default_rng([seed, i])
@@ -575,7 +587,10 @@ def same_mass_negatives(st_mass: np.ndarray, st_uni: np.ndarray, st_hash: np.nda
             a = max(0, lo[i] - 2 * n_min)
             b = min(len(sm), hi[i] + 2 * n_min)
             w = order[a:b]
-            w = w[(w != st_uni[i]) & (uni_hash[w] != st_hash[i])]
+            kw = (w != st_uni[i]) & (uni_hash[w] != st_hash[i])
+            if uni_group is not None:
+                kw &= uni_group[w] != i
+            w = w[kw]
             d = np.abs(uni_mass[w] - st_mass[i])
             w = w[np.lexsort((w, d))][:n_min]
             c = np.sort(w)

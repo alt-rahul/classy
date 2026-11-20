@@ -1,0 +1,30 @@
+# Probe P6 (ROADMAP 2.6; R1): full pipeline WITH external libraries; its partner is the same
+# pipeline without them (configs/b1_library.yaml, or the newest milestone). NOT SUBMITTED.
+#   board(P6) - board(partner) = pi_1 x (C1 gain from the external libraries), plus the C2 terms
+# (external spectra turn some class-2 molecules into library hits).
+# Needs R2's library with train AND external spectra in one Library directory: set lib_dir to
+# it (relative to data/processed; R2's data/processed/extlib/library/ holds the external
+# spectra only). Do not run before it exists: without a library on disk the lib stage is
+# skipped and this config degrades to b0b. In evaluate.py --library decides (it is passed to
+# the stage).
+#   python scripts/evaluate.py --config configs/probe_p6_extlib.yaml --tag probe_p6 --panel full \
+#       --library data/processed/extlib/library
+submission_tag: probe_p6_extlib
+pipeline_plugins: [casmi.libmatch]
+pipeline_stages: [mass, pool, lib, features, score, assemble]
+lib_dir: extlib/library_all   # R2 output (train + external); "" = train library only
+db_tiers: [np, pubchem]
+n_jobs: 2
+batch_molecules: 50
+lib_mass_tol_ppm: 10.0
+lib_sim: graded
+fusion_lib_cos_min: 0.95
+fusion_lib_min_matched: 4
+fusion_lib_weak: true
+fusion_lib_weak_additive: true
+fusion_lib_weak_weight: 1.0
+fusion_lib_weak_cos_min: 0.5
+fusion_lib_weak_min_matched: 2
+fusion_lib_demote: true
+fusion_lib_demote_cos_max: 0.2
+fusion_lib_demote_factor: 1.0

@@ -218,6 +218,24 @@ class Config:
     val_np_other_mass_match: bool = True     # initial: NP-OTHER also follows the mass target (risk 17)
     val_query_max_abs_ppm: float = 20.0      # initial: organisers' precursor cut (set from DATA_AUDIT)
     val_query_peak_cut_da: float = 2.0       # test cleaning: drop peaks above precursor + this
+    # R1 additions (ROADMAP 2: protocol v2, LB-proxy, class-mix probes; casmi.validation v2)
+    val_v2_mixes: tuple = (("A", 0.17, 0.30, 0.15, 0.38), ("B", 0.16, 0.24, 0.12, 0.48),
+                           ("C", 0.22, 0.36, 0.17, 0.25))   # name, pi C1, C2-NP, C2-PC, C3h (2.4)
+    val_v2_board_b0: float = 0.154           # public score of b0 (NP-tier prior): calibrates w_obs (2.3.5)
+    val_v2_alpha_max: float = 1.5            # w_obs = (1 + pmid_count) ** -alpha, alpha in [0, this]
+    val_v2_c3h_tanimoto: float = 0.75        # C3h: Morgan-2 Tanimoto to the truth at or above this is removed
+    val_v2_c3h_pubchem_ppm: float = 25.0     # C3h PubChem-only neighbours: rows within truth mass +- this
+    val_v2_fast_sizes: tuple = (("NP-TIMS", 0), ("NP-OTHER", 750), ("SYN-TIMS", 500),
+                                ("C2-ZEN", 300))          # fast panel per set (0 = all; 2.3.6)
+    val_v2_pmid_edges: tuple = (1, 10, 100, 1000)   # pmid bins of the fast-panel strata (lower edges)
+    val_v2_store_keep: int = 300             # stored pools: PubChem-only rows kept per molecule (top by score)
+    val_v2_blind_mz: tuple = (50.5, 61.5, 72.5, 83.5, 94.5)   # blind audit spectrum (mass defect 0.5:
+    val_v2_blind_int: tuple = (1.0, 0.8, 0.6, 0.4, 0.2)       # matches no real fragment)
+    val_v2_adopt_gain: float = 0.005         # adoption: P(A) gain with paired 90 % interval above 0 (2.4)
+    val_v2_board_se: float = 0.03            # class-mix probes: board standard error per probe (2.6)
+    probe_rule: str = ""                     # probe submissions (2.6, casmi.probes): "" off | lib_hits | np_only | pubchem_only | novel
+    probe_lib_cos_min: float = 0.7           # lib_hits probe: lib_best_cos at or above this ...
+    probe_lib_min_matched: int = 4           # ... and lib_n_matched at or above this
 
     # --- Contrastive transformer encoder (RESEARCH.md roadmap item 1; casmi.encoder) ----
     # Architecture (saved with the checkpoint as EncoderSpec; these are the defaults).

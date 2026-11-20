@@ -6,15 +6,17 @@ Inputs (all local artefacts): the WP5 library store (cleaned peaks, ``data/proce
 library``), WP6 ``meta.parquet`` and ``structures.parquet`` (``data/processed/train``), the
 holdout ``splits/holdout_v1.csv`` (excluded with ``splits.training_exclusion``), the NP tier
 (``np.parquet``, ``np_fp.npy``) and the validation queries / truth of NP-TIMS and NP-OTHER
-(``data/processed/validation``). Output: ``data/processed/encoder/bundle_v1/`` in the layout
+(``data/processed/validation``). Output: ``data/processed/encoder/bundle_v2/`` (v1: precursor_error_ppm filter, ik14 structures) in the layout
 of ``casmi.encoder.Bundle`` (module docstring there), plus ``info.json`` with counts,
 filters, input checksums and diagnostics.
 
 Training spectra: library rows with at least ``cfg.min_peaks`` cleaned peaks, label mass
 in [fpm_mass_min, fpm_mass_max], a parseable adduct, |precursor error| <=
 fpm_max_precursor_error_ppm (NaN passes), RDKit-parseable label SMILES, and not a holdout
-molecule (by ik14 and mkey). Targets: ``chem.morgan_fps`` (std_mol + InChI round trip) of
-the label SMILES. Negatives: see ``negatives``.
+molecule (by ik14 and mkey); the error filter uses the recomputed ``m_err_ppm`` of WP6 meta.
+A structure is an mkey group (ik14 when the mkey is missing) represented by its ik14 with
+the most training spectra; every ik14 of the group is excluded from its negatives. Targets:
+``chem.morgan_fps`` (std_mol + InChI round trip) of the representative's label SMILES.
 """
 
 from __future__ import annotations
@@ -98,7 +100,8 @@ def load_training_table(cfg: Config, lib_dir: Path, train_dir: Path, holdout: Pa
     if not np.array_equal(lib["spec_idx"].to_numpy(np.int64), np.arange(len(lib))):
         raise ValueError("library meta spec_idx is not the store row number")
     tm = pq.read_table(train_dir / "meta.parquet",
-                       columns=["spectrum_id", "mono_mass", "m_spec", "adduct_known"]).to_pandas()
+                       columns=["spectrum_id", "mono_mass", "m_spec", "m_err_ppm",
+                                "adduct_known"]).to_pandas()
     df = lib.merge(tm, on="spectrum_id", how="left", validate="one_to_one")
     st = pq.read_table(train_dir / "structures.parquet",
                        columns=["ik14", "smiles", "rdkit_ok", "mkey", "in_np"]).to_pandas()
@@ -111,7 +114,9 @@ def load_training_table(cfg: Config, lib_dir: Path, train_dir: Path, holdout: Pa
     counts["after_mass"] = int(keep.sum())
     keep &= df["adduct_known"].fillna(False).to_numpy(bool)
     counts["after_adduct"] = int(keep.sum())
-    err = df["precursor_error_ppm"].to_numpy(np.float64)
+    # Recomputed error of the label mass (WP6 meta), not the shipped precursor_error_ppm,
+    # which is wrong for about 52k formate-adduct spectra (pluskal_ms2, gnps).
+    err = df["m_err_ppm"].to_numpy(np.float64)
     keep &= ~(np.abs(err) > cfg.fpm_max_precursor_error_ppm)
     counts["after_ppm"] = int(keep.sum())
     keep &= df["rdkit_ok"].fillna(False).to_numpy(bool) & df["smiles"].notna().to_numpy()
@@ -129,10 +134,11 @@ def load_training_table(cfg: Config, lib_dir: Path, train_dir: Path, holdout: Pa
 # negatives
 # --------------------------------------------------------------------------------------
 
-def negatives(st_mass, st_uni, st_hash, uni_mass, uni_hash, ppm, min_da, n_max, n_min, seed):
+def negatives(st_mass, st_uni, st_hash, uni_mass, uni_hash, ppm, min_da, n_max, n_min, seed,
+              uni_group=None):
     """``casmi.encoder.same_mass_negatives`` (kept here under its original name)."""
     return E.same_mass_negatives(st_mass, st_uni, st_hash, uni_mass, uni_hash, ppm, min_da,
-                                 n_max, n_min, seed)
+                                 n_max, n_min, seed, uni_group)
 
 
 # --------------------------------------------------------------------------------------
@@ -190,6 +196,64 @@ def eval_pack(name: str, cfg: Config, val_dir: Path, np_ik14: np.ndarray, np_mas
     return pack
 
 
+def pc_pack(cfg: Config, val_dir: Path, name: str = "SYN-TIMS") -> E.EvalPack:
+    """C2-PC query pack: ``name`` holdout molecules without spectra in any other training
+    library (``eligible_c1`` False), cleaned queries, M, and the truth keys (ik14 group +
+    same-mkey DB keys) in ``mol["truth_keys"]``; no pools (PubChem windows are evaluated by
+    ``scripts/eval_encoder_pc.py``)."""
+    from casmi.fpmodel import spectra_from_frame
+    from casmi.io import mass_tables
+    from casmi.validation import load_queries
+
+    q, truth = load_queries(name, val_dir)
+    truth = truth[~truth["eligible_c1"].astype(bool)]
+    q = q[q["molecule_id"].isin(set(truth["molecule_id"]))]
+    q = q.sort_values(["molecule_id", "spectrum_id"], kind="mergesort").reset_index(drop=True)
+    store, meta = spectra_from_frame(q, cfg)
+    mols = mass_tables(q, cfg)[0].sort_values("molecule_id", kind="mergesort").reset_index(drop=True)
+    code = {m: i for i, m in enumerate(mols["molecule_id"].astype(str))}
+    tk_path = val_dir / "truth_keys.parquet"
+    by_mkey: dict[str, set] = {}
+    if tk_path.exists():
+        tk = pd.read_parquet(tk_path)
+        for mk, ks in zip(tk["mkey"].astype(str), tk["db_ik14"].astype(str)):
+            by_mkey.setdefault(mk, set()).update(k for k in ks.split(";") if k)
+    tr = truth.set_index("molecule_id")
+    rows = []
+    for mid, M in zip(mols["molecule_id"].astype(str), mols["M"].to_numpy(np.float64)):
+        t = tr.loc[mid]
+        g = t["ik14_group"]
+        keys = set(g.split(";")) if isinstance(g, str) else set(map(str, g))
+        keys |= {str(t["ik14"])} | by_mkey.get(str(t["mkey"]), set())
+        rows.append({"molecule_id": mid, "mkey": str(t["mkey"]), "ik14": str(t["ik14"]), "M": float(M),
+                     "mono_mass": float(t["mono_mass"]), "truth_keys": ";".join(sorted(keys)),
+                     "pubmed_count": t.get("pubmed_count"), "mass_tercile": t.get("mass_tercile"),
+                     "in_pubchem": bool(t.get("in_pubchem", True)), "in_np": bool(t.get("in_np", False)),
+                     "fold": int(t["fold"]), "n_pool": 0, "n_pos": 0})
+    qd = {"q_mz": store.mz.astype(np.float32), "q_int": store.intensity.astype(np.float16),
+          "q_off": store.offsets.astype(np.int64), "q_prec": meta.precursor_mz.astype(np.float64),
+          "q_ce": meta.collision_energy.astype(np.float32), "q_ne": meta.n_energies.astype(np.int8),
+          "q_add": meta.adduct_code.astype(np.int8), "q_pol": meta.polarity.astype(np.int8),
+          "q_inst": meta.instrument_code.astype(np.int8),
+          "q_mol": np.array([code[str(m)] for m in q["molecule_id"]], np.int32)}
+    mol = pd.DataFrame(rows)
+    mol["pubmed_count"] = pd.to_numeric(mol["pubmed_count"], errors="coerce")
+    log.info("C2-PC pack %s: %d molecules (no spectra in other libraries), %d spectra", name,
+             len(mol), len(q))
+    return E.EvalPack("C2-PC", qd, mol, np.zeros(len(mol) + 1, np.int64), np.zeros(0, np.int32),
+                      np.zeros(0, bool))
+
+
+def add_pc_pack(cfg: Config, bundle: Path, val_dir: Path) -> None:
+    pack = pc_pack(cfg, val_dir)
+    sizes = pack.save(bundle / "pc_syn_tims")
+    info = json.loads((bundle / "info.json").read_text())
+    info["pc_sets"] = {"C2-PC": {"dir": "pc_syn_tims", "molecules": int(len(pack.mol)),
+                                 "spectra": int(len(pack.q["q_mol"])),
+                                 "bytes": int(sum(sizes.values()))}}
+    (bundle / "info.json").write_text(json.dumps(info, indent=1, sort_keys=True, default=str))
+
+
 # --------------------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------------------
@@ -201,20 +265,33 @@ def build(cfg: Config, out: Path, n_jobs: int, lib_dir: Path, train_dir: Path, h
 
     t0 = time.time()
     df, counts = load_training_table(cfg, lib_dir, train_dir, holdout)
-    # structures
-    ik_sorted = np.array(sorted(set(df["ik14"].astype(str))), dtype=object)
-    st_code = {k: i for i, k in enumerate(ik_sorted)}
-    df["st"] = df["ik14"].astype(str).map(st_code).to_numpy(np.int64)
+    # structures = mkey groups (ik14 when the mkey is missing); representative ik14 = most
+    # training spectra, then the smallest ik14
+    mk = df["mkey"].astype(object)
+    ok_mk = mk.notna() & (mk.astype(str).str.len() > 0)
+    df["skey"] = np.where(ok_mk, mk.astype(str), "ik:" + df["ik14"].astype(str))
+    cnt = df.groupby(["skey", "ik14"], sort=True).size().rename("n").reset_index()
+    rep = cnt.sort_values(["skey", "n", "ik14"], ascending=[True, False, True],
+                          kind="mergesort").drop_duplicates("skey")
+    skeys = rep["skey"].astype(str).to_numpy(object)
+    ik_sorted = rep["ik14"].astype(str).to_numpy(object)       # representative per structure
+    st_code = {k: i for i, k in enumerate(skeys)}
+    df["st"] = df["skey"].map(st_code).to_numpy(np.int64)
     first = df.drop_duplicates("ik14").set_index("ik14")
     st_smiles = first.loc[ik_sorted, "smiles"].astype(object).tolist()
     st_mkey = first.loc[ik_sorted, "mkey"].astype(object).tolist()
+    members = cnt.groupby("skey")["ik14"].apply(list).to_dict()
+    n_alias = int((cnt.groupby("skey").size() > 1).sum())
+    log.info("structures: %d mkey groups from %d ik14 (%d groups with more than one ik14)",
+             len(skeys), int(cnt["ik14"].nunique()), n_alias)
+    counts["structures_mkey_groups"] = int(len(skeys))
+    counts["structures_multi_ik14"] = n_alias
     t1 = time.time()
     st_fp, ok = morgan_fps(st_smiles, cfg, n_jobs=n_jobs)
     log.info("targets: %d structures, %d ok, %.0f s", len(st_fp), int(ok.sum()), time.time() - t1)
     if not ok.all():
-        bad = set(ik_sorted[~ok])
-        df = df[~df["ik14"].isin(bad)].reset_index(drop=True)
-        log.warning("dropped %d structures whose fingerprint failed", len(bad))
+        df = df[ok[df["st"].to_numpy(np.int64)]].reset_index(drop=True)
+        log.warning("dropped the spectra of %d structures whose fingerprint failed", int((~ok).sum()))
     st_mass = pq.read_table(train_dir / "structures.parquet", columns=["ik14", "mono_mass"]).to_pandas() \
         .set_index("ik14").loc[ik_sorted, "mono_mass"].to_numpy(np.float64)
     # groups and spectrum order
@@ -258,11 +335,29 @@ def build(cfg: Config, out: Path, n_jobs: int, lib_dir: Path, train_dir: Path, h
     np_fp = np.load(np_dir / "np_fp.npy", mmap_mode="r")
     n_np = len(npt)
     np_row = pd.Series(np.arange(n_np), index=np_ik14)
-    in_np = pd.Series(ik_sorted).isin(np_row.index).to_numpy()
+    # NP rows of every training structure (any ik14 of its mkey group, from the full
+    # structures table so that aliases without training spectra count too)
+    all_st = pq.read_table(train_dir / "structures.parquet", columns=["ik14", "mkey"]).to_pandas()
+    all_st = all_st[all_st["mkey"].astype(str).isin(set(skeys))]
+    grp_of_ik = {str(k): st_code[str(m)] for k, m in zip(all_st["ik14"], all_st["mkey"])}
+    for sk, iks in members.items():
+        for k in iks:
+            grp_of_ik[str(k)] = st_code[sk]
+    np_group = np.array([grp_of_ik.get(str(k), -1) for k in np_ik14], np.int64)
+    st_uni = np.full(len(ik_sorted), -1, np.int64)
+    rep_np = np_row.reindex(ik_sorted).to_numpy()
+    has_rep = np.isfinite(rep_np)
+    st_uni[has_rep] = rep_np[has_rep].astype(np.int64)
+    alias_rows = np.flatnonzero(np_group >= 0)
+    for r in alias_rows[::-1]:                    # smallest NP row of the group wins
+        g_ = np_group[r]
+        if not has_rep[g_]:
+            st_uni[g_] = r
+    in_np = st_uni >= 0
     extra = np.flatnonzero(~in_np)
-    st_uni = np.empty(len(ik_sorted), np.int64)
-    st_uni[in_np] = np_row.loc[ik_sorted[in_np]].to_numpy(np.int64)
     st_uni[extra] = n_np + np.arange(len(extra))
+    log.info("structures in the NP tier: %d (%d through a non-representative ik14)",
+             int(in_np.sum()), int((in_np & ~has_rep).sum()))
     uni_extra_fp = st_fp[extra]
     t1 = time.time()
     np_hash = E.fp_hash(np.asarray(np_fp))
@@ -270,22 +365,29 @@ def build(cfg: Config, out: Path, n_jobs: int, lib_dir: Path, train_dir: Path, h
     uni_hash = np.concatenate([np_hash, st_hash[extra]])
     uni_mass = np.concatenate([np_mass, st_mass[extra]])
     same_fp = float((np_hash[st_uni[in_np]] == st_hash[in_np]).mean()) if in_np.any() else float("nan")
+    uni_group = np.concatenate([np_group, extra.astype(np.int64)])
     neg_off, neg_idx, neg_stats = negatives(st_mass, st_uni, st_hash, uni_mass, uni_hash,
                                             cfg.enc_neg_window_ppm, cfg.mass_tol_min_da,
-                                            cfg.enc_neg_max, cfg.enc_neg_min, cfg.seed)
+                                            cfg.enc_neg_max, cfg.enc_neg_min, cfg.seed, uni_group)
     neg_stats["np_fraction"] = float((neg_idx < n_np).mean()) if len(neg_idx) else 0.0
     log.info("negatives: %s (%.0f s); target fp == NP-tier fp for %.4f of %d NP structures",
              neg_stats, time.time() - t1, same_fp, int(in_np.sum()))
     structures = pd.DataFrame({"ik14": ik_sorted.astype(str), "mkey": pd.Series(st_mkey, dtype=object).astype(str),
-                               "in_np": in_np, "n_spectra": np.bincount(df["st"].to_numpy(np.int64),
-                                                                        minlength=len(ik_sorted))})
+                               "skey": skeys.astype(str), "in_np": in_np,
+                               "n_ik14": [len(members[k]) for k in skeys],
+                               "aliases": [";".join(sorted(map(str, members[k]))) for k in skeys],
+                               "n_spectra": np.bincount(df["st"].to_numpy(np.int64), minlength=len(ik_sorted))})
+    # every alias of a structure is excluded from its own negatives
+    gi = np.repeat(np.arange(len(ik_sorted)), np.diff(neg_off))
+    assert not (uni_group[neg_idx] == gi).any(), "a structure has itself among its negatives"
     # evaluation packs
     tk_path = val_dir / "truth_keys.parquet"
     truth_keys = pd.read_parquet(tk_path) if tk_path.exists() else None
     packs = {name: eval_pack(name, cfg, val_dir, np_ik14, np_mass, truth_keys) for name in EVAL_SETS}
     # leak check: no evaluation molecule is a training structure
     for name, pack in packs.items():
-        leak = set(pack.mol["mkey"]) & set(structures["mkey"]) | set(pack.mol["ik14"]) & set(structures["ik14"])
+        train_ik = {k for a in structures["aliases"] for k in a.split(";")}
+        leak = set(pack.mol["mkey"]) & set(structures["mkey"]) | set(pack.mol["ik14"]) & train_ik
         if leak:
             raise AssertionError(f"{name}: {len(leak)} evaluation molecules among training structures")
     info = {
@@ -323,13 +425,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", default=None, help="bundle directory (default PROCESSED/encoder/bundle_v1)")
     p.add_argument("--n-jobs", type=int, default=2)
     p.add_argument("--holdout", default=None)
+    p.add_argument("--pc-only", action="store_true",
+                   help="only (re)write the C2-PC query pack into an existing bundle")
     args = p.parse_args(argv)
     log_run(log, args)
     cfg = load_config(args.config)
-    out = Path(args.out) if args.out else paths.PROCESSED / "encoder" / "bundle_v1"
+    out = Path(args.out) if args.out else paths.PROCESSED / "encoder" / "bundle_v2"
     holdout = Path(args.holdout) if args.holdout else paths.SPLITS / "holdout_v1.csv"
-    build(cfg, out, args.n_jobs, paths.PROCESSED / "library", paths.PROCESSED / "train", holdout,
-          paths.PROCESSED / "db" / "np", paths.PROCESSED / "validation")
+    if not args.pc_only:
+        build(cfg, out, args.n_jobs, paths.PROCESSED / "library", paths.PROCESSED / "train", holdout,
+              paths.PROCESSED / "db" / "np", paths.PROCESSED / "validation")
+    add_pc_pack(cfg, out, paths.PROCESSED / "validation")
 
 
 if __name__ == "__main__":

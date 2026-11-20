@@ -1,0 +1,29 @@
+# Probe P1 (ROADMAP 2.6; R1): library hits only, nothing else. NOT SUBMITTED: the coordinator
+# decides (the user has not approved probe submissions yet).
+#   board(P1) = pi_1 x MRR_C1(rule) (+ about 0 from the other cells, measured locally)
+# Lists: LIB candidates with lib_best_cos >= 0.7 and >= 4 matched peaks (plan rule 1), in b1
+# order; a molecule without such a hit gets one wrong guess (casmi.probes). The public
+# library-only notebook scored 0.151 with a similar rule.
+#   python scripts/evaluate.py --config configs/probe_p1_lib_hits.yaml --tag probe_p1 --panel full
+#   python scripts/predict.py --config configs/probe_p1_lib_hits.yaml   (submission file)
+submission_tag: probe_p1_lib_hits
+pipeline_plugins: [casmi.libmatch, casmi.probes]
+pipeline_stages: [mass, pool, lib, features, score, probe_assemble]
+probe_rule: lib_hits
+probe_lib_cos_min: 0.7
+probe_lib_min_matched: 4
+db_tiers: [np, pubchem]   # as b1 (LIB rows get the same priors), so b1's stored pools give the local MRRs
+n_jobs: 2
+batch_molecules: 50
+lib_mass_tol_ppm: 10.0
+lib_sim: graded
+fusion_lib_cos_min: 0.95
+fusion_lib_min_matched: 4
+fusion_lib_weak: true
+fusion_lib_weak_additive: true
+fusion_lib_weak_weight: 1.0
+fusion_lib_weak_cos_min: 0.5
+fusion_lib_weak_min_matched: 2
+fusion_lib_demote: true
+fusion_lib_demote_cos_max: 0.2
+fusion_lib_demote_factor: 1.0

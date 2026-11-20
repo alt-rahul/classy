@@ -220,11 +220,11 @@ def _stage_records(source: str, part: str, records, cfg: Config, mapper, n_jobs:
     return info
 
 
-def stage_source(source: str, cfg: Config, n_jobs: int, keep_raw_mb: float, lg) -> dict:
+def stage_source(source: str, cfg: Config, n_jobs: int, keep_raw_mb: float, lg, resume: bool = False) -> dict:
     d = extlib.staging_dir(source)
-    if d.exists():
+    if d.exists() and not resume:
         shutil.rmtree(d)
-    d.mkdir(parents=True)
+    d.mkdir(parents=True, exist_ok=True)
     mapper = extlib.AdductMapper(extlib.known_adducts())
     cache: dict = {}
     infos: list[dict] = []
@@ -238,14 +238,44 @@ def stage_source(source: str, cfg: Config, n_jobs: int, keep_raw_mb: float, lg) 
         else:
             names = [n for n, _ in libs if n in MULTIPLEX_LIBS]
         lg.info("%s: %d libraries: %s", source, len(names), names)
+        import threading
+
+        def fetch(u: str, dest: Path) -> None:
+            if dest.exists() and dest.stat().st_size > 0:
+                return
+            try:
+                _curl(u, dest, lg, tries=2)
+            except RuntimeError as exc:
+                lg.warning("skipping GNPS library %s: %s", dest.stem, exc)
+
+        nxt = None   # prefetch of the next library (one download ahead, bounded disk)
         for i, name in enumerate(names):
+            part = f"part-{i:03d}-{name}"
+            done = d / f"{part}.info.json"
             f = raw / f"{name}.json"
             url = f"{GNPS_BASE}/gnpslibrary/{name}.json"
-            if not (f.exists() and f.stat().st_size > 0):
-                _curl(url, f, lg)
+            if nxt is not None:
+                nxt.join()
+                nxt = None
+            if done.exists():
+                infos.append(json.loads(done.read_text()))
+                continue
+            fetch(url, f)
+            if i + 1 < len(names) and not (d / f"part-{i + 1:03d}-{names[i + 1]}.info.json").exists():
+                nxt = threading.Thread(target=fetch, args=(f"{GNPS_BASE}/gnpslibrary/{names[i + 1]}.json",
+                                                           raw / f"{names[i + 1]}.json"), daemon=True)
+                nxt.start()
+            if not f.exists():
+                info = {"source": source, "part": part, "n_in": 0, "n_staged": 0, "drops": {},
+                        "by_sub_lib": {}, "skipped": "download failed (listed on the GNPS page, HTTP 404)"}
+                done.write_text(json.dumps(info))
+                infos.append(info)
+                continue
             _record_download(source, f.name, url, f)
-            infos.append(_stage_records(source, f"part-{i:03d}-{name}", extlib.iter_gnps_json(f, name),
-                                        cfg, mapper, n_jobs, lg, cache))
+            (d / f"{part}.parquet").unlink(missing_ok=True)
+            info = _stage_records(source, part, extlib.iter_gnps_json(f, name), cfg, mapper, n_jobs, lg, cache)
+            done.write_text(json.dumps(info))
+            infos.append(info)
             if f.stat().st_size > keep_raw_mb * 1e6:
                 f.unlink()
                 _mark_deleted(source, f.name)
@@ -257,9 +287,38 @@ def stage_source(source: str, cfg: Config, n_jobs: int, keep_raw_mb: float, lg) 
         infos.append(_stage_records(source, "part-000", extlib.iter_massbank_msp(raw / "MassBank_NISTformat.msp", lic),
                                     cfg, mapper, n_jobs, lg, cache))
     elif source == "mona":
-        infos.append(_stage_records(source, "part-000",
-                                    extlib.iter_mona_json(raw / "MoNA-export-Experimental_Spectra-json.zip"),
-                                    cfg, mapper, n_jobs, lg, cache))
+        zp = raw / "MoNA-export-Experimental_Spectra-json.zip"
+        if zp.exists():
+            infos.append(_stage_records(source, "part-000", extlib.iter_mona_json(zp), cfg, mapper, n_jobs, lg, cache))
+        else:
+            # streamed: curl -> streaming unzip -> parser (the 3.9 GB zip never touches disk)
+            url = DOWNLOADS["mona"][0][1]
+            proc = subprocess.Popen(["curl", "-sSL", "--fail", url], stdout=subprocess.PIPE)
+            h = hashlib.sha256()
+
+            class _Tee:
+                def read(self, n: int) -> bytes:
+                    b = proc.stdout.read(n)
+                    h.update(b)
+                    self.n = getattr(self, "n", 0) + len(b)
+                    return b
+
+            tee = _Tee()
+            try:
+                infos.append(_stage_records(source, "part-000", extlib.iter_mona_json(extlib.open_zip_stream(tee)),
+                                            cfg, mapper, n_jobs, lg, cache))
+            finally:
+                rest = proc.stdout.read()
+                h.update(rest)
+                proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"MoNA download failed (curl exit {proc.returncode})")
+            rec = RAW_ROOT / source / "downloads.json"
+            rec.parent.mkdir(parents=True, exist_ok=True)
+            data = json.loads(rec.read_text()) if rec.exists() else {}
+            data[zp.name] = {"url": url, "bytes": getattr(tee, "n", 0) + len(rest), "sha256": h.hexdigest(),
+                             "downloaded": time.strftime("%Y-%m-%d %H:%M:%S"), "streamed_not_stored": True}
+            rec.write_text(json.dumps(data, indent=2))
     elif source == "msnlib":
         infos.append(_stage_records(source, "part-000", extlib.iter_msg_table(raw / "msnlib_ms2.parquet", "msnlib"),
                                     cfg, mapper, n_jobs, lg, cache))
@@ -494,14 +553,15 @@ def stage_keys(cfg: Config, n_jobs: int, lg) -> dict:
           .drop_duplicates("inchikey14"))
     new = sm[~sm["inchikey14"].isin(train_mk.keys())]
     lg.info("final structures: %d (%d absent from train by ik14); computing mkeys for those", len(sm), len(new))
-    mk = metric.mkeys(new["normalized_smiles"].tolist(), cfg, n_jobs=n_jobs,
-                      cache_path=extlib.extlib_dir() / "mkey_cache.parquet", return_status=True)
-    keys, status = mk if isinstance(mk, tuple) else (mk, None)
+    res = metric.mkeys(new["normalized_smiles"].tolist(), cfg, n_jobs=n_jobs,
+                       cache_path=extlib.extlib_dir() / "mkey_cache.parquet", return_status=True)
     sm["mkey"] = sm["inchikey14"].map(train_mk)
-    sm.loc[new.index, "mkey"] = list(keys)
-    if status is not None:
-        sm["mkey_status"] = None
-        sm.loc[new.index, "mkey_status"] = list(status)
+    sm["mkey_status"] = np.where(sm["mkey"].notna(), "train", None)
+    sm.loc[new.index, "mkey"] = [r[0] for r in res]
+    sm.loc[new.index, "mkey_status"] = [r[1] for r in res]
+    # a failed key falls back to the ik14 (same rule as metric's timeout fallback)
+    miss = sm["mkey"].isna()
+    sm.loc[miss, "mkey"] = sm.loc[miss, "inchikey14"]
     sm["in_train"] = sm["inchikey14"].isin(train_mk.keys())
     sm["mkey_in_train"] = sm["mkey"].isin(train_mkeys)
     # NP tier and PubChem tier membership
@@ -769,9 +829,41 @@ def _rr(res: pd.DataFrame, truth_mkey: str, mk: dict) -> tuple[float, int]:
     return 0.0, 0
 
 
+def _independent(extra: pd.DataFrame, trows: pd.DataFrame, cfg: Config) -> np.ndarray:
+    """Boolean over ``extra`` rows: not near-identical (cosine >= extlib_dup_cos, same ik14 and
+    adduct) to any train spectrum of that structure (the train spectra the queries come from)."""
+    ok = np.ones(len(extra), bool)
+    if not len(extra):
+        return ok
+    tk = (trows["inchikey14"] + "|" + trows["adduct"]).to_numpy(object)
+    groups = pd.Series(np.arange(len(trows))).groupby(tk).apply(list).to_dict()
+    ek = (extra["inchikey14"] + "|" + extra["adduct"]).to_numpy(object)
+    tmz, tint = trows["ms2_mzs"].to_numpy(object), trows["ms2_normalized_intensities"].to_numpy(object)
+    emz, eint = extra["ms2_mzs"].to_numpy(object), extra["ms2_normalized_intensities"].to_numpy(object)
+    for i, k in enumerate(ek):
+        g = groups.get(k)
+        if not g:
+            continue
+        r_mz, r_int, r_off = extlib._flat([tmz[j] for j in g], [tint[j] for j in g])
+        q = np.asarray(emz[i], np.float32)
+        cos, _ = extlib._cos_pairs(q, np.asarray(eint[i], np.float32), np.array([0, len(q)], np.int64),
+                                   r_mz, r_int, r_off, np.zeros(len(g), np.int64), np.arange(len(g)),
+                                   float(cfg.extlib_dup_tol_da))
+        if cos.size and float(cos.max()) >= float(cfg.extlib_dup_cos):
+            ok[i] = False
+    return ok
+
+
 def _eval_set(set_name: str, truth: pd.DataFrame, queries: pd.DataFrame, hide: str, cfg: Config,
-              ext_files: list[Path], mk: dict, lg, scratch: Path) -> dict:
-    """Library-only MRR with and without the external library for the molecules in truth."""
+              ext_files: list[Path], mk: dict, lg, scratch: Path, extra: pd.DataFrame | None = None) -> dict:
+    """Library-only MRR with and without the external library for the molecules in ``truth``.
+
+    Candidates: structures of the library within the mass window (search_by_mass, cos_max
+    order), deduplicated by mkey. ``hide``: "all_train" removes every train spectrum of the
+    molecule's ik14 group, "query_lib" only those of its query library (C1). ``extra``: staged
+    external spectra of the query molecules; only those independent of the molecule's train
+    spectra (``_independent``) are added, and ``truth`` is restricted to molecules with one.
+    """
     tmeta = pq.read_table(train_dir() / "meta.parquet", columns=[
         "spectrum_id", "ingest_lib", "file_row", "ik14", "mono_mass"]).to_pandas()
     masses = truth["mono_mass"].to_numpy(np.float64)
@@ -779,29 +871,38 @@ def _eval_set(set_name: str, truth: pd.DataFrame, queries: pd.DataFrame, hide: s
     near_ik = set(st.index[_window_rows(masses, st.to_numpy(np.float64), cfg)])
     tsel = tmeta[tmeta["ik14"].isin(near_ik)]
     del tmeta
-    lg.info("%s: %d molecules, train reference spectra in windows: %d of %d structures",
-            set_name, len(truth), len(tsel), len(near_ik))
     trows = _train_rows(tsel, TRAIN_LIB_COLS)
+    lg.info("%s: %d molecules, train reference spectra in windows: %d of %d structures",
+            set_name, len(truth), len(trows), len(near_ik))
     erows = []
     for f in ext_files:
         t = pq.read_table(f, columns=TRAIN_LIB_COLS)
-        mm = t["mono_mass"].to_numpy(zero_copy_only=False)
-        keep = _window_rows(masses, mm, cfg)
+        keep = _window_rows(masses, t["mono_mass"].to_numpy(zero_copy_only=False), cfg)
         if keep.any():
             erows.append(t.filter(pa.array(keep)).to_pandas())
     ext = pd.concat(erows, ignore_index=True) if erows else pd.DataFrame(columns=TRAIN_LIB_COLS)
+    info: dict[str, Any] = {}
+    if extra is not None:
+        ind = _independent(extra, trows, cfg)
+        extra = extra[ind]
+        info = {"extra_staged_rows": int(len(ind)), "extra_independent_rows": int(ind.sum())}
+        groups = truth["ik14_group"].astype(str).str.split(";")
+        has = groups.apply(lambda g: bool(set(g) & set(extra["inchikey14"])))
+        truth = truth[has.to_numpy()].reset_index(drop=True)
+        queries = queries[queries["molecule_id"].isin(set(truth["molecule_id"]))]
+        ext = pd.concat([ext, extra], ignore_index=True)
+        info["n_molecules"] = int(len(truth))
     lib_t = _build_small_library([trows], cfg, scratch / f"eval_{set_name}_train")
     lib_te = _build_small_library([trows, ext], cfg, scratch / f"eval_{set_name}_both")
-    out = {}
+    out: dict[str, Any] = dict(info)
     for name, lib in (("train_only", lib_t), ("train_plus_ext", lib_te)):
         meta = lib.meta
         is_ext = meta["ingest_lib"].astype(str).str.startswith("ext_").to_numpy()
         spec_ik = meta["ik14"].astype(str).to_numpy()
         spec_lib = meta["ingest_lib"].astype(str).to_numpy()
-        rrs, top1, n_ext_hit = [], 0, 0
+        rrs, top1, by_mol = [], 0, []
         for r in truth.itertuples(index=False):
             group = set(str(r.ik14_group).split(";")) if isinstance(r.ik14_group, str) else {r.ik14}
-            group |= {k for k, v in mk.items() if v == r.mkey} if False else set()
             in_group = np.isin(spec_ik, list(group))
             if hide == "all_train":
                 mask = in_group & ~is_ext
@@ -812,12 +913,54 @@ def _eval_set(set_name: str, truth: pd.DataFrame, queries: pd.DataFrame, hide: s
             rr, rank = _rr(res, r.mkey, mk)
             rrs.append(rr)
             top1 += int(rank == 1)
+            by_mol.append((r.molecule_id, rr))
         out[name] = {"n": len(rrs), "mrr": float(np.mean(rrs)) if rrs else float("nan"),
-                     "top1": top1 / max(len(rrs), 1)}
+                     "top1": top1 / max(len(rrs), 1), "rr": rrs}
     for d in ("eval_%s_train" % set_name, "eval_%s_both" % set_name):
         shutil.rmtree(scratch / d, ignore_errors=True)
-    lg.info("%s (%s hidden): %s", set_name, hide, out)
+    lg.info("%s (%s hidden): %s", set_name, hide, {k: ({kk: vv for kk, vv in v.items() if kk != "rr"}
+                                                       if isinstance(v, dict) else v) for k, v in out.items()})
     return out
+
+
+def _eval_chunked(set_name: str, truth: pd.DataFrame, queries: pd.DataFrame, hide: str, cfg: Config,
+                  ext_files: list[Path], mk: dict, lg, scratch: Path, extra: pd.DataFrame | None = None,
+                  chunk: int = 400) -> dict:
+    """``_eval_set`` over mass-sorted chunks of molecules (bounded memory), pooled."""
+    truth = truth.sort_values(["mono_mass", "molecule_id"], kind="mergesort").reset_index(drop=True)
+    acc: dict[str, list] = {"train_only": [], "train_plus_ext": []}
+    extra_info: Counter = Counter()
+    for i in range(0, len(truth), chunk):
+        t = truth.iloc[i:i + chunk]
+        q = queries[queries["molecule_id"].isin(set(t["molecule_id"]))]
+        e = None
+        if extra is not None:
+            grp = set(";".join(t["ik14_group"].astype(str)).split(";"))
+            e = extra[extra["inchikey14"].isin(grp)]
+        r = _eval_set(set_name, t, q, hide, cfg, ext_files, mk, lg, scratch, extra=e)
+        for k in acc:
+            acc[k].extend(r[k]["rr"])
+        for k, v in r.items():
+            if not isinstance(v, dict):
+                extra_info[k] += v
+    out: dict[str, Any] = dict(extra_info)
+    for k, rr in acc.items():
+        a = np.asarray(rr, np.float64)
+        out[k] = {"n": int(a.size), "mrr": float(a.mean()) if a.size else float("nan"),
+                  "top1": float((a == 1.0).mean()) if a.size else float("nan")}
+    lg.info("%s pooled (%s hidden): %s", set_name, hide, out)
+    return out
+
+
+def _staged_rows_for(ik14: set) -> pd.DataFrame:
+    """Staged (filtered, not deduplicated) spectra of the given structures, all sources."""
+    parts = []
+    for s in _staged_sources():
+        t = _read_staged(s, ["inchikey14"])
+        rows = np.flatnonzero(pc.is_in(t["inchikey14"], value_set=pa.array(sorted(ik14))).to_numpy(zero_copy_only=False))
+        if rows.size:
+            parts.append(_read_staged_rows(s, rows))
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=TRAIN_LIB_COLS)
 
 
 def stage_evaluate(cfg: Config, lg, scratch: Path) -> dict:
@@ -831,15 +974,22 @@ def stage_evaluate(cfg: Config, lg, scratch: Path) -> dict:
     mk.update(dict(zip(es["ik14"], es["mkey"])))
     ext_mkeys = set(es["mkey"].dropna())
     out = {}
-    # NP-OTHER molecules with external spectra (final, deduplicated library), all train spectra hidden
     q, truth = load_queries("NP-OTHER", vdir)
+    # (a) the final, deduplicated library: molecules whose mkey has spectra in it
     sel = truth[truth["mkey"].isin(ext_mkeys)].reset_index(drop=True)
-    out["NP-OTHER_ext_all_train_hidden"] = _eval_set("NP-OTHER", sel, q[q["molecule_id"].isin(set(sel["molecule_id"]))],
-                                                     "all_train", cfg, ext_files, mk, lg, scratch)
-    out["NP-OTHER_ext_all_train_hidden"]["n_molecules_with_ext"] = int(len(sel))
+    out["NP-OTHER_final_ext"] = _eval_chunked("NP-OTHER", sel, q[q["molecule_id"].isin(set(sel["molecule_id"]))],
+                                          "all_train", cfg, ext_files, mk, lg, scratch)
+    out["NP-OTHER_final_ext"]["n_molecules_with_ext"] = int(len(sel))
+    # (b) every staged external spectrum of the molecule that is independent of its train
+    # spectra (the deduplication keeps only new instrument/adduct coverage of train
+    # structures; for a structure absent from train all its public spectra would be kept)
+    groups = set(";".join(truth["ik14_group"].astype(str)).split(";"))
+    extra = _staged_rows_for(groups)
+    out["NP-OTHER_independent_ext"] = _eval_chunked("NP-OTHER", truth, q, "all_train", cfg, ext_files, mk, lg,
+                                                scratch, extra=extra)
     # NP-TIMS C1 (query library hidden) with and without the external library
     q, truth = load_queries("NP-TIMS", vdir)
-    out["NP-TIMS_C1"] = _eval_set("NP-TIMS", truth, q, "query_lib", cfg, ext_files, mk, lg, scratch)
+    out["NP-TIMS_C1"] = _eval_chunked("NP-TIMS", truth, q, "query_lib", cfg, ext_files, mk, lg, scratch)
     (extlib.extlib_dir() / "evaluation.json").write_text(json.dumps(out, indent=2))
     return out
 
@@ -849,69 +999,73 @@ def stage_evaluate(cfg: Config, lg, scratch: Path) -> dict:
 # --------------------------------------------------------------------------------------
 
 def stage_c2zen(cfg: Config, lg, max_molecules: int = 1500) -> dict:
+    """C2-ZEN (ROADMAP 2.3 item 3): Enveda-180 Zenodo structures absent from train (by mkey),
+    queries emulated like ``validation.build_queries`` (k spectra per molecule from the public
+    test distribution, CE-class weighting, test cleaning of the RAW peaks, test adducts only,
+    base peak >= val_min_base_peak_intensity, |ppm| <= val_query_max_abs_ppm). At most
+    ``max_molecules`` molecules (hash order), folds 0-4 by hash of the mkey."""
+    from casmi.adducts import TEST_ADDUCTS
     from casmi.io import TEST_COLUMNS, read_test
     from casmi.splits import hash_uniform
-    from casmi.validation import (TRUTH_COLUMNS, _choose, _test_clean, _write_queries,
-                                  set_slug, test_reference)
+    from casmi.validation import TRUTH_COLUMNS, _choose, _test_clean, _write_queries, set_slug, test_reference
 
     set_name = "C2-ZEN"
-    raw = pq.read_table(extlib.extlib_dir() / "c2zen_raw.parquet").to_pandas()
-    ef = extlib.extlib_dir() / "extlib_enveda180.parquet"
-    lib = pq.read_table(ef, columns=["spectrum_id", "inchikey14", "normalized_smiles", "molecular_formula",
-                                     "mono_mass", "adduct", "ionization_mode", "instrument_type", "precursor_mz",
-                                     "precursor_error_ppm", "base_peak_intensity", "collision_energy_ev",
-                                     "collision_energy_orig", "collision_energy_orig_units", "is_test_adduct"
-                                     if False else "polarity", "mkey", "in_train"]).to_pandas()
-    lib = lib[~lib["in_train"]]
-    es = pd.read_parquet(extlib.extlib_dir() / "structures.parquet")
-    es = es[~es["mkey_in_train"]]
-    from casmi.adducts import TEST_ADDUCTS
-    lib = lib[lib["adduct"].isin(set(TEST_ADDUCTS)) & lib["mkey"].isin(set(es["mkey"]))]
-    bpi_ok = ~(lib["base_peak_intensity"] < cfg.val_min_base_peak_intensity)
-    lib = lib[bpi_ok & (lib["precursor_error_ppm"] <= cfg.val_query_max_abs_ppm)]
+    ed = extlib.extlib_dir()
+    raw = pq.read_table(ed / "c2zen_raw.parquet").to_pandas()
+    cols = ["spectrum_id", "inchikey14", "normalized_smiles", "molecular_formula", "mono_mass", "adduct",
+            "ionization_mode", "instrument_type", "precursor_mz", "precursor_error_ppm", "base_peak_intensity",
+            "collision_energy_ev", "collision_energy_orig", "collision_energy_orig_units", "mkey", "in_train"]
+    lib = pq.read_table(ed / "extlib_enveda180.parquet", columns=cols).to_pandas()
+    es = pd.read_parquet(ed / "structures.parquet")
+    new_mk = set(es.loc[~es["mkey_in_train"], "mkey"].dropna())
+    n_struct = int(lib.loc[~lib["in_train"], "inchikey14"].nunique())
+    lib = lib[(~lib["in_train"]) & lib["mkey"].isin(new_mk) & lib["adduct"].isin(set(TEST_ADDUCTS))]
+    lib = lib[~(lib["base_peak_intensity"] < cfg.val_min_base_peak_intensity)
+              & (lib["precursor_error_ppm"] <= cfg.val_query_max_abs_ppm)]
     lib = lib.merge(raw[["spectrum_id", "raw_mzs", "raw_intensities"]], on="spectrum_id", how="inner")
-    lib["collision_energy"] = [float(np.mean(x)) if x is not None and len(x) else np.nan for x in lib["collision_energy_ev"]]
+    lib["collision_energy"] = [float(np.mean(x)) if x is not None and len(x) else np.nan
+                               for x in lib["collision_energy_ev"]]
     lib["n_energies"] = [len(x) if x is not None else 0 for x in lib["collision_energy_ev"]]
     lib["instrument_family"] = "timstof"
-    mol = lib.groupby("mkey").agg(ik14=("inchikey14", "first"), n=("spectrum_id", "size")).reset_index()
+    mol = (lib.groupby("mkey").agg(ik14=("inchikey14", "first"), n=("spectrum_id", "size"),
+                                  mono_mass=("mono_mass", "first"), formula=("molecular_formula", "first"))
+           .reset_index())
     u = hash_uniform(mol["mkey"], cfg.seed, "c2zen")
     mol = mol.iloc[np.lexsort((mol["mkey"].astype(str).to_numpy(), u))].head(max_molecules).reset_index(drop=True)
     mol["molecule_id"] = [f"ZE{i:05d}" for i in range(len(mol))]
-    mol["fold"] = (hash_uniform(mol["mkey"], cfg.seed, "fold") * cfg.val_n_folds).astype(int)
+    mol["fold"] = np.minimum((hash_uniform(mol["mkey"], cfg.seed, "fold") * cfg.val_n_folds).astype(int),
+                             cfg.val_n_folds - 1)
     ref = test_reference(read_test(None))
+    by_mk = {k: g.sort_values("spectrum_id", kind="mergesort").reset_index(drop=True)
+             for k, g in lib[lib["mkey"].isin(set(mol["mkey"]))].groupby("mkey")}
     qrows = []
     for r in mol.itertuples(index=False):
-        c = lib[lib["mkey"] == r.mkey].sort_values("spectrum_id", kind="mergesort").reset_index(drop=True)
-        pick = _choose(c, ref, cfg, set_name, r.mkey)
-        for p in c.iloc[pick].itertuples(index=False):
+        c = by_mk[r.mkey]
+        for p in c.iloc[_choose(c, ref, cfg, set_name, r.mkey)].itertuples(index=False):
             mz, it = _test_clean(p.raw_mzs, p.raw_intensities, float(p.precursor_mz), cfg.val_query_peak_cut_da)
             if not mz:
                 continue
             ev = p.collision_energy_ev
             qrows.append({"molecule_id": r.molecule_id, "spectrum_id": p.spectrum_id, "ms2_mzs": mz,
                           "ms2_normalized_intensities": it,
-                          "base_peak_intensity": float(p.base_peak_intensity) if p.base_peak_intensity is not None else np.nan,
+                          "base_peak_intensity": float(p.base_peak_intensity),
                           "adduct": p.adduct, "ionization_mode": p.ionization_mode,
                           "instrument_type": p.instrument_type or "timsTOF", "precursor_mz": float(p.precursor_mz),
                           "collision_energy_orig": p.collision_energy_orig,
                           "collision_energy_ev": None if ev is None else [float(x) for x in ev],
                           "collision_energy_orig_units": p.collision_energy_orig_units})
     q = pd.DataFrame(qrows, columns=list(TEST_COLUMNS))
-    nq = q.groupby("molecule_id").size()
-    mol["n_query_spectra"] = mol["molecule_id"].map(nq).fillna(0).astype(int)
+    mol["n_query_spectra"] = mol["molecule_id"].map(q.groupby("molecule_id").size()).fillna(0).astype(int)
     mol = mol[mol["n_query_spectra"] > 0].reset_index(drop=True)
-    es_i = es.set_index("mkey")
-    info = es_i.reindex(mol["mkey"])
+    info = es.drop_duplicates("mkey").set_index("mkey").reindex(mol["mkey"])
+    mass = mol["mono_mass"].to_numpy(np.float64)
     terc = np.full(len(mol), -1)
     if len(mol) >= 3:
-        edges = np.quantile(info["n_spectra"].to_numpy() * 0 + lib.groupby("mkey")["mono_mass"].first().reindex(mol["mkey"]).to_numpy(), [1 / 3, 2 / 3])
-        terc = np.searchsorted(edges, lib.groupby("mkey")["mono_mass"].first().reindex(mol["mkey"]).to_numpy(), side="right")
-    mass = lib.groupby("mkey")["mono_mass"].first().reindex(mol["mkey"]).to_numpy(np.float64)
-    formula = lib.groupby("mkey")["molecular_formula"].first().reindex(mol["mkey"]).to_numpy(object)
+        terc = np.searchsorted(np.quantile(mass, [1 / 3, 2 / 3]), mass, side="right")
     truth = pd.DataFrame({
         "molecule_id": mol["molecule_id"], "set": set_name, "fold": mol["fold"].astype(int),
         "mkey": mol["mkey"], "ik14": mol["ik14"], "ik14_group": mol["ik14"],
-        "smiles": info["smiles"].to_numpy(object), "formula": formula, "mono_mass": mass,
+        "smiles": info["smiles"].to_numpy(object), "formula": mol["formula"].to_numpy(object), "mono_mass": mass,
         "eligible_c1": False, "query_lib": "ext_enveda180", "n_query_spectra": mol["n_query_spectra"],
         "n_available": mol["n"].astype(int).to_numpy(),
         "pubmed_count": pd.array([pd.NA] * len(mol), dtype="Int32"),
@@ -919,14 +1073,19 @@ def stage_c2zen(cfg: Config, lg, max_molecules: int = 1500) -> dict:
         "in_pubchem": info["in_pubchem"].fillna(False).astype(bool).to_numpy(),
         "np_score": np.nan, "mass_tercile": terc.astype(int), "peaks_source": "raw",
     }, columns=list(TRUTH_COLUMNS))
-    q = q[q["molecule_id"].isin(set(truth["molecule_id"]))].sort_values(["molecule_id", "spectrum_id"], kind="mergesort").reset_index(drop=True)
+    q = (q[q["molecule_id"].isin(set(truth["molecule_id"]))]
+         .sort_values(["molecule_id", "spectrum_id"], kind="mergesort").reset_index(drop=True))
     vdir = paths.ensure_dir(paths.PROCESSED / "validation")
-    _write_queries(q, vdir / f"queries_{set_slug(set_name)}.parquet")
-    truth.to_parquet(vdir / f"truth_{set_slug(set_name)}.parquet", index=False)
-    res = {"molecules": int(len(truth)), "spectra": int(len(q)), "candidates_absent_from_train": int(lib["mkey"].nunique()),
-           "in_np": int(truth["in_np"].sum()), "in_pubchem": int(truth["in_pubchem"].sum()),
-           "spectra_per_molecule_mean": float(len(q) / max(len(truth), 1))}
-    (extlib.extlib_dir() / "c2zen_info.json").write_text(json.dumps(res, indent=2))
+    qp, tp = vdir / f"queries_{set_slug(set_name)}.parquet", vdir / f"truth_{set_slug(set_name)}.parquet"
+    _write_queries(q, qp)
+    truth.to_parquet(tp, index=False)
+    res = {"enveda180_structures_absent_from_train_ik14": n_struct,
+           "eligible_molecules_new_mkey": int(lib["mkey"].nunique()), "molecules": int(len(truth)),
+           "spectra": int(len(q)), "in_np": int(truth["in_np"].sum()), "in_pubchem": int(truth["in_pubchem"].sum()),
+           "spectra_per_molecule_mean": float(len(q) / max(len(truth), 1)),
+           "folds": truth["fold"].value_counts().sort_index().to_dict(),
+           "queries_sha256": _sha256(qp), "truth_sha256": _sha256(tp)}
+    (ed / "c2zen_info.json").write_text(json.dumps(res, indent=2))
     lg.info("C2-ZEN: %s", res)
     return res
 
@@ -986,6 +1145,16 @@ def stage_crosscheck(lg) -> dict:
         "taeyangg4/casmi26-extlib-gnps-full": RAW_ROOT / "kaggle_taeyangg4" / "ext_meta.parquet.dl",
         "takumuhata/casmi26-extlib": RAW_ROOT / "kaggle_takumuhata" / "ext_meta.parquet.dl",
     }
+    sam = RAW_ROOT / "kaggle_samartalwar" / "spectra.parquet.dl"
+    if sam.exists():
+        d = pd.read_parquet(sam, columns=["spectrum_id", "inchikey", "is_casmi_subset"])
+        d = d[~d["is_casmi_subset"].astype(bool)]
+        theirs = set(d["inchikey"].dropna().str[:14])
+        mb = _read_staged("massbank", ["source_id"]).column("source_id").to_pylist() if "massbank" in _staged_sources() else []
+        out["samartalwar/casmi-2026-spectral-library-massbankharmonized"] = {
+            "spectra": int(len(d)), "structures": len(theirs), "absent_from_train": len(theirs - tr),
+            "absent_from_train_and_ours": len(theirs - tr - ours),
+            "accessions_not_in_our_massbank_2026_11_staged": int(len(set(d["spectrum_id"]) - set(mb)))}
     for name, p in dumps.items():
         if not p.exists():
             continue
@@ -1056,6 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep-raw-mb", type=float, default=300.0,
                     help="raw downloads larger than this are deleted after staging")
     ap.add_argument("--scratch", type=Path, default=None, help="scratch dir for test builds")
+    ap.add_argument("--resume", action="store_true", help="stage: keep finished GNPS parts")
     args = ap.parse_args(argv)
     lg = get_logger("build_extlib")
     log_run(lg, args)
@@ -1070,7 +1240,7 @@ def main(argv: list[str] | None = None) -> int:
                     stage_fetch(s, lg)
         elif st == "stage":
             for s in sources:
-                stage_source(s, cfg, args.n_jobs, args.keep_raw_mb, lg)
+                stage_source(s, cfg, args.n_jobs, args.keep_raw_mb, lg, resume=args.resume)
         elif st == "finalize":
             stage_finalize(cfg, lg)
         elif st == "keys":

@@ -276,3 +276,101 @@ def test_stage_on_empty_pool():
     st.pool = _pool().iloc[:0]
     out = F.stage_fragments(st, Config())
     assert out.pool is not None and not len(out.pool)
+
+
+# --- end to end through pipeline.run, and the inference-path import rule ----------------
+
+QUERCETIN = "O=c1c(O)c(-c2ccc(O)c(O)c2)oc2cc(O)cc(O)c12"
+MORIN = "O=c1c(O)c(-c2ccc(O)cc2O)oc2cc(O)cc(O)c12"
+TRICETIN = "O=c1cc(-c2cc(O)c(O)c(O)c2)oc2cc(O)cc(O)c12"
+
+
+@pytest.fixture(scope="module")
+def tiny_db(tmp_path_factory):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from casmi import chem, metric
+    from casmi.db import CandidateDB
+
+    root = tmp_path_factory.mktemp("r7db")
+    rows = []
+    for smi, pmid in ((QUERCETIN, 100), (MORIN, 1000), (TRICETIN, 10)):
+        rows.append(dict(ik14=metric.ik14(smi), smiles=smi, formula=chem.formula(smi),
+                         mono_mass=chem.mono_mass(smi), in_coconut=True, in_npatlas=False,
+                         in_lotus=False, in_pubchemlite=False, coconut_annotation_level=None,
+                         n_organisms=None, n_citations=None, n_collections=1,
+                         pubmed_count=pmid, patent_count=None, anno_type_count=None, cid=None))
+    df = pd.DataFrame(rows).sort_values(["mono_mass", "ik14"], kind="mergesort")
+    for c in ("n_organisms", "n_citations", "n_collections", "pubmed_count", "patent_count",
+              "anno_type_count"):
+        df[c] = df[c].astype("Int32")
+    df["coconut_annotation_level"] = df["coconut_annotation_level"].astype("Int8")
+    df["cid"] = df["cid"].astype("Int64")
+    p = root / "np.parquet"
+    pq.write_table(pa.Table.from_pandas(df.reset_index(drop=True), preserve_index=False), p)
+    return CandidateDB(np_path=p, pubchem_dir=root / "no_pubchem"), p, root / "no_pubchem"
+
+
+def _quercetin_query():
+    from casmi import chem
+    from casmi.adducts import precursor_mz
+
+    fl = F.fragment_list(QUERCETIN)
+    one = fl.masses[(fl.masks & 2) > 0]
+    mz = np.sort(one[(one > 100) & (one < 290)][:12] + PROTON).astype(np.float32)
+    return pd.DataFrame({
+        "molecule_id": ["q1"], "spectrum_id": ["s1"], "ms2_mzs": [mz],
+        "ms2_normalized_intensities": [np.linspace(0.2, 1.0, len(mz)).astype(np.float32)],
+        "adduct": ["[M+H]+"], "ionization_mode": ["positive"],
+        "precursor_mz": [precursor_mz(chem.mono_mass(QUERCETIN), "[M+H]+")],
+    })
+
+
+def test_pipeline_run_with_fragments_stage(tiny_db, tmp_path):
+    dbh, _, _ = tiny_db
+    cfg = Config().replace(db_tiers=("np",), n_jobs=1, mkey_cache=False, mkey_timeout_s=0.0,
+                           pipeline_plugins=("casmi.fragments",),
+                           pipeline_stages=("mass", "pool", "features", "score", "fragments",
+                                            "assemble"),
+                           frag_cache_dir=str(tmp_path))
+    seen = {}
+
+    def spy(state, c):
+        seen["pool"] = state.pool.copy()
+        return pipeline.stage_assemble(state, c)
+
+    res = pipeline.run(_quercetin_query(), cfg, db=dbh, stages={"assemble": spy})
+    pool = seen["pool"]
+    assert len(pool) == 3 and pool["frag_score"].notna().all()
+    best = pool.loc[pool["frag_score"].idxmax(), "smiles"]
+    assert best == QUERCETIN                       # its own fragments explain the spectrum
+    assert res.molecules["frag_n_scored"].tolist() == [3]
+    assert len(res.preds["q1"]) >= 1
+
+
+_BLOCKED = r"""
+import importlib.abc, sys
+BLOCKED = ("torch", "polars", "duckdb", "sklearn")
+class _Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError("blocked on the inference path: " + name)
+        return None
+sys.meta_path.insert(0, _Blocker())
+import casmi.fragments as F
+F.warmup()
+bad = sorted(m for m in sys.modules if m.split(".")[0] in BLOCKED)
+assert not bad, bad
+print("ok")
+"""
+
+
+def test_inference_path_imports():
+    import subprocess
+    import sys
+
+    out = subprocess.run([sys.executable, "-c", _BLOCKED], capture_output=True, text=True,
+                         timeout=300)
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert out.stdout.strip().endswith("ok")

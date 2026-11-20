@@ -11,7 +11,7 @@ Outputs (``--out``, default data/processed/fragments/):
 - ``eval_<tag>_<set>_<cond>.parquet``: one row per scored candidate (molecule_id, ik14, formula,
   tier, score, in_topk, is_true, same_formula, fold, pubmed0, base_rank of the molecule,
   next_score = score of the (K+1)-th row, and every ``fragments.FEATURES`` column);
-- ``eval_<tag>_summary.json`` and the printed tables:
+- ``eval_<tag>_<cond>_<sets>_summary.json`` and the printed tables:
   (1) AUC of each feature, truth versus same-formula decoys among the scored rows, mean over
       molecules with at least one such decoy (ties count one half); also versus all decoys;
   (2) MRR@25 (ik14 de-duplication) of the prior ranking and of prior + w x feature for the top
@@ -28,6 +28,7 @@ Usage:
     nice -n 10 python scripts/eval_fragments.py --sets NP-TIMS NP-OTHER --tag v1
     python scripts/eval_fragments.py --sets NP-TIMS --max-molecules 30 --tag smoke
     python scripts/eval_fragments.py --analyse-only --tag v1      # re-read stored tables
+    python scripts/eval_fragments.py --rescore-from v1 --tag v1_ring1 --set-config frag_w_ring=1.0
 """
 
 from __future__ import annotations
@@ -175,6 +176,36 @@ def build_tables(args, cfg, lg) -> dict[str, pd.DataFrame]:
     return out
 
 
+def rescore_tables(args, cfg, lg) -> dict[str, pd.DataFrame]:
+    """Recompute the fragment features of stored rows (``--rescore-from`` tag) under ``cfg``
+    (scoring variants without new pool lookups; same rows, same normalisation sets)."""
+    from casmi import fragments as F
+    from casmi import validation
+
+    F.warmup()
+    cache = F.FragmentCache(cfg)
+    out = {}
+    for set_name in args.sets:
+        t0 = time.perf_counter()
+        src = Path(args.out) / (f"eval_{args.rescore_from}_{validation.set_slug(set_name)}_"
+                                f"{args.condition}.parquet")
+        tab = pd.read_parquet(src)
+        q, _ = validation.load_queries(set_name, args.val_dir)
+        q = q[q["molecule_id"].astype(str).isin(set(tab["molecule_id"].astype(str)))]
+        feats, _ = F.score_pool(tab, q, cfg, rows=np.ones(len(tab), bool), cache=cache,
+                                n_jobs=1)
+        for c in F.FEATURES:
+            tab[c] = feats[c].to_numpy(dtype=np.float64)
+        out[set_name] = tab
+        if not args.no_save:
+            p = Path(args.out) / f"eval_{args.tag}_{validation.set_slug(set_name)}_{args.condition}.parquet"
+            tab.to_parquet(p, index=False)
+        lg.info("%s: rescored %d rows from %s in %.0f s", set_name, len(tab), src.name,
+                time.perf_counter() - t0)
+    cache.close()
+    return out
+
+
 # --------------------------------------------------------------------------------------
 # analysis
 # --------------------------------------------------------------------------------------
@@ -210,28 +241,44 @@ def auc_table(tab: pd.DataFrame, features, same_formula: bool = True) -> pd.Data
     return pd.DataFrame(rows)
 
 
-def _ranks_with_bonus(tab: pd.DataFrame, feature: str, w: float, k: int) -> pd.Series:
-    """Rank of the truth (0 = not found / beyond the scored rows) per molecule after adding
-    w x feature (NaN = 0) to the score of the top-K rows."""
+class _Groups:
+    """Per-molecule arrays of a scored table (top-K rows), for fast re-ranking."""
+
+    def __init__(self, tab: pd.DataFrame, features):
+        self.ids, self.base, self.items = [], {}, {}
+        for m, g in tab.groupby("molecule_id", sort=True):
+            self.ids.append(m)
+            self.base[m] = int(g["base_rank"].iat[0])
+            top = g[g["in_topk"]]
+            if not g["is_true"].any() or self.base[m] == 0 or not top["is_true"].any():
+                self.items[m] = None
+                continue
+            self.items[m] = {
+                "score": top["score"].to_numpy(dtype=np.float64),
+                "pos": top["pos"].to_numpy(),
+                "ik": pd.factorize(top["ik14"].astype(str))[0],
+                "true": top["is_true"].to_numpy(),
+                "next": float(g["next_score"].iat[0]),
+                "f": {f: np.nan_to_num(top[f].to_numpy(dtype=np.float64), nan=0.0)
+                      for f in features},
+            }
+
+
+def _ranks_with_bonus(tab, feature: str, w: float, k: int) -> pd.Series:
+    """Rank of the truth (0 = not found) per molecule after adding w x feature (NaN = 0) to
+    the score of the top-K rows; a truth outside the top K keeps its base rank (> K)."""
+    gr = tab if isinstance(tab, _Groups) else _Groups(tab, [feature])
     out = {}
-    for m, g in tab.groupby("molecule_id", sort=True):
-        base = int(g["base_rank"].iat[0])
-        if not g["is_true"].any() or base == 0:
-            out[m] = 0
+    for m in gr.ids:
+        it = gr.items[m]
+        if it is None:
+            out[m] = gr.base[m]
             continue
-        top = g[g["in_topk"]]
-        if not top["is_true"].any():
-            out[m] = base           # truth outside the top K: untouched (beyond rank K)
-            continue
-        b = np.nan_to_num(top[feature].to_numpy(dtype=np.float64), nan=0.0)
-        s = top["score"].to_numpy(dtype=np.float64) + w * b
-        order = np.lexsort((top["pos"].to_numpy(), -s))
-        ik = top["ik14"].to_numpy(dtype=object)[order]
-        tr = top["is_true"].to_numpy()[order]
-        r = _first_truth_rank(ik, tr)
-        st = s[order][np.flatnonzero(tr)[0]]
-        nxt = float(g["next_score"].iat[0])
-        if st < nxt:                 # pushed below the first unscored row
+        s = it["score"] + w * it["f"][feature]
+        order = np.lexsort((it["pos"], -s))
+        r = _first_truth_rank(it["ik"][order], it["true"][order])
+        st = s[order][np.flatnonzero(it["true"][order])[0]]
+        if st < it["next"]:          # pushed below the first unscored row
             r = max(r, k + 1)
         out[m] = r
     return pd.Series(out)
@@ -254,8 +301,9 @@ def mrr_study(tab: pd.DataFrame, k: int, seed: int, features=BONUS_FEATURES) -> 
     base = tab.groupby("molecule_id", sort=True)["base_rank"].first()
     sets = tab.groupby("molecule_id", sort=True)["set"].first()
     res: dict = {"n_molecules": len(mids), "features": {}}
+    gr = _Groups(tab, features)
     for f in features:
-        grid = {w: _ranks_with_bonus(tab, f, w, k) for w in W_GRID}
+        grid = {w: _ranks_with_bonus(gr, f, w, k) for w in W_GRID}
         fr: dict = {"grid_mrr": {str(w): _mrr(r) for w, r in grid.items()}, "halves": []}
         test_ranks = []
         for h in (0, 1):
@@ -280,6 +328,7 @@ def mrr_study(tab: pd.DataFrame, k: int, seed: int, features=BONUS_FEATURES) -> 
                 hr[f"n_{s}"] = len(ids)
             fr["halves"].append(hr)
         allr = pd.concat(test_ranks).sort_index()
+        fr["_ranks"] = allr
         fr["cross_fit"] = {"mrr_base": _mrr(base), "mrr": _mrr(allr),
                            "rank1_wins": int(((allr == 1) & (base != 1)).sum()),
                            "rank1_losses": int(((allr != 1) & (base == 1)).sum())}
@@ -332,6 +381,21 @@ def analyse(tabs: dict[str, pd.DataFrame], cfg, lg, seed: int) -> dict:
         }
     k = int(cfg.frag_top_k)
     summ["mrr"] = mrr_study(allt, k, seed)
+    summ["mrr_per_set"] = {s: mrr_study(t, k, seed, features=(PRIMARY, "frag_score_fz"))
+                           for s, t in tabs.items()}
+    # obscure subset (pubmed_count = 0) under the pooled cross-fit weights
+    mol = allt.groupby("molecule_id", sort=True)[["set", "pubmed0", "base_rank"]].first()
+    summ["mrr_pubmed0"] = {}
+    for f, fr in summ["mrr"]["features"].items():
+        r = fr["_ranks"]
+        for s in sorted(tabs):
+            ids = mol.index[(mol["set"] == s) & mol["pubmed0"]]
+            summ["mrr_pubmed0"][f"{f}|{s}"] = {"n": int(len(ids)),
+                                               "mrr_base": _mrr(mol.loc[ids, "base_rank"]),
+                                               "mrr": _mrr(r[ids])}
+    for block in [summ["mrr"], *summ["mrr_per_set"].values()]:
+        for fr in block["features"].values():
+            fr.pop("_ranks", None)
     # report
     lg.info("AUC truth vs same-formula decoys (mean over molecules):")
     hdr = list(groups)
@@ -349,6 +413,15 @@ def analyse(tabs: dict[str, pd.DataFrame], cfg, lg, seed: int) -> dict:
         for s in sorted(tabs):
             lg.info("    %-9s %.4f -> %.4f (wins %d, losses %d, n %d)", s, cf[f"mrr_base_{s}"],
                     cf[f"mrr_{s}"], cf[f"wins_{s}"], cf[f"losses_{s}"], cf[f"n_{s}"])
+    for s, blk in summ["mrr_per_set"].items():
+        for f, fr in blk["features"].items():
+            cf = fr["cross_fit"]
+            lg.info("MRR tuned within %s, %s: %.4f -> %.4f (wins %d, losses %d); halves w %s", s, f,
+                    cf["mrr_base"], cf["mrr"], cf["rank1_wins"], cf["rank1_losses"],
+                    [h["w"] for h in fr["halves"]])
+    for key, v in summ["mrr_pubmed0"].items():
+        lg.info("MRR pubmed_count = 0, pooled weights, %s: n %d, %.4f -> %.4f", key, v["n"],
+                v["mrr_base"], v["mrr"])
     for s, c in summ["context"].items():
         lg.info("context %s: %s", s, {k2: round(v, 4) if isinstance(v, float) else v
                                       for k2, v in c.items()})
@@ -371,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--set-config", nargs="*", default=[],
                     help="extra Config overrides as key=value (YAML-parsed values)")
     ap.add_argument("--analyse-only", action="store_true")
+    ap.add_argument("--rescore-from", default=None,
+                    help="tag of stored tables whose rows are re-scored under this config")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
     lg = get_logger("eval_fragments")
@@ -387,7 +462,9 @@ def main(argv: list[str] | None = None) -> int:
     paths.ensure_dir(args.out)
     from casmi.validation import set_slug
 
-    if args.analyse_only:
+    if args.rescore_from:
+        tabs = rescore_tables(args, cfg, lg)
+    elif args.analyse_only:
         tabs = {s: pd.read_parquet(Path(args.out) /
                                    f"eval_{args.tag}_{set_slug(s)}_{args.condition}.parquet")
                 for s in args.sets}
@@ -398,7 +475,8 @@ def main(argv: list[str] | None = None) -> int:
                         "holdout": str(args.holdout), "overrides": cfg.overrides(),
                         "primary_feature": PRIMARY, "w_grid": list(W_GRID)}
     if not args.no_save:
-        p = Path(args.out) / f"eval_{args.tag}_{args.condition}_summary.json"
+        slugs = "_".join(set_slug(x) for x in args.sets)
+        p = Path(args.out) / f"eval_{args.tag}_{args.condition}_{slugs}_summary.json"
         p.write_text(json.dumps(summ, indent=1, default=float), encoding="utf-8")
         lg.info("wrote %s", p)
     return 0

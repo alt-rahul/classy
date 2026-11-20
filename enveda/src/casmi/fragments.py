@@ -61,9 +61,10 @@ molecules without peaks):
   score of the molecule.
 
 Pipeline stage ``fragments`` (plugin ``casmi.fragments``): the top ``cfg.frag_top_k``
-candidates per molecule by ``pool[cfg.frag_rank_col]`` (the current score; ``fusion.fuse`` when
-the column is absent, so the stage can run before ``score``; never library similarity alone)
-get the columns above; ``state.molecules`` gets ``frag_n_spectra``, ``frag_n_peaks``,
+candidates per molecule by ``pool[cfg.frag_rank_col]`` (default "score", the current score; if
+the column is absent, ``pool["score"]``, else ``fusion.fuse``, so the stage can also run before
+``score``; never by library similarity alone), in ``fusion.sort_pool`` order, get the columns
+above; ``state.molecules`` gets ``frag_n_spectra``, ``frag_n_peaks``,
 ``frag_n_scored``. ``cfg.frag_n_jobs`` processes (0 = ``cfg.n_jobs``).
 
 Cache (``FragmentCache``): SQLite file ``fragments.sqlite`` in ``cfg.frag_cache_dir`` (default
@@ -72,6 +73,10 @@ one table per enumeration setting, key = the SMILES string, value = zlib(mass ar
 
 Calibration helper (``peak_residuals``): signed error of each peak against the nearest
 explanation by the true structure's fragments, used by ``scripts/fragment_calibration.py``.
+Measured (docs/EXPERIMENTS.md, R7): positive-mode fragments of enveda-180 and
+enveda-np-examples read +0.55 mDa high (one electron mass), negative mode is clean; the rerun
+test was corrected, so the offsets stay 0.0 by default. At 0.005 Da the shift does not change
+the features measurably.
 
 Inference-path rule: numpy, pandas, numba, rdkit and the standard library only.
 """
@@ -826,24 +831,32 @@ def normalise(raw: pd.DataFrame, molecule_ids: Sequence[Any],
 
 def select_top_k(pool: pd.DataFrame, cfg: Config) -> np.ndarray:
     """Boolean mask of the ``cfg.frag_top_k`` best rows per molecule by the current score
-    (``pool[cfg.frag_rank_col]``, else ``fusion.fuse``) in ``fusion.sort_pool`` order."""
+    (``pool[cfg.frag_rank_col]``, else ``pool["score"]``, else ``fusion.fuse``) in
+    ``fusion.sort_pool`` order (score, source, |ppm|, ik14)."""
     from . import fusion
 
     n = len(pool)
     k = int(cfg.frag_top_k)
     if n == 0 or k <= 0:
         return np.zeros(n, dtype=bool)
-    tmp = pool.copy()
-    tmp["_row"] = np.arange(n)
     col = cfg.frag_rank_col
-    if col and col in tmp.columns and col != "score":
-        tmp["score"] = pd.to_numeric(tmp[col], errors="coerce")
-    elif "score" not in tmp.columns:
-        tmp["score"] = fusion.fuse(tmp, cfg)
-    if "molecule_id" not in tmp.columns:
-        tmp["molecule_id"] = "0"
-    srt = fusion.sort_pool(tmp, cfg=cfg)
-    pos = srt.groupby(srt["molecule_id"].astype(str), sort=False).cumcount().to_numpy()
+    if col and col in pool.columns:
+        score = pd.to_numeric(pool[col], errors="coerce").to_numpy(dtype=np.float64)
+    elif "score" in pool.columns:
+        score = pd.to_numeric(pool["score"], errors="coerce").to_numpy(dtype=np.float64)
+    else:
+        score = np.asarray(fusion.fuse(pool, cfg), dtype=np.float64)
+    base = ["source_rank", "abs_ppm_err"]
+    src = pool if all(c in pool.columns for c in base) else fusion.add_base_features(pool, cfg)
+    slim = pd.DataFrame({
+        "molecule_id": (pool["molecule_id"].astype(str).to_numpy(dtype=object)
+                        if "molecule_id" in pool.columns else np.full(n, "0", dtype=object)),
+        "ik14": pool["ik14"].to_numpy(dtype=object) if "ik14" in pool.columns else None,
+        "source_rank": src["source_rank"].to_numpy(), "abs_ppm_err": src["abs_ppm_err"].to_numpy(),
+        "score": score, "_row": np.arange(n),
+    })
+    srt = fusion.sort_pool(slim, cfg=cfg)
+    pos = srt.groupby("molecule_id", sort=False).cumcount().to_numpy()
     keep = np.zeros(n, dtype=bool)
     keep[srt["_row"].to_numpy()[pos < k]] = True
     return keep

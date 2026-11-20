@@ -1,0 +1,7 @@
+probe,tag,config,board,role,notes
+P1,probe_p1,configs/probe_p1_lib_hits.yaml,,share,library hits only (cos >= 0.7 and 4 peaks)
+P2,b0_npdb_prior,configs/probe_p2_np_prior.yaml,0.154,calibration,b0: NP tier by prior (submission 1)
+P3,probe_p3,configs/probe_p3_np_only.yaml,,share,best pipeline NP-tier candidates only
+P4,probe_p4,configs/probe_p4_pubchem_only.yaml,,share,best pipeline PubChem-only candidates
+P5,probe_p5,configs/probe_p5_novel.yaml,,share,generator output only (needs R13)
+P6,probe_p6,configs/probe_p6_extlib.yaml,,share,full pipeline with external libraries (needs R2)

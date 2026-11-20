@@ -1,0 +1,24 @@
+# Probe P3 (ROADMAP 2.6; R1): best pipeline, NP-tier candidates only. NOT SUBMITTED.
+#   board(P3) = pi_1 x C1 + pi_2np x C2-NP of the same pipeline (C2-PC and C3h are 0 by design)
+# Best pipeline today = Baseline 1 (configs/b1_library.yaml); swap in the newest milestone
+# config (keep probe_assemble last and probe_rule np_only).
+#   python scripts/evaluate.py --config configs/probe_p3_np_only.yaml --tag probe_p3 --panel full
+submission_tag: probe_p3_np_only
+pipeline_plugins: [casmi.libmatch, casmi.probes]
+pipeline_stages: [mass, pool, lib, features, score, probe_assemble]
+probe_rule: np_only
+db_tiers: [np, pubchem]
+n_jobs: 2
+batch_molecules: 50
+lib_mass_tol_ppm: 10.0
+lib_sim: graded
+fusion_lib_cos_min: 0.95
+fusion_lib_min_matched: 4
+fusion_lib_weak: true
+fusion_lib_weak_additive: true
+fusion_lib_weak_weight: 1.0
+fusion_lib_weak_cos_min: 0.5
+fusion_lib_weak_min_matched: 2
+fusion_lib_demote: true
+fusion_lib_demote_cos_max: 0.2
+fusion_lib_demote_factor: 1.0

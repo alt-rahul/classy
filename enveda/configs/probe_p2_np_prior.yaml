@@ -1,0 +1,8 @@
+# Probe P2 (ROADMAP 2.6; R1): NP tier by prior = Baseline 0. DONE: public 0.154 (submission 1,
+# docs/SUBMISSIONS.md). It measures the fame of class 1 + class 2-NP and calibrates w_obs
+# (splits/holdout_v2.json); in scripts/class_mix.py it is the "calibration" probe.
+# Same as configs/b0_npdb.yaml, listed here so that the probe table is complete.
+submission_tag: probe_p2_np_prior
+db_tiers: [np]
+n_jobs: 2
+batch_molecules: 400

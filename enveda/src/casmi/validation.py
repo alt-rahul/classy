@@ -988,14 +988,18 @@ def _has_generator(cfg: Config) -> bool:
 def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, condition: str,
              cfg: Config, keys: Mapping[str, frozenset], *, db: Any = None, library: Any = None,
              lib_mkeys: Mapping[str, str] | None = None, batch: int | None = None,
-             n_jobs: int = 1, strict: bool = True, leak_check: bool = True) -> CellResult:
-    """Run ``predict_fn`` on one (set, condition) cell and score it (per-molecule table)."""
+             n_jobs: int = 1, strict: bool = True, leak_check: bool = True,
+             excl: Mapping[str, MoleculeExclusion] | None = None) -> CellResult:
+    """Run ``predict_fn`` on one (set, condition) cell and score it (per-molecule table).
+
+    ``excl``: precomputed exclusions (protocol v2 cells, ``exclusions_v2``); default
+    ``condition_exclusions(truth, condition, keys)``."""
     from . import db as cdb
     from .metric import mkeys, reciprocal_ranks
 
     t0 = time.perf_counter()
     set_name = str(truth["set"].iloc[0]) if len(truth) else "?"
-    excl = condition_exclusions(truth, condition, keys)
+    excl = dict(excl) if excl is not None else condition_exclusions(truth, condition, keys)
     spec2mol = dict(zip(queries["spectrum_id"].astype(str), queries["molecule_id"].astype(str)))
     hooks = ValidationHooks(condition, excl, spec2mol, cfg.mass_tol_ppm, lib_mkeys)
     in_cell = pd.Series(True, index=truth["molecule_id"].astype(str))
@@ -1260,3 +1264,1248 @@ def append_experiments(summary: Mapping[str, Any], tag: str, config: str, path: 
     lines.insert(end + 1, row)
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
+
+
+# ======================================================================================
+# Protocol v2 (ROADMAP section 2; package R1)
+# ======================================================================================
+#
+# Cells (ROADMAP 2.2), per holdout molecule, on top of the v1 query tables (the v1 sets'
+# rows are unchanged in splits/holdout_v2.csv, so their query and truth files are reused;
+# C2-ZEN comes from R2's ``queries_c2_zen.parquet`` / ``truth_c2_zen.parquet``):
+#
+# - C1     NP-TIMS (primary, in the proxy) and NP-OTHER with eligible_c1 (secondary, reported
+#          as "C1o"); v1 C1 mask: the query library's own spectra of the molecule hidden.
+# - C2-NP  c2_cell "NP" (NP-TIMS, NP-OTHER in the NP tier); v1 C2 mask (all spectra of the
+#          molecule hidden, external libraries included: the mask is by ik14 group over every
+#          library in the Library object).
+# - C2-PC  c2_cell "PC" (SYN-TIMS without public spectra, C2-ZEN); C2 mask.
+# - C3h    NP-TIMS + NP-OTHER; C2 mask, plus the truth keys and every structure with Morgan-2
+#          Tanimoto >= ``val_v2_c3h_tanimoto`` to the truth removed: from the library (spectra
+#          of train structures; ``c3h_neighbours`` "lib"), from the DB lookups (NP tier full
+#          scan, train structures, and optionally PubChem-only rows within
+#          ``val_v2_c3h_pubchem_ppm`` of the truth mass; "db"). Generator seeds come from
+#          those lookups and library searches, so they are covered.
+# - C3e    NP-TIMS + NP-OTHER; v1 C3 (truth keys only). Reported, never decided on.
+#
+# Without a generator stage C3h and C3e are 0 by construction (the truth is removed from
+# every pool); ``evaluate_v2`` then records them as structural zeros (``structural`` True)
+# without running the pipeline (``run_c3=True`` forces a run).
+#
+# The decision number (2.4): P(mix) = pi_1 C1 + pi_2np C2-NP + pi_2pc C2-PC + pi_3 C3h, with
+# cell means weighted by w_fast (fast panel: inverse inclusion probability) times, for C1 /
+# C1o / C2-NP, w_obs = (1 + pmid_count) ** -alpha_mix (alpha per mix from holdout_v2.json,
+# calibrated so that b0 scores the board's 0.154: ``calibrate_alpha``). C1 is weighted too:
+# with C1 unweighted, b0's C1 alone (0.822 x 0.17 = 0.140) would leave no feasible alpha.
+#
+# How other packages call it
+# --------------------------
+# CLI (preferred): ``scripts/evaluate.py --config X --tag T [--panel fast|full] [--mix A,B,C]
+# [--blind] [--store-pools]``, ``--from-pools TAG [--score-col COL | --config Y]`` (rescore
+# stored pools in seconds), ``--compare TAG_A TAG_B`` (paired bootstrap + adoption verdict).
+# Python:
+#   table, _ = evaluate_v2(pipeline_predictor, cfg, panel="fast", library=lib)
+#   rep = proxy_report(table, attrs)                       # P(A), P(B), P(C), cells, CIs
+#   cmp = paired_report(table_old, table_new, attrs)       # differences + adopt verdict
+#   tab = ranks_from_pools(pools, cfg, score="my_score")   # R5/R8: rank stored pools
+# ``attrs`` = ``v2_attributes(load_holdout_v2())`` (one row per mkey). A ranker (R8) that
+# writes a score column into the stored pools (or R5 feature tables with the same identity
+# columns: set, cell, molecule_id, ik14, smiles, tier/in_np/is_lib, ppm_err, is_truth) gets
+# the full proxy from ``ranks_from_pools`` + ``proxy_report`` without rerunning anything.
+
+CELLS_V2: tuple[str, ...] = ("C1", "C2-NP", "C2-PC", "C3h", "C3e")
+CELL_CONDITION = {"C1": "C1", "C2-NP": "C2", "C2-PC": "C2", "C3h": "C3", "C3e": "C3"}
+REPORT_CELLS: tuple[str, ...] = ("C1", "C1o", "C2-NP", "C2-PC", "C3h", "C3e")
+PROXY_CELLS: tuple[str, ...] = ("C1", "C2-NP", "C2-PC", "C3h")
+W_OBS_CELLS = frozenset(("C1", "C1o", "C2-NP"))
+PANELS = ("fast", "full")
+RESULT_V2_COLUMNS = ("cell", *RESULT_COLUMNS, "structural")
+POOL_ID_COLUMNS = ("set", "cell", "molecule_id", "ik14", "smiles", "tier", "db_tier", "in_np",
+                   "is_lib", "is_gen", "ppm_err", "score", "is_truth", "pool_rank")
+
+
+def v2_mixes(cfg: Config) -> dict[str, np.ndarray]:
+    """name -> (pi C1, pi C2-NP, pi C2-PC, pi C3h) from ``cfg.val_v2_mixes``."""
+    out = {}
+    for row in cfg.val_v2_mixes:
+        name, *w = row
+        out[str(name)] = np.asarray(w, np.float64)
+    return out
+
+
+def parse_mixes(text: str | Sequence[str] | None, cfg: Config) -> list[str]:
+    allm = v2_mixes(cfg)
+    if text is None or text == "" or text == "all":
+        return list(allm)
+    names = [t.strip() for t in (text.split(",") if isinstance(text, str) else text) if t.strip()]
+    bad = [n for n in names if n not in allm]
+    if bad:
+        raise ValueError(f"unknown mix {bad}; known {sorted(allm)}")
+    return names
+
+
+def v2_attributes(ho2: pd.DataFrame) -> pd.DataFrame:
+    """One row per molecule (index mkey): set, fold, eligible_c1, pmid_count, c2_cell,
+    has_public_spectra, n_ext_lib, fast, w_fast, w_obs (from a v2 holdout table)."""
+    from .splits import holdout_v2_molecules
+
+    m = holdout_v2_molecules(ho2)
+    cols = ["mkey", "set", "fold", "eligible_c1", "pmid_count", "c2_cell", "has_public_spectra",
+            "n_ext_lib", "fast", "w_fast", "w_obs", "in_np", "in_pubchem"]
+    m = m[[c for c in cols if c in m.columns]].copy()
+    return m.set_index(m["mkey"].astype(str))
+
+
+def cell_mask(truth: pd.DataFrame, attrs: pd.DataFrame, cell: str, panel: str = "full") -> np.ndarray:
+    """Rows of ``truth`` (one set's truth table) that belong to ``cell`` on ``panel``."""
+    from .splits import NP_SETS
+
+    a = attrs.reindex(truth["mkey"].astype(str))
+    known = a["set"].notna().to_numpy().copy()
+    s = truth["set"].astype(str).to_numpy()
+    if panel == "fast":
+        known = known & a["fast"].fillna(False).astype(bool).to_numpy()
+    elif panel != "full":
+        raise ValueError(f"unknown panel {panel!r}")
+    np_set = np.isin(s, NP_SETS)
+    c2 = a["c2_cell"].fillna("none").astype(str).to_numpy()
+    if cell == "C1":
+        m = np_set & truth["eligible_c1"].astype(bool).to_numpy()
+    elif cell == "C2-NP":
+        m = np_set & (c2 == "NP")
+    elif cell == "C2-PC":
+        m = c2 == "PC"
+    elif cell in ("C3h", "C3e"):
+        m = np_set
+    else:
+        raise ValueError(f"unknown cell {cell!r}")
+    return known & m
+
+
+# --------------------------------------------------------------------------------------
+# C3h near neighbours
+# --------------------------------------------------------------------------------------
+
+def _u64(fps: np.ndarray) -> np.ndarray:
+    a = np.ascontiguousarray(np.asarray(fps, dtype=np.uint8))
+    if a.shape[1] % 8:
+        a = np.pad(a, ((0, 0), (0, 8 - a.shape[1] % 8)))
+    return a.view(np.uint64)
+
+
+def _popcounts(u: np.ndarray, chunk: int = 1 << 17) -> np.ndarray:
+    out = np.empty(len(u), np.int32)
+    for a in range(0, len(u), chunk):
+        out[a:a + chunk] = np.bitwise_count(u[a:a + chunk]).sum(axis=1, dtype=np.int32)
+    return out
+
+
+class TanimotoIndex:
+    """Packed fingerprints sorted by popcount for thresholded Tanimoto scans.
+
+    ``query(fp, thr)`` returns the input-row indices with Tanimoto >= thr, scanning only the
+    popcount band [thr * a, a / thr] (Tanimoto <= min(a, b) / max(a, b))."""
+
+    def __init__(self, fps: np.ndarray, chunk: int = 1 << 16):
+        u = _u64(fps)
+        pc = _popcounts(u)
+        self.order = np.argsort(pc, kind="mergesort")
+        self.pc = pc[self.order]
+        self.fps = u[self.order]
+        self.chunk = int(chunk)
+
+    def __len__(self) -> int:
+        return len(self.order)
+
+    def query(self, fp: np.ndarray, thr: float) -> tuple[np.ndarray, np.ndarray]:
+        q = _u64(np.atleast_2d(fp))[0]
+        a = int(np.bitwise_count(q).sum())
+        if a == 0:
+            return np.zeros(0, np.int64), np.zeros(0, np.float32)
+        lo = int(math.ceil(thr * a - 1e-9))
+        hi = int(math.floor(a / thr + 1e-9))
+        s0, s1 = np.searchsorted(self.pc, [lo, hi + 1])
+        idx, sims = [], []
+        for s in range(int(s0), int(s1), self.chunk):
+            e = min(int(s1), s + self.chunk)
+            inter = np.bitwise_count(self.fps[s:e] & q).sum(axis=1, dtype=np.int32)
+            t = inter / (a + self.pc[s:e] - inter)
+            k = np.flatnonzero(t >= thr - 1e-12)
+            if len(k):
+                idx.append(self.order[s + k])
+                sims.append(t[k].astype(np.float32))
+        if not idx:
+            return np.zeros(0, np.int64), np.zeros(0, np.float32)
+        return np.concatenate(idx), np.concatenate(sims)
+
+
+def train_fingerprints(cfg: Config, train_dir: Path | str | None = None, n_jobs: int = 1,
+                       cache_dir: Path | str | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """(ik14, packed Morgan fps (n, 512)) of every parseable train structure (``chem.morgan_fps``,
+    the same fp_mol + Morgan-2 4096 as the NP tier's np_fp.npy). Cached in ``cache_dir``
+    (default PROCESSED/validation): train_fp.npy + train_fp_ik14.parquet."""
+    from .chem import morgan_fps
+
+    td = Path(train_dir) if train_dir is not None else paths.PROCESSED / "train"
+    cd = paths.ensure_dir(cache_dir if cache_dir is not None else validation_dir())
+    fp_p, ik_p = cd / "train_fp.npy", cd / "train_fp_ik14.parquet"
+    st = pd.read_parquet(td / "structures.parquet", columns=["ik14", "smiles", "rdkit_ok"])
+    st = st[st["rdkit_ok"].astype(bool) & st["smiles"].notna()].sort_values("ik14", kind="mergesort")
+    if fp_p.exists() and ik_p.exists():
+        ik = pd.read_parquet(ik_p)["ik14"].to_numpy(object)
+        if len(ik) == len(st) and (ik == st["ik14"].to_numpy(object)).all():
+            return ik, np.load(fp_p, mmap_mode="r")
+    t0 = time.perf_counter()
+    fps, ok = morgan_fps(st["smiles"].tolist(), cfg, n_jobs=n_jobs)
+    fps[~ok] = 0
+    np.save(fp_p, fps)
+    pd.DataFrame({"ik14": st["ik14"].to_numpy(object)}).to_parquet(ik_p, index=False)
+    log.info("train fingerprints: %d structures (%d failed) in %.1f s", len(st), int((~ok).sum()),
+             time.perf_counter() - t0)
+    return st["ik14"].to_numpy(object), fps
+
+
+def _np_tier_fps(dbh: Any) -> tuple[np.ndarray, np.ndarray]:
+    from . import db as cdb
+
+    d = cdb.np_dir()
+    ik = pd.read_parquet(d / "np.parquet", columns=["ik14"])["ik14"].to_numpy(object)
+    fps = np.load(d / "np_fp.npy", mmap_mode="r")
+    assert len(ik) == len(fps), "np.parquet and np_fp.npy are not row-aligned"
+    return ik, fps
+
+
+C3H_CACHE_COLUMNS = ("mkey", "source", "thr", "ik14", "n")
+
+
+def c3h_neighbours(truth: pd.DataFrame, cfg: Config, *, train_dir: Path | str | None = None,
+                   db: Any = None, n_jobs: int = 1, cache_path: Path | str | None = None,
+                   sources: Sequence[str] = ("train", "np"), pubchem: bool = False,
+                   pubchem_max: int | None = None) -> dict[str, dict[str, frozenset]]:
+    """mkey -> {"train": ik14 set, "np": ..., "pubchem": ...} of structures with Morgan-2
+    Tanimoto >= ``cfg.val_v2_c3h_tanimoto`` to the truth (the truth's own ik14 group
+    included where present). Cached per (mkey, source, threshold) in ``cache_path``
+    (default PROCESSED/validation/c3h_neighbours.parquet).
+
+    Sources: "train" (all train structures: library spectra and their DB rows), "np" (full NP
+    tier scan with np_fp.npy), "pubchem" (``pubchem=True``: PubChem-only rows within
+    ``cfg.val_v2_c3h_pubchem_ppm`` of the truth mass, fingerprints computed on the fly; at
+    most ``pubchem_max`` molecules per call, in truth order, the rest stay uncached).
+    """
+    from .chem import morgan_fps
+
+    thr = float(cfg.val_v2_c3h_tanimoto)
+    cp = Path(cache_path) if cache_path is not None else validation_dir() / "c3h_neighbours.parquet"
+    srcs = list(sources) + (["pubchem"] if pubchem else [])
+    cache = (pd.read_parquet(cp) if cp.exists() else pd.DataFrame(columns=list(C3H_CACHE_COLUMNS)))
+    have = {(str(m), str(s)) for m, s, t in zip(cache["mkey"], cache["source"], cache["thr"])
+            if abs(float(t) - thr) < 1e-9}
+    tr = truth.drop_duplicates("mkey")
+    new_rows = []
+    todo_any = [s for s in srcs if any((str(m), s) not in have for m in tr["mkey"])]
+    if todo_any:
+        qfps, ok = morgan_fps(tr["smiles"].tolist(), cfg, n_jobs=n_jobs)
+        mk = tr["mkey"].astype(str).to_numpy(object)
+        for s in todo_any:
+            sel = [i for i in range(len(tr)) if (mk[i], s) not in have]
+            if s == "pubchem" and pubchem_max is not None:
+                sel = sel[:max(0, int(pubchem_max))]
+            if not sel:
+                continue
+            t0 = time.perf_counter()
+            if s in ("train", "np"):
+                if s == "train":
+                    ik, fps = train_fingerprints(cfg, train_dir, n_jobs)
+                else:
+                    ik, fps = _np_tier_fps(db)
+                index = TanimotoIndex(fps)
+                for i in sel:
+                    hit = index.query(qfps[i], thr)[0] if ok[i] else np.zeros(0, np.int64)
+                    ks = sorted({str(x) for x in ik[hit]})
+                    new_rows.append({"mkey": mk[i], "source": s, "thr": thr, "ik14": ";".join(ks),
+                                     "n": len(ks)})
+                del index
+            else:
+                from . import db as cdb
+
+                dbh = db if db is not None else cdb.get_db(cfg)
+                for a in range(0, len(sel), 20):
+                    part = [sel[j] for j in range(a, min(a + 20, len(sel)))]
+                    res = dbh.lookup_batch(tr["mono_mass"].to_numpy(np.float64)[part],
+                                           tol_ppm=cfg.val_v2_c3h_pubchem_ppm, tiers=("pubchem",),
+                                           keys=[mk[i] for i in part])
+                    res = res[res["tier"].astype(str) == "pubchem"]
+                    for i in part:
+                        r = res[res["query"].astype(str) == mk[i]]
+                        ks: list[str] = []
+                        if len(r) and ok[i]:
+                            f, okc = morgan_fps(r["smiles"].tolist(), cfg, n_jobs=n_jobs)
+                            from .chem import tanimoto
+
+                            t = tanimoto(qfps[i], f)
+                            ks = sorted({str(x) for x in r["ik14"].to_numpy(object)[(t >= thr) & okc]})
+                        new_rows.append({"mkey": mk[i], "source": s, "thr": thr,
+                                         "ik14": ";".join(ks), "n": len(ks)})
+                    try:
+                        dbh.release()
+                    except Exception:  # noqa: BLE001
+                        pass
+            log.info("c3h neighbours %s: %d molecules in %.1f s", s, len(sel), time.perf_counter() - t0)
+        if new_rows:
+            allc = pd.concat([cache, pd.DataFrame(new_rows, columns=list(C3H_CACHE_COLUMNS))],
+                             ignore_index=True)
+            allc = allc.drop_duplicates(["mkey", "source", "thr"], keep="last").sort_values(
+                ["source", "mkey"], kind="mergesort")
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            allc.to_parquet(cp, index=False)
+            cache = allc
+    out: dict[str, dict[str, frozenset]] = defaultdict(dict)
+    c = cache[(cache["thr"].astype(float) - thr).abs() < 1e-9]
+    want = set(tr["mkey"].astype(str))
+    for m, s, v in zip(c["mkey"].astype(str), c["source"].astype(str), c["ik14"]):
+        if m in want and s in srcs:
+            out[m][s] = frozenset(str(v).split(";")) if isinstance(v, str) and v else _EMPTY
+    return dict(out)
+
+
+def c3h_removed_counts(truth: pd.DataFrame, keys: Mapping[str, frozenset],
+                       near: Mapping[str, Mapping[str, frozenset]]) -> pd.DataFrame:
+    """Per molecule: structures C3h removes (truth keys, neighbours by source, total)."""
+    rows = []
+    for r in truth.itertuples(index=False):
+        tk = keys.get(str(r.molecule_id), frozenset(str(r.ik14_group).split(";")))
+        nb = near.get(str(r.mkey), {})
+        allnb = frozenset().union(*nb.values()) if nb else _EMPTY
+        rows.append({"molecule_id": str(r.molecule_id), "mkey": str(r.mkey), "set": r.set,
+                     "n_truth_keys": len(tk), **{f"n_{s}": len(v - tk) for s, v in nb.items()},
+                     "n_neighbours": len(allnb - tk), "n_removed": len(allnb | tk)})
+    return pd.DataFrame(rows)
+
+
+def exclusions_v2(truth: pd.DataFrame, cell: str, keys: Mapping[str, frozenset],
+                  near: Mapping[str, Mapping[str, frozenset]] | None = None
+                  ) -> dict[str, MoleculeExclusion]:
+    """Per-molecule exclusions of a v2 cell (module notes). C3h needs ``near``
+    (``c3h_neighbours``); a molecule without an entry gets only the C3e exclusions."""
+    cond = CELL_CONDITION[cell]
+    base = condition_exclusions(truth, cond, keys)
+    if cell != "C3h":
+        return base
+    if near is None:
+        raise ValueError("C3h needs the near-neighbour sets (c3h_neighbours)")
+    mk = dict(zip(truth["molecule_id"].astype(str), truth["mkey"].astype(str)))
+    out = {}
+    for m, e in base.items():
+        nb = near.get(mk[m], {})
+        lib_nb = nb.get("train", _EMPTY)
+        db_nb = frozenset().union(*nb.values()) if nb else _EMPTY
+        out[m] = MoleculeExclusion(molecule_id=e.molecule_id, mkey=e.mkey, group=e.group | lib_nb,
+                                   lib_libs=None, db_ik14=e.db_ik14 | db_nb, truth=e.truth)
+    return out
+
+
+# --------------------------------------------------------------------------------------
+# spectrum-blind audit
+# --------------------------------------------------------------------------------------
+
+def blind_queries(queries: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Every spectrum's peaks replaced by one constant spectrum (``cfg.val_v2_blind_mz`` /
+    ``val_v2_blind_int``: mass defect 0.5, matches no real fragment); precursor, adduct,
+    polarity and collision energy kept, so mass and pools are unchanged and whatever MRR
+    survives is prior (ROADMAP 2.4)."""
+    q = queries.copy()
+    mz = [float(x) for x in cfg.val_v2_blind_mz]
+    it = [float(x) for x in cfg.val_v2_blind_int]
+    q["ms2_mzs"] = [np.asarray(mz, np.float64) for _ in range(len(q))]
+    q["ms2_normalized_intensities"] = [np.asarray(it, np.float64) for _ in range(len(q))]
+    return q
+
+
+# --------------------------------------------------------------------------------------
+# stored pools
+# --------------------------------------------------------------------------------------
+
+class PoolStore:
+    """Scored candidate pools captured right before assembly (``pool_capture_predictor``),
+    one frame per (set, cell), shortlisted: every LIB / NP-tier / GEN row and every truth row,
+    PubChem-only rows only down to ``keep`` per molecule (by the pipeline's emission order).
+    Columns: POOL_ID_COLUMNS plus every numeric or boolean pool column (features)."""
+
+    def __init__(self, keep: int = 300):
+        self.keep = int(keep)
+        self.current: tuple[str, str] | None = None
+        self.keys: Mapping[str, frozenset] = {}
+        self.parts: dict[tuple[str, str], list[pd.DataFrame]] = defaultdict(list)
+        self.pool_sizes: dict[tuple[str, str], dict[str, int]] = defaultdict(dict)
+
+    def begin(self, set_name: str, cell: str, keys: Mapping[str, frozenset]) -> None:
+        self.current = (str(set_name), str(cell))
+        self.keys = keys
+
+    def capture(self, pool: pd.DataFrame | None, cfg: Config) -> None:
+        from . import fusion
+
+        if self.current is None or pool is None or not len(pool):
+            return
+        p = pool
+        if "score" not in p.columns:
+            p = p.assign(score=fusion.fuse(p, cfg))
+        p = fusion.sort_pool(p, cfg=cfg)
+        mid = p["molecule_id"].astype(str).to_numpy(object)
+        ik = p["ik14"].astype(object).to_numpy(object)
+        truth = np.fromiter((k in self.keys.get(m, _EMPTY) for m, k in zip(mid, ik)), bool, len(p))
+        src = fusion.candidate_source(p)
+        pos = p.groupby(mid, sort=False).cumcount().to_numpy()
+        pc_rank = pd.Series(src == "pubchem").groupby(mid).cumsum().to_numpy()
+        keep = (src != "pubchem") | truth | (pc_rank <= self.keep)
+        for m, n in pd.Series(mid).value_counts().items():
+            self.pool_sizes[self.current][str(m)] = int(n)
+        cols = [c for c in p.columns if c in POOL_ID_COLUMNS or
+                pd.api.types.is_numeric_dtype(p[c]) or pd.api.types.is_bool_dtype(p[c])]
+        out = p.loc[keep, cols].copy()
+        out["is_truth"] = truth[keep]
+        out["pool_rank"] = pos[keep] + 1
+        out.insert(0, "cell", self.current[1])
+        out.insert(0, "set", self.current[0])
+        self.parts[self.current].append(out)
+
+    def frames(self) -> dict[tuple[str, str], pd.DataFrame]:
+        out = {}
+        for k, parts in self.parts.items():
+            df = pd.concat(parts, ignore_index=True)
+            df = df.drop_duplicates(["molecule_id", "ik14"], keep="last").reset_index(drop=True)
+            df["n_pool"] = df["molecule_id"].astype(str).map(self.pool_sizes[k]).fillna(0).astype(np.int64)
+            out[k] = df
+        return out
+
+    def save(self, out_dir: Path | str) -> list[Path]:
+        d = paths.ensure_dir(out_dir)
+        written = []
+        for (s, c), df in self.frames().items():
+            p = d / f"{set_slug(s)}__{c}.parquet"
+            for col in df.columns:
+                if df[col].dtype != object or col in ("set", "cell", "molecule_id", "ik14",
+                                                      "smiles", "tier", "db_tier"):
+                    continue
+                if col in ("in_np", "is_lib", "is_gen"):
+                    df[col] = df[col].astype("boolean")
+                else:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df.to_parquet(p, index=False)
+            written.append(p)
+        return written
+
+
+def pool_capture_predictor(store: PoolStore, base: Predictor | None = None) -> Predictor:
+    """``pipeline.predict`` with the assemble stage wrapped so that ``store`` captures the
+    scored pool of every batch (``base`` is ignored; kept for symmetry with other predictors)."""
+
+    def predict(test_df: pd.DataFrame, cfg: Config | None = None, **kwargs: Any) -> dict[str, list[str]]:
+        from . import pipeline
+
+        cfg = cfg or Config()
+        pipeline.load_plugins(cfg)
+        names = list(cfg.pipeline_stages)
+        last = names[-1]
+        inner = pipeline.get_stage(last)
+
+        def wrapped(state: Any, c: Config) -> Any:
+            store.capture(state.pool, c)
+            return inner(state, c)
+
+        stages = dict(kwargs.pop("stages", None) or {})
+        stages[last] = wrapped
+        return pipeline.predict(test_df, cfg, stages=stages, **kwargs)
+
+    return predict
+
+
+def load_pools(pool_dir: Path | str, sets: Sequence[str] | None = None,
+               cells: Sequence[str] | None = None) -> pd.DataFrame:
+    """Concatenate stored pools (``PoolStore.save`` layout) for the given sets and cells."""
+    d = Path(pool_dir)
+    parts = []
+    for p in sorted(d.glob("*__*.parquet")):
+        df = pd.read_parquet(p)
+        if not len(df):
+            continue
+        if sets is not None and str(df["set"].iloc[0]) not in sets:
+            continue
+        if cells is not None and str(df["cell"].iloc[0]) not in cells:
+            continue
+        parts.append(df)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=list(POOL_ID_COLUMNS))
+
+
+def ranks_from_pools(pools: pd.DataFrame, cfg: Config, score: Any = None, *,
+                     exact: bool = True, n_jobs: int = 1,
+                     fallback: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rank of the truth per (set, cell, molecule) in stored pools under a new score.
+
+    ``score``: None (the stored "score"), a column name, or ``callable(pools, cfg) -> array``
+    (e.g. ``fusion.fuse`` with another config, or an R8 ranker). Emission order is
+    ``fusion.sort_pool`` (score desc, source, |ppm|, ik14); the rank counts distinct metric
+    keys ahead of the first truth row (``exact``: mkeys of the canonical SMILES of the rows
+    ahead, disk cache; else ik14), unparseable SMILES skipped, up to ``cfg.top_k``. A molecule
+    whose truth is not in its stored pool keeps the rr of ``fallback`` (the original run's
+    result table: its truth came from padding, whose position does not depend on the score),
+    else 0. Returns a v2 result table (RESULT_V2_COLUMNS subset: set, cell, molecule_id, rr,
+    rank, top1, top5, top25, in_pool_main)."""
+    from . import fusion
+    from .chem import canonical_smiles
+    from .metric import mkeys
+
+    if not len(pools):
+        return pd.DataFrame(columns=["set", "cell", "molecule_id", "rr", "rank"])
+    p = pools.copy()
+    if score is None:
+        sc = p["score"].to_numpy(np.float64)
+    elif isinstance(score, str):
+        sc = pd.to_numeric(p[score], errors="coerce").to_numpy(np.float64)
+    else:
+        sc = np.asarray(score(p, cfg), np.float64)
+    p["_s"] = sc
+    p["_grp"] = p["set"].astype(str) + "|" + p["cell"].astype(str) + "|" + p["molecule_id"].astype(str)
+    p = fusion.sort_pool(p, score_col="_s", group="_grp", cfg=cfg)
+    k = int(cfg.top_k)
+    grp = p["_grp"].to_numpy(object)
+    truth = p["is_truth"].astype(bool).to_numpy()
+    starts = np.flatnonzero(np.r_[True, grp[1:] != grp[:-1]])
+    ends = np.r_[starts[1:], len(p)]
+    # rows ahead of the first truth row, at most 3 * top_k per molecule (extended if needed)
+    prefix: dict[str, tuple[int, int, int]] = {}
+    for a, b in zip(starts, ends):
+        t = np.flatnonzero(truth[a:b])
+        first = a + int(t[0]) if len(t) else -1
+        stop = first if first >= 0 else b
+        prefix[grp[a]] = (a, stop, first)
+    smi = p["smiles"].astype(object).to_numpy(object)
+    ik = p["ik14"].astype(object).to_numpy(object)
+
+    def keys_for(rows: np.ndarray) -> list[Any]:
+        if not exact:
+            return [ik[i] if isinstance(smi[i], str) else None for i in rows]
+        can = [canonical_smiles(smi[i]) if isinstance(smi[i], str) else None for i in rows]
+        mk = mkeys([c for c in can if c], cfg, n_jobs=n_jobs, cache=True,
+                   timeout_s=cfg.mkey_timeout_s) if any(can) else []
+        it = iter(mk)
+        return [(next(it) or ik[i]) if c else None for c, i in zip(can, rows)]
+
+    want = []
+    for g, (a, stop, first) in prefix.items():
+        want.append(np.arange(a, min(stop, a + 3 * k)))
+    rows_all = np.concatenate(want) if want else np.zeros(0, np.int64)
+    kmap = dict(zip(rows_all.tolist(), keys_for(rows_all)))
+    fb = {}
+    if fallback is not None and len(fallback):
+        f = fallback
+        fb = {f"{s}|{c}|{m}": (float(r) if np.isfinite(r) else 0.0)
+              for s, c, m, r in zip(f["set"].astype(str), f["cell"].astype(str),
+                                    f["molecule_id"].astype(str), f["rr"].astype(float))}
+    out = []
+    for g, (a, stop, first) in prefix.items():
+        seen: set = set()
+        n_ext = min(stop, a + 3 * k)
+        rank = 0
+        i = a
+        while i < stop and len(seen) < k:
+            if i >= n_ext:  # many duplicate keys: extend the prefix
+                more = np.arange(n_ext, min(stop, n_ext + 3 * k))
+                kmap.update(zip(more.tolist(), keys_for(more)))
+                n_ext = int(more[-1]) + 1
+            key = kmap.get(i)
+            if key is not None:
+                seen.add(key)
+            i += 1
+        if first >= 0 and len(seen) < k:
+            rank = len(seen) + 1
+        s, c, m = g.split("|", 2)
+        if first < 0:
+            rr = fb.get(g, 0.0)
+            rank = int(round(1 / rr)) if rr > 0 else 0
+        else:
+            rr = 1.0 / rank if rank else 0.0
+        out.append({"set": s, "cell": c, "molecule_id": m, "rr": rr, "rank": rank,
+                    "top1": rank == 1, "top5": 0 < rank <= 5, "top25": 0 < rank <= 25,
+                    "in_pool_main": first >= 0})
+    return pd.DataFrame(out)
+
+
+def rescore_table(base: pd.DataFrame, ranks: pd.DataFrame) -> pd.DataFrame:
+    """``base`` (a v2 result table) with rr / rank / hits replaced from ``ranks_from_pools``
+    where the (set, cell, molecule) was stored; structural rows and cells without stored
+    pools keep their values."""
+    key = ["set", "cell", "molecule_id"]
+    b = base.copy()
+    r = ranks.set_index(key)
+    idx = pd.MultiIndex.from_frame(b[key].astype(str))
+    hit = idx.isin(r.index)
+    for c in ("rr", "rank", "top1", "top5", "top25"):
+        if c in r.columns:
+            b.loc[hit, c] = r.loc[idx[hit], c].to_numpy()
+    return b
+
+
+# --------------------------------------------------------------------------------------
+# running the v2 cells
+# --------------------------------------------------------------------------------------
+
+def v2_sets(val_dir: Path | str | None = None) -> list[str]:
+    """Sets whose query and truth files exist (the v1 sets, plus C2-ZEN once R2 built it)."""
+    from .splits import SETS_V2
+
+    d = Path(val_dir) if val_dir is not None else validation_dir()
+    return [s for s in SETS_V2 if (d / f"queries_{set_slug(s)}.parquet").exists()
+            and (d / f"truth_{set_slug(s)}.parquet").exists()]
+
+
+def _structural_rows(truth: pd.DataFrame, cell: str) -> pd.DataFrame:
+    n = len(truth)
+    return pd.DataFrame({
+        "cell": cell, "set": truth["set"].astype(str).to_numpy(), "condition": CELL_CONDITION[cell],
+        "molecule_id": truth["molecule_id"].astype(str).to_numpy(), "mkey": truth["mkey"].to_numpy(),
+        "fold": truth["fold"].astype(int).to_numpy(), "in_cell": True, "rr": 0.0, "rank": 0,
+        "top1": False, "top5": False, "top25": False, "in_pool_main": False, "in_pool_any": False,
+        "n_pool_main": 0, "n_pool_any": 0, "n_guesses": 0, "truth_in_preds": False,
+        "pubmed0": [bool(pd.isna(x) or int(x) == 0) for x in truth["pubmed_count"]],
+        "mass_tercile": truth["mass_tercile"].astype(int).to_numpy(),
+        "n_query_spectra": truth["n_query_spectra"].astype(int).to_numpy(), "structural": True,
+    }, columns=list(RESULT_V2_COLUMNS)).iloc[:n]
+
+
+def evaluate_v2(predict_fn: Predictor, cfg: Config, *, panel: str = "fast",
+                cells: Sequence[str] = CELLS_V2, sets: Sequence[str] | None = None,
+                holdout: pd.DataFrame | Path | str | None = None,
+                val_dir: Path | str | None = None, library: Any = None,
+                train_dir: Path | str | None = None, batch: int | None = None, n_jobs: int = 1,
+                strict: bool = True, db: Any = None, leak_check: bool = True,
+                blind: bool = False, store: PoolStore | None = None, run_c3: bool = False,
+                c3h_pubchem: bool = False, max_molecules: int | None = None
+                ) -> tuple[pd.DataFrame, list[CellResult]]:
+    """Run the v2 cells (module notes) on ``panel``; returns the per-(molecule, cell) table
+    (RESULT_V2_COLUMNS) and the cell results. ``store``: a PoolStore that ``predict_fn``
+    (``pool_capture_predictor(store)``) fills; ``blind``: constant query spectra."""
+    from .splits import load_holdout_v2
+
+    val_dir = Path(val_dir) if val_dir is not None else validation_dir()
+    ho2 = load_holdout_v2(holdout)
+    attrs = v2_attributes(ho2)
+    lib_mk = _lib_mkeys(library, Path(train_dir) if train_dir is not None else None)
+    sets = list(sets) if sets is not None else v2_sets(val_dir)
+    gen = _has_generator(cfg)
+    parts, cells_out = [], []
+    for s in sets:
+        q, t = load_queries(s, val_dir)
+        if max_molecules:
+            keep = sorted(t["molecule_id"].astype(str))[:max_molecules]
+            t = t[t["molecule_id"].astype(str).isin(keep)].reset_index(drop=True)
+            q = q[q["molecule_id"].isin(keep)].reset_index(drop=True)
+        masks = {c: cell_mask(t, attrs, c, panel) for c in cells}
+        if not any(m.any() for m in masks.values()):
+            continue
+        if blind:
+            q = blind_queries(q, cfg)
+        used = t[np.logical_or.reduce([m for m in masks.values()])].reset_index(drop=True)
+        keys = truth_keys(used, cfg, db=db, n_jobs=n_jobs, cache_path=val_dir / "truth_keys.parquet")
+        near = None
+        for c in cells:
+            tc = t[masks[c]].reset_index(drop=True)
+            if not len(tc):
+                continue
+            if c in ("C3h", "C3e") and not gen and not run_c3:
+                parts.append(_structural_rows(tc, c))
+                log.info("cell %s %s: %d molecules, structural 0 (no generator stage)", s, c, len(tc))
+                continue
+            excl = None
+            if c == "C3h":
+                if near is None:
+                    near = c3h_neighbours(used, cfg, train_dir=train_dir, db=db, n_jobs=n_jobs,
+                                          cache_path=val_dir / "c3h_neighbours.parquet",
+                                          pubchem=c3h_pubchem)
+                excl = exclusions_v2(tc, c, keys, near)
+            elif c != "C1":
+                excl = exclusions_v2(tc, c, keys)
+            qc = q[q["molecule_id"].isin(set(tc["molecule_id"].astype(str)))].reset_index(drop=True)
+            if store is not None:
+                store.begin(s, c, keys)
+            res = run_cell(predict_fn, qc, tc, CELL_CONDITION[c], cfg, keys, db=db, library=library,
+                           lib_mkeys=lib_mk, batch=batch, n_jobs=n_jobs, strict=strict,
+                           leak_check=leak_check, excl=excl)
+            tab = res.table.copy()
+            tab.insert(0, "cell", c)
+            tab["structural"] = False
+            v = tab.loc[tab["in_cell"], "rr"]
+            log.info("v2 cell %s %s (%s mask): %d molecules, unweighted MRR %.4f, %.1f s", s, c,
+                     CELL_CONDITION[c], len(v), float(v.mean()) if len(v) else float("nan"), res.seconds)
+            parts.append(tab[list(RESULT_V2_COLUMNS)])
+            res.condition = c
+            cells_out.append(res)
+    table = (pd.concat(parts, ignore_index=True) if parts
+             else pd.DataFrame(columns=list(RESULT_V2_COLUMNS)))
+    return table, cells_out
+
+
+def self_check_v2(cfg: Config, *, panel: str = "fast", cells: Sequence[str] = CELLS_V2,
+                  sets: Sequence[str] | None = None, holdout: Any = None,
+                  val_dir: Path | str | None = None, library: Any = None,
+                  train_dir: Path | str | None = None, n_jobs: int = 1, db: Any = None,
+                  max_molecules: int | None = None) -> dict[str, float]:
+    """Truth predictor exactly 1.0 and CCO exactly 0.0 in every v2 cell that is run (C3h and
+    C3e included: the self check always runs them, the cheating predictor needs no pools)."""
+    val_dir = Path(val_dir) if val_dir is not None else validation_dir()
+    res = {}
+    for s in (list(sets) if sets is not None else v2_sets(val_dir)):
+        _, t = load_queries(s, val_dir)
+        for name, fn, want in (("truth", truth_predictor(t), 1.0), ("cco", cco_predictor, 0.0)):
+            tab, _ = evaluate_v2(fn, cfg, panel=panel, cells=cells, sets=[s], holdout=holdout,
+                                 val_dir=val_dir, library=library, train_dir=train_dir,
+                                 n_jobs=n_jobs, db=db, leak_check=name != "truth", run_c3=True,
+                                 max_molecules=max_molecules)
+            for c, g in tab.groupby("cell"):
+                g = g[g["in_cell"]]
+                if not len(g):
+                    continue
+                v = float(g["rr"].mean())
+                assert v == want, f"self check v2 {name} {s} {c}: MRR {v} != {want}"
+                res[f"{name}|{s}|{c}"] = v
+    log.info("self check v2 passed: truth 1.0 and CCO 0.0 in %d (set, cell) pairs", len(res) // 2)
+    return res
+
+
+# --------------------------------------------------------------------------------------
+# the decision number, bootstrap, paired comparison
+# --------------------------------------------------------------------------------------
+
+def v1_to_v2(table: pd.DataFrame, attrs: pd.DataFrame, c3h_structural: bool = True) -> pd.DataFrame:
+    """A v1 result table (conditions C1/C2/C3) as v2 rows: C1 -> C1 (NP sets), C2 -> C2-NP /
+    C2-PC by c2_cell (rows with c2_cell "none" dropped), C3 -> C3e. The v1 C1 and C2 masks are
+    the v2 ones, so these cells are exact. ``c3h_structural``: when every C3 rr is 0 (no
+    generator), the C3 rows of the NP sets are also emitted as structural C3h zeros (C3h
+    removes more than C3e, so it cannot score either). Used for the w_obs calibration and to
+    rescore earlier v1 runs."""
+    t = table.copy()
+    c2 = t["mkey"].astype(str).map(attrs["c2_cell"]).fillna("none").to_numpy()
+    cond = t["condition"].astype(str).to_numpy()
+    cell = np.where(cond == "C1", "C1", np.where(cond == "C3", "C3e",
+                    np.where(c2 == "NP", "C2-NP", np.where(c2 == "PC", "C2-PC", ""))))
+    t.insert(0, "cell", cell)
+    t["structural"] = False
+    t = t[t["cell"] != ""]
+    from .splits import NP_SETS
+
+    t = t[~((t["cell"] == "C1") & ~t["set"].isin(NP_SETS))]
+    c3 = t[(t["cell"] == "C3e") & t["set"].isin(NP_SETS)]
+    if c3h_structural and len(c3) and not (c3.loc[c3["in_cell"].astype(bool), "rr"].fillna(0) > 0).any():
+        t = pd.concat([t, c3.assign(cell="C3h", structural=True)], ignore_index=True)
+    return t[list(RESULT_V2_COLUMNS)].reset_index(drop=True)
+
+
+@dataclass
+class _Matrix:
+    mkeys: np.ndarray            # (n,) molecule keys
+    sets: np.ndarray             # (n,) set name
+    rr: np.ndarray               # (n, n_cells) NaN outside the cell
+    top1: np.ndarray
+    wf: np.ndarray               # (n,) panel weight
+    pmid: np.ndarray             # (n,)
+    cells: tuple[str, ...]
+
+
+def _report_cell(cell: str, set_name: str) -> str | None:
+    if cell == "C1":
+        return "C1" if set_name == "NP-TIMS" else ("C1o" if set_name == "NP-OTHER" else None)
+    return cell
+
+
+def _matrix(table: pd.DataFrame, attrs: pd.DataFrame, panel: str,
+            mkey_order: Sequence[str] | None = None) -> _Matrix:
+    t = table[table["in_cell"].astype(bool)].copy()
+    t["rcell"] = [_report_cell(c, s) for c, s in zip(t["cell"].astype(str), t["set"].astype(str))]
+    t = t[t["rcell"].notna()]
+    keys = (np.asarray(sorted(set(t["mkey"].astype(str))), dtype=object) if mkey_order is None
+            else np.asarray(list(mkey_order), dtype=object))
+    pos = {k: i for i, k in enumerate(keys)}
+    cells = REPORT_CELLS
+    rr = np.full((len(keys), len(cells)), np.nan)
+    top1 = np.full((len(keys), len(cells)), np.nan)
+    ci = {c: j for j, c in enumerate(cells)}
+    for k, c, v, h in zip(t["mkey"].astype(str), t["rcell"], t["rr"].astype(float), t["top1"].astype(bool)):
+        i = pos.get(k)
+        if i is None:
+            continue
+        rr[i, ci[c]] = 0.0 if not np.isfinite(v) else v
+        top1[i, ci[c]] = float(h)
+    a = attrs.reindex(keys)
+    sets = a["set"].astype(object).to_numpy(object)
+    if panel == "fast":
+        wf = a["w_fast"].astype(float).fillna(0.0).to_numpy(np.float64)
+    else:
+        wf = np.where(a["set"].notna(), 1.0, 0.0)
+    pm = a["pmid_count"].astype(float).to_numpy(np.float64)
+    on = wf > 0       # molecules off the panel (or unknown to the holdout) do not count at all
+    return _Matrix(keys[on], sets[on], rr[on], top1[on], wf[on], pm[on], cells)
+
+
+def _weights(M: _Matrix, alpha: float) -> np.ndarray:
+    """(n, n_cells) weights: w_fast x w_obs (C1, C1o, C2-NP) or w_fast."""
+    from .splits import w_obs_weights
+
+    wo = w_obs_weights(M.pmid, alpha)
+    w = np.repeat(M.wf[:, None], len(M.cells), axis=1)
+    for j, c in enumerate(M.cells):
+        if c in W_OBS_CELLS:
+            w[:, j] = w[:, j] * wo
+    return w
+
+
+def _cell_means(values: np.ndarray, w: np.ndarray, counts: np.ndarray | None = None) -> np.ndarray:
+    """Weighted means per cell; ``counts`` (B, n) bootstrap multiplicities -> (B, n_cells)."""
+    have = np.isfinite(values)
+    num_w = np.where(have, w * np.nan_to_num(values), 0.0)
+    den_w = np.where(have, w, 0.0)
+    if counts is None:
+        den = den_w.sum(axis=0)
+        return np.where(den > 0, num_w.sum(axis=0) / np.where(den > 0, den, 1.0), np.nan)
+    num = counts @ num_w
+    den = counts @ den_w
+    return np.where(den > 0, num / np.where(den > 0, den, 1.0), np.nan)
+
+
+def _boot_counts(M: _Matrix, n_boot: int, seed: int) -> np.ndarray:
+    """(B, n) multinomial resampling counts of molecules, stratified by set."""
+    rng = np.random.default_rng(seed)
+    counts = np.zeros((n_boot, len(M.mkeys)), np.float64)
+    for s in sorted({str(x) for x in M.sets}):
+        idx = np.flatnonzero(M.sets.astype(str) == s)
+        if not len(idx):
+            continue
+        c = rng.multinomial(len(idx), np.full(len(idx), 1.0 / len(idx)), size=n_boot)
+        counts[:, idx] = c
+    return counts
+
+
+def _proxy(cell_means: np.ndarray, pi: np.ndarray) -> np.ndarray:
+    """P = sum_c pi_c x mean_c over PROXY_CELLS; cell_means (..., n_report_cells)."""
+    j = [REPORT_CELLS.index(c) for c in PROXY_CELLS]
+    return np.asarray(cell_means)[..., j] @ pi
+
+
+def _alphas(cfg: Config, meta: Mapping[str, Any] | None) -> dict[str, float]:
+    a = dict((meta or {}).get("alpha", {}))
+    return {m: float(a.get(m, a.get("A", 0.0))) for m in v2_mixes(cfg)}
+
+
+def proxy_report(table: pd.DataFrame, attrs: pd.DataFrame, cfg: Config, *, panel: str = "fast",
+                 mixes: Sequence[str] | None = None, meta: Mapping[str, Any] | None = None,
+                 n_boot: int | None = None, seed: int | None = None) -> dict[str, Any]:
+    """LB-proxy P(mix) with bootstrap intervals, per-cell weighted MRR / top-1 / tail (MRR on
+    ranks 2-25), unweighted MRR and n; ``meta``: holdout_v2.json (alpha per mix)."""
+    from .splits import load_holdout_v2_meta
+
+    meta = meta if meta is not None else load_holdout_v2_meta()
+    mixes = list(mixes) if mixes is not None else list(v2_mixes(cfg))
+    allm = v2_mixes(cfg)
+    alphas = _alphas(cfg, meta)
+    n_boot = int(cfg.val_bootstrap_n if n_boot is None else n_boot)
+    M = _matrix(table, attrs, panel)
+    counts = _boot_counts(M, n_boot, cfg.seed if seed is None else seed) if n_boot > 0 else None
+    lo_q = (1 - cfg.val_bootstrap_ci) / 2
+    out: dict[str, Any] = {"panel": panel, "n_molecules": int(len(M.mkeys)), "mixes": {},
+                           "cells": {}, "alpha": {m: alphas[m] for m in mixes}}
+    have = np.isfinite(M.rr)
+    for j, c in enumerate(M.cells):
+        n = int(have[:, j].sum())
+        out["cells"][c] = {"n": n, "mrr_unweighted": float(np.nanmean(M.rr[:, j])) if n else None,
+                           "n_eff": None}
+    for m in mixes:
+        w = _weights(M, alphas[m])
+        means = _cell_means(M.rr, w)
+        t1 = _cell_means(M.top1, w)
+        P = float(_proxy(np.nan_to_num(means), allm[m]))
+        P1 = float(_proxy(np.nan_to_num(t1), allm[m]))
+        d: dict[str, Any] = {"P": P, "P_top1": P1, "P_tail": P - P1, "pi": allm[m].tolist(),
+                             "alpha": alphas[m], "cells": {}}
+        missing = [c for c in PROXY_CELLS if not np.isfinite(means[REPORT_CELLS.index(c)])]
+        d["missing_cells"] = missing
+        if counts is not None:
+            bm = _cell_means(M.rr, w, counts)
+            bp = _proxy(np.nan_to_num(bm), allm[m])
+            d["P_ci"] = [float(np.quantile(bp, lo_q)), float(np.quantile(bp, 1 - lo_q))]
+        for j, c in enumerate(M.cells):
+            sel = have[:, j]
+            ws = w[sel, j]
+            cd = {"mrr": float(means[j]) if np.isfinite(means[j]) else None,
+                  "top1": float(t1[j]) if np.isfinite(t1[j]) else None,
+                  "tail": float(means[j] - t1[j]) if np.isfinite(means[j]) else None,
+                  "n_eff": float(ws.sum() ** 2 / (ws ** 2).sum()) if sel.any() and (ws ** 2).sum() > 0 else 0.0}
+            if counts is not None and sel.any():
+                q = bm[:, j]
+                q = q[np.isfinite(q)]
+                cd["ci"] = [float(np.quantile(q, lo_q)), float(np.quantile(q, 1 - lo_q))] if len(q) else None
+            d["cells"][c] = cd
+        out["mixes"][m] = d
+    if mixes:
+        out["min_P"] = float(min(out["mixes"][m]["P"] for m in mixes))
+    return out
+
+
+def paired_report(table_a: pd.DataFrame, table_b: pd.DataFrame, attrs: pd.DataFrame, cfg: Config,
+                  *, panel: str = "fast", mixes: Sequence[str] | None = None,
+                  meta: Mapping[str, Any] | None = None, n_boot: int | None = None,
+                  seed: int | None = None) -> dict[str, Any]:
+    """Paired bootstrap of B minus A (same molecule resamples for both) on the molecules both
+    tables cover, per mix and per cell, plus the adoption verdict of ROADMAP 2.4: P(A) gain >=
+    ``val_v2_adopt_gain`` with the 90 % interval above 0, min over mixes not lower, no proxy
+    cell significantly lower (its interval's upper end below 0)."""
+    from .splits import load_holdout_v2_meta
+
+    meta = meta if meta is not None else load_holdout_v2_meta()
+    mixes = list(mixes) if mixes is not None else list(v2_mixes(cfg))
+    allm = v2_mixes(cfg)
+    alphas = _alphas(cfg, meta)
+    n_boot = int(cfg.val_bootstrap_n if n_boot is None else n_boot)
+    common = sorted(set(table_a.loc[table_a["in_cell"].astype(bool), "mkey"].astype(str))
+                    & set(table_b.loc[table_b["in_cell"].astype(bool), "mkey"].astype(str)))
+    A = _matrix(table_a, attrs, panel, common)
+    B = _matrix(table_b, attrs, panel, common)
+    both = np.isfinite(A.rr) & np.isfinite(B.rr)
+    ra = np.where(both, A.rr, np.nan)
+    rb = np.where(both, B.rr, np.nan)
+    ta = np.where(both, A.top1, np.nan)
+    tb = np.where(both, B.top1, np.nan)
+    counts = _boot_counts(A, n_boot, cfg.seed if seed is None else seed)
+    lo_q = (1 - cfg.val_bootstrap_ci) / 2
+    out: dict[str, Any] = {"panel": panel, "n_molecules": len(common), "mixes": {}}
+    for m in mixes:
+        w = _weights(A, alphas[m])
+        ma, mb = _cell_means(ra, w), _cell_means(rb, w)
+        pa, pb = float(_proxy(np.nan_to_num(ma), allm[m])), float(_proxy(np.nan_to_num(mb), allm[m]))
+        bA, bB = _cell_means(ra, w, counts), _cell_means(rb, w, counts)
+        dP = _proxy(np.nan_to_num(bB), allm[m]) - _proxy(np.nan_to_num(bA), allm[m])
+        t1a, t1b = _cell_means(ta, w), _cell_means(tb, w)
+        d = {"P_a": pa, "P_b": pb, "diff": pb - pa,
+             "ci": [float(np.quantile(dP, lo_q)), float(np.quantile(dP, 1 - lo_q))],
+             "top1_diff": float(_proxy(np.nan_to_num(t1b), allm[m]) - _proxy(np.nan_to_num(t1a), allm[m])),
+             "cells": {}}
+        d["tail_diff"] = d["diff"] - d["top1_diff"]
+        for j, c in enumerate(A.cells):
+            if not both[:, j].any():
+                continue
+            dc = bB[:, j] - bA[:, j]
+            dc = dc[np.isfinite(dc)]
+            d["cells"][c] = {"a": float(ma[j]), "b": float(mb[j]), "diff": float(mb[j] - ma[j]),
+                             "ci": [float(np.quantile(dc, lo_q)), float(np.quantile(dc, 1 - lo_q))] if len(dc) else None,
+                             "top1_diff": float(t1b[j] - t1a[j]), "n": int(both[:, j].sum())}
+        out["mixes"][m] = d
+    if "A" in out["mixes"]:
+        a = out["mixes"]["A"]
+        gain_ok = a["diff"] >= cfg.val_v2_adopt_gain and a["ci"][0] > 0
+        min_ok = min(out["mixes"][m]["P_b"] for m in mixes) >= min(out["mixes"][m]["P_a"] for m in mixes) - 1e-12
+        cells_ok = all(v["ci"] is None or v["ci"][1] >= 0 or c not in PROXY_CELLS
+                       for c, v in a["cells"].items())
+        out["adopt"] = bool(gain_ok and min_ok and cells_ok)
+        out["adopt_checks"] = {"gain": bool(gain_ok), "min_over_mixes": bool(min_ok),
+                               "no_cell_falls": bool(cells_ok)}
+    return out
+
+
+def calibrate_alpha(table: pd.DataFrame, attrs: pd.DataFrame, cfg: Config, *,
+                    panel: str = "full", target: float | None = None,
+                    mixes: Sequence[str] | None = None, grid: int = 3001) -> dict[str, Any]:
+    """alpha per mix such that the b0 table's pi_1 C1 + pi_2np C2-NP equals the board score
+    (``cfg.val_v2_board_b0``), with w_obs = (1 + pmid) ** -alpha on C1 and C2-NP (ROADMAP
+    2.3.5). ``table``: b0's v2 result table (or ``v1_to_v2`` of a v1 one). Solved on a grid
+    over [0, val_v2_alpha_max] (the weighted MRR is not guaranteed monotone in alpha; the
+    smallest alpha with the closest value wins); out of range -> the nearer bound, flagged."""
+    target = float(cfg.val_v2_board_b0 if target is None else target)
+    mixes = list(mixes) if mixes is not None else list(v2_mixes(cfg))
+    allm = v2_mixes(cfg)
+    M = _matrix(table, attrs, panel)
+    j1, j2 = REPORT_CELLS.index("C1"), REPORT_CELLS.index("C2-NP")
+    alphas = np.linspace(0.0, float(cfg.val_v2_alpha_max), grid)
+    vals = {}
+    out: dict[str, Any] = {"target": target, "panel": panel, "alpha": {}, "flags": {}, "curve": {}}
+    curve = []
+    for a in alphas:
+        mm = _cell_means(M.rr, _weights(M, a))
+        curve.append((mm[j1], mm[j2]))
+    curve = np.asarray(curve)
+    for m in mixes:
+        pi = allm[m]
+        f = pi[0] * curve[:, 0] + pi[1] * curve[:, 1]
+        vals[m] = f
+        err = np.abs(f - target)
+        i = int(np.argmin(err))
+        out["alpha"][m] = float(alphas[i])
+        out["flags"][m] = ("ok" if err[i] < 1e-3 else ("above_range" if f.min() > target else
+                                                       "below_range" if f.max() < target else "approx"))
+        out["curve"][m] = {"P_at_0": float(f[0]), "P_at_max": float(f[-1]), "P_at_alpha": float(f[i])}
+    out["c1_c2np_at_alpha"] = {m: [float(curve[int(np.argmin(np.abs(vals[m] - target))), 0]),
+                                   float(curve[int(np.argmin(np.abs(vals[m] - target))), 1])]
+                               for m in mixes}
+    return out
+
+
+def _fmt_ci(ci: Any) -> str:
+    if not ci:
+        return ""
+    return f" [{_f(ci[0])}, {_f(ci[1])}]"
+
+
+def format_proxy(rep: Mapping[str, Any]) -> str:
+    """One-line v2 summary for docs/EXPERIMENTS.md."""
+    mixes = list(rep["mixes"])
+    ps = "; ".join(f"P({m}) {_f(rep['mixes'][m]['P'])}{_fmt_ci(rep['mixes'][m].get('P_ci'))}"
+                   for m in mixes)
+    a = rep["mixes"].get("A") or rep["mixes"][mixes[0]]
+    cells = ", ".join(f"{c} {_f(v['mrr'])}" for c, v in a["cells"].items() if v.get("mrr") is not None)
+    ns = "/".join(str(rep["cells"][c]["n"]) for c in REPORT_CELLS)
+    return (f"v2 {rep['panel']}: {ps}; mix {('A' if 'A' in rep['mixes'] else mixes[0])} cells "
+            f"(w_obs, w_fast) {cells}; top1/tail {_f(a['P_top1'])}/{_f(a['P_tail'])}; "
+            f"n {'/'.join(REPORT_CELLS)} {ns}")
+
+
+def append_experiments_v2(rep: Mapping[str, Any], tag: str, config: str,
+                          path: Path | str | None = None, notes: str = "",
+                          git: str | None = None) -> Path:
+    """Row in the docs/EXPERIMENTS.md table with the v2 summary in the cells column."""
+    summ = {"cells": {}, "sets": {}}
+    p = append_experiments(summ, tag, config, path, notes=notes, git=git)
+    lines = p.read_text(encoding="utf-8").splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(f"| {time.strftime('%Y-%m-%d')} | {tag} |"):
+            cells = format_proxy(rep).replace("|", "/")
+            parts = lines[i].split(" | ")
+            parts[4] = cells
+            lines[i] = " | ".join(parts)
+            break
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def build_holdout_v2(cfg: Config, *, holdout_v1: Path | str | pd.DataFrame | None = None,
+                     train_dir: Path | str | None = None, val_dir: Path | str | None = None,
+                     out: Path | str | None = None, b0_results: Path | str | None = None,
+                     ext_path: Path | str | None = None,
+                     zen_truth_path: Path | str | None = None) -> tuple[pd.DataFrame, dict]:
+    """Build and write splits/holdout_v2.csv and its JSON (ROADMAP 2.3; module notes of the
+    v2 section of ``casmi.splits``): v2 columns from structures.parquet, R2's
+    ``extlib/holdout_ext.parquet`` and ``validation/truth_c2_zen.parquet`` when present, R3's
+    sid_count when the tiers carry it, w_obs calibrated on b0's per-molecule results
+    (``b0_results``: a v2 full-panel table, else the v1 ``results_b0_npdb_prior.parquet``)."""
+    from .log import git_commit
+    from .splits import (default_holdout_path, default_holdout_v2_path, load_holdout,
+                         make_holdout_v2, save_holdout_v2, tier_counts)
+
+    td = Path(train_dir) if train_dir is not None else paths.PROCESSED / "train"
+    vd = Path(val_dir) if val_dir is not None else validation_dir()
+    ho1 = load_holdout(holdout_v1 if holdout_v1 is not None else default_holdout_path())
+    st = pd.read_parquet(td / "structures.parquet")
+    ep = Path(ext_path) if ext_path is not None else paths.PROCESSED / "extlib" / "holdout_ext.parquet"
+    ext = pd.read_parquet(ep) if ep.exists() else None
+    zp = Path(zen_truth_path) if zen_truth_path is not None else vd / "truth_c2_zen.parquet"
+    zen = pd.read_parquet(zp) if zp.exists() else None
+    sid = tier_counts(pd.concat([ho1[["ik14", "mkey", "mono_mass"]]] + (
+        [pd.DataFrame({"ik14": zen["ik14"], "mkey": zen["mkey"], "mono_mass": zen["mono_mass"]})]
+        if zen is not None else []), ignore_index=True), "sid_count")
+    ho2 = make_holdout_v2(ho1, st, cfg, ext=ext, zen_truth=zen, sid=sid or None, alpha=0.0)
+    attrs = v2_attributes(ho2)
+    if b0_results is not None:
+        bp = Path(b0_results)
+    else:
+        cand = [vd / "results_v2_b0_npdb_prior_full.parquet", vd / "results_b0_npdb_prior.parquet"]
+        bp = next((p for p in cand if p.exists()), cand[-1])
+    b0 = pd.read_parquet(bp)
+    b0 = b0 if "cell" in b0.columns else v1_to_v2(b0, attrs)
+    cal = calibrate_alpha(b0, attrs, cfg, panel="full")
+    alpha_a = cal["alpha"].get("A", 0.0)
+    ho2 = make_holdout_v2(ho1, st, cfg, ext=ext, zen_truth=zen, sid=sid or None, alpha=alpha_a)
+    attrs = v2_attributes(ho2)
+    meta: dict[str, Any] = {
+        "built": time.strftime("%Y-%m-%d %H:%M:%S"), "git": git_commit(),
+        "alpha": cal["alpha"], "calibration": cal, "b0_source": str(bp.name),
+        "board_b0": float(cfg.val_v2_board_b0), "mixes": {k: v.tolist() for k, v in v2_mixes(cfg).items()},
+        "pmid_definition": "max over the molecule's ik14 of max(pmid_count, pubmed_count)",
+        "n_ext_lib_source": str(ep.name) if ext is not None else None,
+        "c2_zen_source": str(zp.name) if zen is not None else None,
+        "sid_count_filled": bool(sid),
+    }
+    for panel in PANELS:
+        rep = proxy_report(b0, attrs, cfg, panel=panel, meta=meta, n_boot=200)
+        meta[f"b0_check_{panel}"] = {m: rep["mixes"][m]["P"] for m in rep["mixes"]}
+    mols = attrs
+    meta["counts"] = {
+        "molecules": {s: int(n) for s, n in mols["set"].value_counts().sort_index().items()},
+        "fast": {s: int(n) for s, n in mols[mols["fast"]]["set"].value_counts().sort_index().items()},
+        "c2_cell": {f"{s}|{c}": int(n) for (s, c), n in
+                    mols.groupby(["set", "c2_cell"]).size().sort_index().items()},
+        "has_public_spectra": {s: int(n) for s, n in
+                               mols[mols["has_public_spectra"]]["set"].value_counts().sort_index().items()},
+    }
+    p = save_holdout_v2(ho2, out if out is not None else default_holdout_v2_path(), meta)
+    log.info("holdout v2: %s (%d rows, %d molecules); alpha %s", p, len(ho2), len(mols), cal["alpha"])
+    return ho2, meta
+
+
+def fusion_scorer(recompute_prior: bool = True) -> Callable[[pd.DataFrame, Config], np.ndarray]:
+    """Scorer for ``ranks_from_pools``: ``fusion.fuse`` with the config passed there, one pool
+    per (set, cell, molecule); the stored ``prior`` column is dropped first so that prior
+    weights of the new config take effect (``recompute_prior``)."""
+    from . import fusion
+
+    def score(p: pd.DataFrame, cfg: Config) -> np.ndarray:
+        q = p.drop(columns=["prior"]) if recompute_prior and "prior" in p.columns else p
+        q = q.assign(_grp=q["set"].astype(str) + "|" + q["cell"].astype(str) + "|"
+                     + q["molecule_id"].astype(str))
+        return fusion.fuse(q, cfg, group="_grp")
+
+    return score
+
+
+# --------------------------------------------------------------------------------------
+# class-mix estimation from probe submissions (ROADMAP 2.6)
+# --------------------------------------------------------------------------------------
+#
+# Each probe p is a submission restricted to one source (configs/probe_p*.yaml, casmi.probes).
+# Its public score is b_p = sum_c pi_c m_pc + e_p with m_pc the probe's local cell MRR (cells
+# C1, C2-NP, C2-PC, C3h, same weights as the proxy) and e_p ~ N(0, se) (se =
+# ``val_v2_board_se``, about 125 public molecules). The shares pi >= 0 are solved by
+# non-negative least squares with the soft constraint sum pi = 1 (one extra row of weight
+# ``sum_weight``). The calibration probe (P2 = b0, role "calibration") fixes w_obs: after each
+# solve, alpha is re-fitted so that b0's pi_1 C1 + pi_2np C2-NP equals its board score, the
+# local MRRs are recomputed, and the solve is repeated (fixed point; usually 3 to 6 rounds).
+# Uncertainty: parametric bootstrap of the board scores (se) jointly with a stratified
+# molecule bootstrap of the local MRRs (the same resample for every probe).
+
+MIX_CELLS = PROXY_CELLS
+
+
+def _solve_shares(Mloc: np.ndarray, board: np.ndarray, se: float, sum_weight: float) -> np.ndarray:
+    from scipy.optimize import nnls
+
+    A = np.vstack([Mloc / se, np.full((1, Mloc.shape[1]), sum_weight)])
+    y = np.concatenate([board / se, [sum_weight]])
+    x, _ = nnls(A, y)
+    return x
+
+
+def class_mix_fit(probes: pd.DataFrame, tables: Mapping[str, pd.DataFrame], attrs: pd.DataFrame,
+                  cfg: Config, *, panel: str = "full", n_boot: int = 1000, sum_weight: float = 30.0,
+                  alpha0: float | None = None, grid: int = 61, seed: int | None = None,
+                  max_rounds: int = 20) -> dict[str, Any]:
+    """Shares (pi C1, C2-NP, C2-PC, C3h) from probe board scores (module notes above).
+
+    ``probes``: columns probe, tag, board (NaN = not submitted: used only for the design
+    check), role ("share" | "calibration"). ``tables``: tag -> v2 result table."""
+    se = float(cfg.val_v2_board_se)
+    alphas = np.linspace(0.0, float(cfg.val_v2_alpha_max), grid)
+    pr = probes.copy()
+    pr["board"] = pd.to_numeric(pr["board"], errors="coerce")
+    tags = list(dict.fromkeys(pr["tag"].astype(str)))
+    keys = sorted(set().union(*[set(tables[t].loc[tables[t]["in_cell"].astype(bool), "mkey"].astype(str))
+                                for t in tags]))
+    mats = {t: _matrix(tables[t], attrs, panel, keys) for t in tags}
+    any_m = mats[tags[0]]
+    counts = _boot_counts(any_m, n_boot, cfg.seed if seed is None else seed) if n_boot > 0 else None
+    cj = [REPORT_CELLS.index(c) for c in MIX_CELLS]
+    # local cell means per tag on the alpha grid: point (G, 4) and bootstrap (G, B, 4)
+    point = {t: np.stack([np.nan_to_num(_cell_means(mats[t].rr, _weights(mats[t], a))[cj]) for a in alphas])
+             for t in tags}
+    boot = ({t: np.stack([np.nan_to_num(_cell_means(mats[t].rr, _weights(mats[t], a), counts)[:, cj])
+                          for a in alphas]) for t in tags} if counts is not None else {})
+    used = pr[pr["board"].notna()]
+    share = used[used["role"].astype(str) != "calibration"]
+    calib = used[used["role"].astype(str) == "calibration"]
+
+    def solve(loc: Mapping[str, np.ndarray], b_share: np.ndarray, b_cal: np.ndarray,
+              a_idx: int) -> tuple[np.ndarray, int, int]:
+        rounds = 0
+        pi = np.full(len(MIX_CELLS), 1.0 / len(MIX_CELLS))
+        for rounds in range(1, max_rounds + 1):
+            rows = [loc[t][a_idx] for t in share["tag"].astype(str)]
+            Ml = np.asarray(rows) if rows else np.zeros((0, len(MIX_CELLS)))
+            if len(calib):
+                Ml = np.vstack([Ml, *[loc[t][a_idx] for t in calib["tag"].astype(str)]])
+                bb = np.concatenate([b_share, b_cal])
+            else:
+                bb = b_share
+            pi = _solve_shares(Ml, bb, se, sum_weight)
+            if not len(calib):
+                break
+            t0 = str(calib["tag"].iloc[0])
+            f = loc[t0][:, 0] * pi[0] + loc[t0][:, 1] * pi[1]
+            new = int(np.argmin(np.abs(f - b_cal[0])))
+            if new == a_idx:
+                break
+            a_idx = new
+        return pi, a_idx, rounds
+
+    a0 = alpha0 if alpha0 is not None else float(load_holdout_v2_meta_safe().get("alpha", {}).get("A", 0.0))
+    a_idx0 = int(np.argmin(np.abs(alphas - a0)))
+    b_share = share["board"].to_numpy(np.float64)
+    b_cal = calib["board"].to_numpy(np.float64)
+    out: dict[str, Any] = {"cells": list(MIX_CELLS), "probes": [], "se": se, "panel": panel}
+    if len(used) == 0:
+        out["note"] = "no probe has a board score yet"
+    else:
+        pi, ai, rounds = solve(point, b_share, b_cal, a_idx0)
+        out.update(pi=pi.tolist(), alpha=float(alphas[ai]), rounds=rounds, sum_pi=float(pi.sum()))
+        if counts is not None:
+            rng = np.random.default_rng((cfg.seed if seed is None else seed) + 1)
+            draws = []
+            for b in range(n_boot):
+                loc_b = {t: boot[t][:, b, :] for t in tags}
+                bs = b_share + rng.normal(0, se, len(b_share))
+                bc = b_cal + rng.normal(0, se, len(b_cal))
+                draws.append(solve(loc_b, bs, bc, ai)[0])
+            D = np.asarray(draws)
+            lo_q = (1 - cfg.val_bootstrap_ci) / 2
+            out["pi_ci"] = [[float(np.quantile(D[:, j], lo_q)), float(np.quantile(D[:, j], 1 - lo_q))]
+                            for j in range(D.shape[1])]
+            out["pi_sd"] = D.std(axis=0).tolist()
+            mixes = v2_mixes(cfg)
+            out["mix_consistent"] = {m: bool(all(out["pi_ci"][j][0] - 1e-9 <= w[j] <= out["pi_ci"][j][1] + 1e-9
+                                               for j in range(len(w)))) for m, w in mixes.items()}
+        for r in pr.itertuples(index=False):
+            loc = point[str(r.tag)][ai]
+            pred = float(loc @ np.asarray(out["pi"]))
+            out["probes"].append({"probe": r.probe, "tag": r.tag, "role": r.role,
+                                  "board": None if pd.isna(r.board) else float(r.board),
+                                  "local_cells": loc.tolist(), "predicted": pred,
+                                  "residual": None if pd.isna(r.board) else float(r.board - pred)})
+    return out
+
+
+def class_mix_design(probes: pd.DataFrame, tables: Mapping[str, pd.DataFrame], attrs: pd.DataFrame,
+                     cfg: Config, true_mix: str = "A", *, panel: str = "full", n_sim: int = 300,
+                     seed: int | None = None, **kw: Any) -> dict[str, Any]:
+    """Design check: simulate board scores of every probe under ``true_mix`` (local MRRs times
+    the mix, plus N(0, se) noise) and report how well the fit recovers the shares."""
+    pi_true = v2_mixes(cfg)[true_mix]
+    meta_a = float(load_holdout_v2_meta_safe().get("alpha", {}).get(true_mix, 0.0))
+    rng = np.random.default_rng(cfg.seed if seed is None else seed)
+    se = float(cfg.val_v2_board_se)
+    keys = sorted(set().union(*[set(tables[t]["mkey"].astype(str)) for t in probes["tag"].astype(str)]))
+    loc = {}
+    for t in dict.fromkeys(probes["tag"].astype(str)):
+        M = _matrix(tables[t], attrs, panel, keys)
+        loc[t] = np.nan_to_num(_cell_means(M.rr, _weights(M, meta_a)))[[REPORT_CELLS.index(c) for c in MIX_CELLS]]
+    est = []
+    for _ in range(n_sim):
+        sim = probes.copy()
+        sim["board"] = [float(loc[str(t)] @ pi_true + rng.normal(0, se)) for t in sim["tag"].astype(str)]
+        r = class_mix_fit(sim, tables, attrs, cfg, panel=panel, n_boot=0, alpha0=meta_a, **kw)
+        est.append(r["pi"])
+    E = np.asarray(est)
+    return {"true_mix": true_mix, "pi_true": pi_true.tolist(), "mean": E.mean(axis=0).tolist(),
+            "sd": E.std(axis=0).tolist(), "rmse": np.sqrt(((E - pi_true) ** 2).mean(axis=0)).tolist(),
+            "local_cells": {t: v.tolist() for t, v in loc.items()}, "n_sim": n_sim}
+
+
+def load_holdout_v2_meta_safe() -> dict[str, Any]:
+    try:
+        from .splits import load_holdout_v2_meta
+
+        return load_holdout_v2_meta()
+    except Exception:  # noqa: BLE001
+        return {}

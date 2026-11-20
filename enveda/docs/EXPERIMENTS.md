@@ -197,3 +197,139 @@ Findings:
   (0.492) by more than noise; the strongest-demotion row ties it (0.491) and wins clearly on
   NP-OTHER (0.347 vs 0.261). The ranker (WP11) should learn this trade-off from the LIB
   features rather than from fixed rules.
+
+### 2026-11-20 R7 MetFrag-lite fragment features and fragment mass calibration
+
+Code: `src/casmi/fragments.py` (stage `fragments`, plugin `casmi.fragments`),
+`scripts/eval_fragments.py`, `scripts/fragment_calibration.py`; settings are the public ones
+(1-2 bond cuts, two acyclic cuts credited 0.6, linear intensity, 0.005 Da, H shifts -2..+3),
+ring cleavage (two bonds of one ring system) credited 0.6 as well. Commands (1 core, `nice`):
+`python scripts/eval_fragments.py --sets NP-TIMS NP-OTHER --tag v1` (864 s, 1.37 GB) and
+`--sets SYN-TIMS` (900 s, 1.6 GB); `python scripts/fragment_calibration.py --per-lib 40000`
+(405 s). Tables and summaries in `data/processed/fragments/` (ARTEFACTS.md, R7).
+
+Protocol: v1 holdout, condition C2 (all library spectra of the molecule hidden, database
+complete), pools from the NP + PubChem tiers at 10 ppm through `validation.ExcludingDB`, current
+ranking = prior-only fusion (`pipeline` stages mass, pool, features, score; b0 rules). The top
+100 by that score plus every truth row get fragment features. AUC: per molecule, truth versus
+same-formula decoys among those rows (ties one half), mean over molecules with at least one
+such decoy. MRR@25 with ik14 de-duplication (the WP8 offline convention); "+ w x f": w x f added
+to the score of the top-100 rows, w from a 15-value grid tuned on one hash half of the
+molecules and tested on the other, both ways (cross-fit). Re-run on v2 cells with `--val-dir` /
+`--condition` once R1 lands; `--rescore-from` re-scores stored rows under other settings.
+
+AUC, truth versus same-formula decoys (higher value = truth; below 0.5 means lower is better):
+
+| feature | NP-TIMS (n 249) | NP-OTHER (n 2,788) | NP-OTHER pubmed 0 (n 1,281) | SYN-TIMS (n 2,697) |
+|---|---|---|---|---|
+| `frag_score` (credited explained intensity) | **0.759** | **0.794** | 0.783 | **0.958** |
+| `frag_expl_lin` | 0.748 | 0.776 | 0.767 | 0.944 |
+| `frag_expl_sqrt` | 0.736 | 0.773 | | 0.946 |
+| `frag_n_expl` / `frag_frac_peaks` | 0.698 | 0.753 | | 0.931 |
+| `frag_base_w` (credit of the base peaks) | 0.713 | 0.736 | | 0.910 |
+| `frag_base_expl` | 0.676 | 0.692 | | 0.867 |
+| `frag_base_best` | 0.628 | 0.670 | | 0.815 |
+| `frag_mean_cuts` (lower = truth) | 0.440 | 0.346 | | 0.221 |
+| `frag_err_mda` (lower = truth) | 0.467 | 0.410 | | 0.441 |
+| `frag_log_n` (structure only, no spectrum) | 0.437 | 0.498 | | 0.476 |
+| formula-level `formula.explain` | 0.500 by construction | 0.500 | 0.500 | 0.500 |
+| `frag_score`, truth versus all decoys in the top 100 | 0.803 | 0.834 | | |
+
+The within-molecule `_z`, `_rank`, `_fz`, `_gap` columns are monotone in the raw value inside a
+molecule, so their per-molecule AUC equals the raw one. Decoy source: NP-OTHER 0.778 against
+NP-tier isomers, 0.827 against PubChem-only isomers (NP-TIMS 0.750 / 0.801). Explained
+intensity: the true formula's sub-formulas explain 0.95 (NP-TIMS) / 0.83 (NP-OTHER) / 0.99
+(SYN-TIMS) of the intensity, the true structure's fragments 0.59 / 0.56 / 0.74, same-formula
+decoys 0.37 / 0.31 / 0.27. SYN-TIMS caveat: the truth is in the prior top 100 for only 3.4
+percent of molecules (synthetic, pubmed 0), so its decoys are the most popular PubChem isomers;
+on the 101 molecules with the truth in the top 100 the AUC is 0.927.
+
+MRR@25 of the prior-only ranking and of prior + w x `frag_score_z` (primary, fixed in advance):
+
+| tuning | set | base | + fragments | rank-1 wins / losses | w (halves) |
+|---|---|---|---|---|---|
+| one weight, both sets pooled | NP-TIMS + NP-OTHER (3,250) | 0.449 | **0.578** | 708 / 218 | 0.3, 0.3 |
+| same weight | NP-OTHER (3,000) | 0.417 | **0.570** | 683 / 155 (+17.6 %) | |
+| same weight | NP-OTHER pubmed 0 (1,350) | 0.188 | **0.404** | | |
+| same weight | NP-TIMS (250) | 0.827 | 0.684 | 25 / 63 (-15.2 %) | |
+| tuned within NP-TIMS | NP-TIMS | 0.827 | 0.837 | 18 / 12 (+2.4 %) | 0.01, 0.02 |
+| tuned within SYN-TIMS | SYN-TIMS (3,000) | 0.001 | 0.020 | 45 / 0 | 1.5, 1.5 |
+
+Other bonus columns (pooled weight): `frag_score_fz` 0.519, `frag_expl_lin_z` 0.553,
+`frag_expl_sqrt_z` 0.556 (all below `frag_score_z`). NP-TIMS grid (whole set, not cross-fit):
+w 0.02 0.839, 0.05 0.838, 0.1 0.802, 0.3 0.684.
+
+Variants (re-scored rows, same pools):
+
+| variant | NP-TIMS AUC | NP-OTHER AUC | NP-OTHER MRR (cross-fit within NP-OTHER) |
+|---|---|---|---|
+| default (above) | 0.759 | 0.794 | 0.570 |
+| ring cleavage credited 1.0 (MetFrag "one step") | 0.761 | 0.789 | 0.549 |
+| no down-weighting (two cuts and rings 1.0) | 0.748 | | |
+| tolerance 0.01 Da | 0.753 | | |
+| positive-mode offset 0.51 mDa removed (NP-TIMS queries) | 0.759 | | |
+
+Findings:
+- Structure-level fragment evidence separates isomers where formula evidence cannot (public
+  0.757 reproduced: 0.759 on NP-TIMS, 0.794 on NP-OTHER); the R7 AUC acceptance (>= 0.72 on
+  the C2 cells) holds on all three sets. The structure-only confounder `frag_log_n` has no
+  signal (0.44 to 0.50), so the separation comes from the spectra, not from candidate size.
+- As one fusion term it is worth +0.15 MRR on NP-OTHER (+0.22 on its pubmed-0 half), but it
+  costs NP-TIMS 0.14 at the same weight: NP-TIMS truths are famous (prior top-1 73 percent) and
+  their NP-tier isomers often explain the timsTOF spectra better (56 of the 63 NP-TIMS losses
+  are same-formula NP-tier isomers, median frag_score margin 0.20). Tuned on NP-TIMS alone the
+  best weight is 0.01 to 0.02 (+0.010). The right weight depends on how strong the prior is;
+  this is for the ranker (R8) with `w_obs` group weights and prior-gap context, not for a
+  fixed fusion weight. Since the board's class 2 is obscure (ROADMAP 2.1), the pubmed-0 numbers
+  are the closer proxy.
+- C2-PC (SYN-TIMS): fragment features are strongest there (0.958), but a prior-only top 100
+  holds the truth for 3.4 percent of molecules; the stage must rank by a score that includes
+  the encoder (R4/R5) for the PubChem route, else most of this signal is unreachable.
+- Ring cleavages as one step (credit 1.0) and no down-weighting both lose: keep 0.6.
+
+Fragment mass calibration (`scripts/fragment_calibration.py`): residual = observed m/z minus
+theoretical ion m/z of the true structure's fragments, peaks whose explanations within 10 mDa
+all share one theoretical mass; offset = median over |residual| <= 3 mDa and intensity >= 5
+percent (the window tails are chance assignments and not symmetric).
+
+| library, polarity | spectra | core peaks | fragment offset (mDa, se) | precursor offset (mDa) | spectra with median > +0.25 mDa |
+|---|---|---|---|---|---|
+| enveda-180 + | 29,650 | 154,756 | **+0.548** (0.002) | +0.716 | 83 % |
+| enveda-180 - | 10,251 | 37,597 | +0.035 (0.005) | +0.244 | 20 % |
+| enveda-np-examples + | 776 | 4,103 | **+0.508** (0.018) | +0.686 | 71 % |
+| enveda-np-examples - | 386 | 2,075 | +0.068 (0.028) | +0.155 | 32 % |
+| gnps + / - | 31,211 / 6,799 | | -0.009 / -0.239 | +0.037 / -0.018 | |
+| massbank + / - | 21,979 / 9,840 | | -0.006 / -0.041 | +0.005 / -0.008 | |
+| mona + / - | 24,229 / 7,902 | | +0.044 / **-0.527** | -0.003 / -0.012 | |
+| riken + / - | 21,810 / 3,463 | | -0.003 / **-0.621** | -0.005 / -0.013 | |
+| pluskal_ms2 + / - | 23,257 / 14,645 | | -0.094 / **-0.545** | +0.003 / +0.005 | |
+
+- The host's report is confirmed: positive-mode fragments of both Enveda libraries read one
+  electron mass high (+0.548 mDa against 0.549), flat over m/z in enveda-180 (+0.43 to +0.75 from
+  m/z < 100 to 600), on most spectra (per-spectrum median p25/p50/p75 +0.32/+0.51/+0.70) and for
+  every positive adduct; negative mode is clean. The precursor m/z carries the same +0.47 mDa
+  difference between polarities on top of a common +0.2 mDa. The visible test is a copy of these
+  train spectra (identical peaks), the rerun test was corrected, so test and train differ by
+  0.55 mDa in positive mode. Several external-style libraries (MoNA, RIKEN, MSnLib/pluskal, part
+  of GNPS) have the mirror error in negative mode (-0.5 to -0.6 mDa).
+- Correction: `Config.frag_mz_offset_pos_da` / `frag_mz_offset_neg_da` (subtracted before
+  fragment matching), default 0.0, which is right for the corrected hidden test. Removing the
+  offset from NP-TIMS queries changes nothing at the 5 mDa fragment tolerance (AUC 0.759 ->
+  0.759), so validation features need no correction either.
+- Elsewhere: library cosine between two enveda-180 [M+H]+ spectra of the same structure (3,007
+  pairs) with one side shifted by 0.55 mDa: tolerance 0.01 Da mean delta -0.00001 (0.1 percent of
+  pairs move by more than 0.01), 0.005 Da +0.00007 (1.3 percent), 0.002 Da -0.0019 with 10.5
+  percent of pairs moving by more than 0.01 and 0.18 matched peaks lost per pair. So the 0.01 and
+  0.02 Da library tolerances are unaffected, while 2 mDa features (`formula_strict_tol_da`,
+  `expl_frac_strict`) computed on train-derived validation queries are biased against the
+  corrected test: subtract 0.55 mDa from positive-mode Enveda spectra before any feature with a
+  tolerance at or below 2 mDa, or do not use such features in the ranker. The encoder's 3 ppm
+  m/z jitter (about 1 mDa at 350) covers the shift, so no retraining (ROADMAP risk 14).
+
+Speed (one core, cold cache, RDKit parse + enumeration + matching): 400 random NP-OTHER
+molecules x 100 candidates in 59.6 s (median 1.23 ms, mean 1.49 ms, p95 3.5 ms per candidate;
+per molecule median 0.12 s, p95 0.33 s, max 0.82 s); molecules above 1,000 Da: median 4.97 ms per
+candidate, worst 9.7 ms (0.91 s per molecule). Single structures from 3,000 random NP-tier
+SMILES: median 0.82 ms, p99 6.0 ms; 200 NP-tier structures above 1,000 Da: median 4.8 ms, p99
+22.7 ms, worst 30 ms (a C80 polyprenol with about 90 acyclic bonds). From the disk cache a
+candidate costs about 0.07 ms (300k rows re-scored in 20 s).

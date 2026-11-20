@@ -5,8 +5,9 @@ For sampled spectra of each library, the true structure's MetFrag-lite fragments
 peak counts when every explanation in the window has the same theoretical ion mass
 (unambiguous). Reports the signed residual (observed minus theoretical, mDa) per library and
 polarity, per adduct, per m/z bin and per spectrum (which spectra carry an offset), next to the
-precursor residual (m_spec - mono_mass) of the same spectra, and how many unambiguous peaks
-fall inside the 5 mDa fragment tolerance with and without the measured offset removed.
+precursor residual (m_spec - mono_mass) of the same spectra. The offset estimate is the median
+of the "core" residuals (|residual| <= 3 mDa, peaks >= 5 percent of the base peak): the rest of
+the window is dominated by chance assignments, whose distribution is not symmetric.
 
 The host reported that positive-mode enveda-180 fragments read +0.49 mDa high (a calibrant
 with a neutral Na mass, "mass of an electron" error, corrected in the rerun test).
@@ -117,9 +118,9 @@ def _st(g: pd.DataFrame) -> dict:
     return stats(g["err_mda"].to_numpy(), g["intensity"].to_numpy(dtype=np.float64))
 
 
-def summarise(res: pd.DataFrame, tol_mda: float = 5.0) -> dict:
+def summarise(res: pd.DataFrame) -> dict:
     out: dict = {"by_lib_polarity": {}, "by_adduct": {}, "by_mz": {}, "per_spectrum": {},
-                 "precursor": {}, "in_tolerance": {}}
+                 "precursor": {}}
     for (lib, pol), g in res.groupby(["lib", "polarity"], sort=True):
         key = f"{lib}|{'+' if pol > 0 else '-'}"
         out["by_lib_polarity"][key] = _st(g)
@@ -137,15 +138,6 @@ def summarise(res: pd.DataFrame, tol_mda: float = 5.0) -> dict:
                 "frac_gt_0.25": float((per > 0.25).mean()),
                 "frac_lt_-0.25": float((per < -0.25).mean()),
             }
-        off = out["by_lib_polarity"][key]["core_median"]
-        e = g["err_mda"].to_numpy()
-        out["in_tolerance"][key] = {
-            "offset_mda": off,
-            "frac_within_tol_raw": float((np.abs(e) <= tol_mda).mean()),
-            "frac_within_tol_corrected": float((np.abs(e - off) <= tol_mda).mean()),
-            "frac_within_2mda_raw": float((np.abs(e) <= 2.0).mean()),
-            "frac_within_2mda_corrected": float((np.abs(e - off) <= 2.0).mean()),
-        }
         for (add,), ga in g.groupby(["adduct"], sort=True):
             out["by_adduct"][f"{key}|{add}"] = _st(ga)
         bins = pd.cut(g["mz"], MZ_BINS, right=False)
@@ -201,10 +193,6 @@ def main(argv: list[str] | None = None) -> int:
     for k, v in summ["by_adduct"].items():
         if k.startswith("enveda"):
             lg.info("  adduct %-40s n %7d core median %+.3f", k, v["n_core"], v["core_median"])
-    for k, v in summ["in_tolerance"].items():
-        lg.info("  tolerance %-26s offset %+.3f: within 5 mDa %.4f -> %.4f, within 2 mDa %.4f -> %.4f",
-                k, v["offset_mda"], v["frac_within_tol_raw"], v["frac_within_tol_corrected"],
-                v["frac_within_2mda_raw"], v["frac_within_2mda_corrected"])
     if not args.no_save:
         paths.ensure_dir(args.out)
         res.to_parquet(args.out / "calibration_residuals.parquet", index=False)

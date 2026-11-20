@@ -1,0 +1,17 @@
+# Probe P5 (ROADMAP 2.6; R1): only structures absent from PubChem and from the NP tier
+# (generator output). NOT SUBMITTED. The only direct reading of class-3 progress:
+#   board(P5) = pi_3 x MRR_C3h exactly (class 1 and 2 molecules cannot score)
+# Needs the class-3 generator stage (R13): insert its stage name before "score" (e.g.
+# [mass, pool, lib, gen, features, score, probe_assemble]) and add its module to
+# pipeline_plugins. Without it every list is one wrong guess (board 0, local 0): do not submit
+# before R13 lands. Repeat whenever the class-3 pool changes materially.
+#   python scripts/evaluate.py --config configs/probe_p5_novel.yaml --tag probe_p5 --panel full --run-c3
+submission_tag: probe_p5_novel
+pipeline_plugins: [casmi.libmatch, casmi.probes]
+pipeline_stages: [mass, pool, lib, features, score, probe_assemble]
+probe_rule: novel
+db_tiers: [np, pubchem]
+n_jobs: 2
+batch_molecules: 50
+lib_mass_tol_ppm: 10.0
+lib_sim: graded
