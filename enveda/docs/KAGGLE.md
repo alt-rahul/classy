@@ -130,3 +130,34 @@ python scripts/package_kaggle.py probe   # log text in dist/kaggle/output/casmi-
 
 See docs/SUBMISSIONS.md. #1: `casmi-inference` v2 (b0_npdb), submitted 2026-11-20 19:08:04 UTC,
 ref 58630976, scored about 12 minutes later (hidden-test rerun included): public 0.154.
+
+## GPU training kernel: contrastive encoder (RESEARCH.md roadmap item 1)
+
+`scripts/kaggle_encoder_kernel.py` generates `notebooks/kaggle_train_encoder.ipynb` and pushes
+it as the PRIVATE kernel `ograhulrajkumar/casmi-encoder-train` (GPU on, internet off). It
+builds its own `SaveKernel` body because it needs `machineShape`: `NvidiaTeslaT4` gives the
+"GPU T4 x2" machine (measured: 2 x Tesla T4, torch 2.11.0+cu130, CUDA 13.0, 4 CPUs). Mounted
+datasets: `casmi-encoder-code` (src/casmi + scripts/train_encoder.py), `casmi-encoder-bundle`
+(the training bundle), `casmi-db-np` (np_fp.npy) and `metric/rdkit-2026-3-3-wheel`. With two
+GPUs the arms train in parallel, one subprocess per GPU (`CUDA_VISIBLE_DEVICES`), each for
+`--hours`; with one GPU they run one after the other with hours / n_arms each. Outputs per arm
+under `/kaggle/working/encoder/<arm>/`: `encoder_<arm>.pt`, `train_log.csv`, `eval.jsonl`,
+`summary.json`, `stdout.log` (the optimiser checkpoint is deleted after export).
+
+```
+python scripts/kaggle_publish.py --name casmi-encoder-code --src src/casmi=casmi \
+    --src scripts/train_encoder.py=scripts --message "..."      # whenever the code changed
+python scripts/kaggle_encoder_kernel.py push --arms bce focal_con --hours 4.5 --timeout-hours 6
+python scripts/kaggle_encoder_kernel.py status
+python scripts/kaggle_encoder_kernel.py fetch    # -> dist/kaggle/output/casmi-encoder-train_<stamp>/
+```
+
+Notes: wait until the new code dataset version is READY before pushing (the kernel mounts the
+latest version at push time). The running kernel exposes no partial log through
+`ListKernelSessionOutput`; progress is only visible after completion. Throughput (smoke run
+v1, 6 layers x 512, 150 tokens, batch 256, fp16 autocast): about 0.53 s per step for the BCE
+arm and 0.57 s for the contrastive arm with 48 negatives, i.e. about 470 queries/s per T4.
+
+| kernel version | arms | hours | result | runtime |
+|---|---|---|---|---|
+| casmi-encoder-train v1 | bce, focal_con | 0.08 (smoke, 300-molecule eval subsets) | COMPLETE, 545 / 504 steps | 6.8 min notebook |

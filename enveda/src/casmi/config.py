@@ -268,6 +268,31 @@ class Config:
     enc_device: str = "cpu"                  # pipeline stage "encoder": torch device
     enc_batch_queries: int = 256             # queries per forward pass at inference
 
+    # --- MetFrag-lite fragment features (ROADMAP R7; casmi.fragments) -----------------
+    frag_top_k: int = 100                    # candidates per molecule that get fragment features
+    frag_rank_col: str = "score"             # pool column choosing the top K (absent: fusion.fuse)
+    frag_max_cuts: int = 2                   # bond disconnections per fragment (1 or 2)
+    frag_max_pairs: int = 20000              # above this many bond pairs only 1 cut is enumerated
+    frag_tol_da: float = 0.005               # fragment m/z tolerance (Da) ...
+    frag_tol_ppm: float = 0.0                # ... or this many ppm of the m/z, whichever is larger
+    frag_h_shift_min: int = -2               # hydrogen shifts applied to neutral fragments
+    frag_h_shift_max: int = 3
+    frag_w_two: float = 0.6                  # credit of a peak explained only by two acyclic cuts
+    frag_w_ring: float = 0.6                 # credit of a ring cleavage (two bonds of one ring system)
+    frag_mz_offset_pos_da: float = 0.0       # subtracted from positive-mode fragment m/z before matching
+    frag_mz_offset_neg_da: float = 0.0       # same for negative mode (R7 calibration, docs/EXPERIMENTS.md)
+    frag_cache_dir: str = ""                 # "" = PROCESSED/cache/fragments, "none" = memory only
+    frag_n_jobs: int = 1                     # processes for the fragments stage (0 = n_jobs)
+
+    # --- External spectral libraries (ROADMAP R2; casmi.extlib, scripts/build_extlib.py) ----
+    extlib_max_abs_ppm: float = 20.0         # precursor vs structure + adduct
+    extlib_min_peaks: int = 3                # peaks left after spectra.clean
+    extlib_dup_cos: float = 0.99             # near-identical spectra (same ik14 and adduct)
+    extlib_dup_tol_da: float = 0.01          # fragment tolerance of that cosine
+    extlib_calib_precision: float = 0.95     # rank-1 precision target of the per-source thresholds
+    extlib_calib_max_molecules: int = 1500   # timsTOF query molecules per source for calibration
+    extlib_calib_min_hits: int = 20          # fewest accepted queries for a threshold to count
+
     def __post_init__(self) -> None:
         for f in dataclasses.fields(self):
             value = _coerce(f.name, f.default, getattr(self, f.name))

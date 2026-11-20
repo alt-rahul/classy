@@ -15,13 +15,22 @@ inclusive. Defaults come from ``Config`` (mass_tol_ppm, mass_tol_min_da, db_tier
 
 Result frame (one row per ik14 per query; NP-tier rows win over PubChem rows with the
 same ik14, and inherit their ``cid`` when missing, ``pmid_count``, ``n_cids`` and
-``in_pubchem=True``). Columns, in order (``OUT_COLUMNS``):
+``in_pubchem=True``; the PubChem documentation priors are filled from the PubChem row
+only where the NP row has none). Columns, in order (``OUT_COLUMNS``):
 
     ik14, smiles, formula, mono_mass, ppm_err, tier ("np" | "pubchem"), in_np,
     in_pubchem, in_coconut, in_npatlas, in_lotus, in_pubchemlite, np_row,
     cid, coconut_annotation_level, coconut_np_likeness, n_organisms, n_citations,
     n_collections, pubmed_count, patent_count, anno_type_count, pmid_count, n_cids,
-    smiles_source, coconut_id, npaid
+    smiles_source, coconut_id, npaid,
+    sid_count, synonym_count, pc_patent_count, mesh_count, n_vendors, n_depositors
+
+The last six (``PRIOR_COLUMNS``, R3) are PubChem FTP counts of distinct items over all
+CIDs of the ik14 (``build_pubchem.py --stage priors``, docs/ARTEFACTS.md): SIDs, filtered
+synonyms, patents, MeSH terms, vendor depositors, depositors (NIST excluded). Both tiers
+carry them (``build_npdb.py --stage priors``); they are NA when a file predates them.
+``patent_count`` (PubChemLite, NP tier) and ``pc_patent_count`` (PubChem FTP) differ in
+source and coverage.
 
 ``ppm_err = (mono_mass - mass) / mass * 1e6``. ``np_row`` is the row index into
 np.parquet / np_fp.npy (-1 for PubChem-only rows). ``in_pubchem`` is True only when the
@@ -55,7 +64,7 @@ from . import paths
 from .config import Config
 
 __all__ = [
-    "CandidateDB", "OUT_COLUMNS", "TIERS", "FP_NBITS", "FP_BITORDER",
+    "CandidateDB", "OUT_COLUMNS", "PRIOR_COLUMNS", "TIERS", "FP_NBITS", "FP_BITORDER",
     "np_dir", "pubchem_dir", "shard_bucket", "shard_name", "window",
     "get_db", "lookup", "lookup_batch", "np_fingerprints", "np_table", "release", "unpack_fp",
 ]
@@ -77,16 +86,22 @@ _DTYPES: dict[str, str] = {
     "n_organisms": "Int32", "n_citations": "Int32", "n_collections": "Int32",
     "pubmed_count": "Int32", "patent_count": "Int32", "anno_type_count": "Int32",
     "pmid_count": "Int32", "n_cids": "Int32",
+    "sid_count": "Int32", "synonym_count": "Int32", "pc_patent_count": "Int32", "mesh_count": "Int32",
+    "n_vendors": "Int32", "n_depositors": "Int32",
 }
+# R3 PubChem documentation priors, present in both tiers (appended to OUT_COLUMNS).
+PRIOR_COLUMNS: tuple[str, ...] = (
+    "sid_count", "synonym_count", "pc_patent_count", "mesh_count", "n_vendors", "n_depositors",
+)
 OUT_COLUMNS: tuple[str, ...] = (
     "ik14", "smiles", "formula", "mono_mass", "ppm_err", "tier", "in_np", "in_pubchem",
     "in_coconut", "in_npatlas", "in_lotus", "in_pubchemlite", "np_row",
     "cid", "coconut_annotation_level", "coconut_np_likeness", "n_organisms", "n_citations",
     "n_collections", "pubmed_count", "patent_count", "anno_type_count", "pmid_count", "n_cids",
-    "smiles_source", "coconut_id", "npaid",
+    "smiles_source", "coconut_id", "npaid", *PRIOR_COLUMNS,
 )
 _NP_REQUIRED = ("ik14", "smiles", "formula", "mono_mass")
-_PC_COLUMNS = ("ik14", "smiles", "formula", "mono_mass", "cid", "pmid_count", "n_cids")
+_PC_COLUMNS = ("ik14", "smiles", "formula", "mono_mass", "cid", "pmid_count", "n_cids", *PRIOR_COLUMNS)
 _FROM_PUBCHEM = ("pmid_count", "n_cids")
 
 
@@ -484,7 +499,7 @@ class CandidateDB:
                 out[c] = _str_column(pc[c].to_numpy(dtype=object), n)
             elif c == "mono_mass":
                 out[c] = pc[c].to_numpy(dtype=np.float64)
-            elif c in ("cid", "pmid_count", "n_cids") and c in pc.columns:
+            elif c in ("cid", "pmid_count", "n_cids", *PRIOR_COLUMNS) and c in pc.columns:
                 out[c] = pc[c].astype(_DTYPES[c]).array
             else:
                 out[c] = _na_column(c, n)
@@ -497,7 +512,7 @@ class CandidateDB:
         k_pc = pd.MultiIndex.from_arrays([pc_part["_q"].to_numpy(), pc_part["ik14"].astype(object)])
         dup = k_pc.isin(k_np) & pc_part["ik14"].notna().to_numpy()
         if dup.any():
-            d = pc_part.loc[dup, ["_q", "ik14", "cid", "pmid_count", "n_cids"]].copy()
+            d = pc_part.loc[dup, ["_q", "ik14", "cid", "pmid_count", "n_cids", *PRIOR_COLUMNS]].copy()
             d["ik14"] = d["ik14"].astype(object)
             left = pd.DataFrame({"_q": np_part["_q"].to_numpy(),
                                  "ik14": np_part["ik14"].astype(object).to_numpy()})
@@ -509,6 +524,9 @@ class CandidateDB:
                 np_part[c] = pd.array(j[c].to_numpy(), dtype=_DTYPES[c])
             pc_cid = pd.Series(pd.array(j["cid"].to_numpy(), dtype="Int64"), index=np_part.index)
             np_part["cid"] = np_part["cid"].fillna(pc_cid)
+            for c in PRIOR_COLUMNS:  # NP-tier values win; PubChem fills an NP tier built before R3
+                pc_v = pd.Series(pd.array(j[c].to_numpy(), dtype=_DTYPES[c]), index=np_part.index)
+                np_part[c] = np_part[c].fillna(pc_v)
             pc_part = pc_part[~dup].reset_index(drop=True)
         return np_part, pc_part
 

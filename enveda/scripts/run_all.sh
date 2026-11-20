@@ -19,7 +19,13 @@ PY="${PYTHON:-python}"
 # WP2  NP-tier database: downloads 4 sources (600 MB), ~20 min wall, 2 cores, <4 GB RAM
 nice -n 10 $PY -I scripts/build_npdb.py --stage all
 # WP3  PubChem tier: about 15 min wall (downloads at about 20 MB/s), 2 cores, 7 GB RAM; resumable, skips finished stages
-nice -n 10 $PY -I scripts/build_pubchem.py
+#      R3: stage `priors` (part of the default run) streams 6 more PubChem FTP files (about 21 GB compressed) and
+#      appends the documentation-prior columns to every shard; see docs/ARTEFACTS.md for its wall time, 2 cores,
+#      under 2 GB RSS, DuckDB memory_limit min(6 GB, available - 1 GB)
+nice -n 10 $PY -I scripts/build_pubchem.py --memory-limit 6GB
+# R3   NP tier priors: joins data/external/pubchem/np_priors.parquet (written by the stage above) into np.parquet,
+#      under 1 min, 1 core, about 1 GB RAM
+nice -n 10 $PY -I scripts/build_npdb.py --stage priors
 # WP6  train ingestion + structure table + public test join + audit: estimate 10-15 min wall
 #      (streaming pass 3-5 min, RDKit structure pass about 3 min on 3 jobs, PubChem scan 1 min),
 #      3 cores, peak RSS about 4 GB (projected from synthetic runs, docs/ARTEFACTS.md WP6)

@@ -36,7 +36,8 @@ What the stage does, per batch
      passes the stricter fusion rule (1, then 1b), then has the higher cosine, then more
      matched peaks (``graded_evidence``): the search's single best pair can be a 2-peak
      spectrum with cosine 1.0 that hides a 20-peak match at 0.98) and the matched peaks of
-     the pair it came from (cons_n_matched for cons_cos, else n_matched_best);
+     the pair it came from (graded: that pair's; cons_cos: cons_n_matched; else
+     n_matched_best);
    - ``lib_graded_cos`` / ``lib_graded_n`` (the best-graded pair, ``graded_evidence``) and
      ``lib_cos_n<k>`` for k in ``GRADED_KS`` (best cosine over the candidate's spectrum and
      consensus pairs with at least k matched peaks; NaN if none);
@@ -55,7 +56,8 @@ What the stage does, per batch
 
 Fusion (``casmi.fusion.fuse``) then applies rule 1 (lib_best_cos >= fusion_lib_cos_min and
 lib_n_matched >= fusion_lib_min_matched: 3 + lib_best_cos) and, when the config turns them
-on, rule 1b and the demotion (``fusion.lib_extra_rules``).
+on, rule 1b (band or additive) and the demotion (``fusion.lib_extra_rules``). The values in
+``configs/b1_library.yaml`` and why: docs/EXPERIMENTS.md, "WP8 tuning".
 
 Inference-path rule (PLAN 7): numpy, pandas and casmi modules only.
 """

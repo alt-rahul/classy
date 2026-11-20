@@ -319,9 +319,10 @@ Real-run timings (4 cores, nice 10; a second agent active from about 19:05):
 | 1 ingest + audit | `ingest_train.py --stage all --n-jobs 3` | 271 s | 3.18 GB | pass 1 79 s (32,180 rows/s, 1.69 GB), RDKit 275,775 structures in 99 s (2,772/s on 3), PubChem membership 64 s |
 | 2 mkey | `--stage mkey --mkey-jobs 4` | 1,083 s | 0.68 GB (+4 x 0.25 GB workers) | 275,775 ok, 0 timeouts; mkey != ik14 for 4,362 |
 | 3 library | `--stage library` | 52 s | 3.41 GB | 1.19 GB on disk; loaded 1.8 GB RSS (2.7 GB after 400-molecule searches) |
-| 4 splits | `make_splits.py --n-jobs 3` | 985 s | 3.62 GB | holdout 1 s, queries 31 s, truth keys 16 min (NP-TIMS 44 s, SYN-TIMS 9 min, NP-OTHER 6 min) |
+| 4 splits | `make_splits.py --n-jobs 3` | 985 s | 3.62 GB | holdout 1 s, queries 31 s, truth keys 16 min (NP-TIMS 44 s, SYN-TIMS 9 min, NP-OTHER 6 min); the first attempt, with one PubChem lookup for all 3,000 SYN-TIMS molecules, was OOM-killed at 13.2 GB (now 200 molecules per chunk) |
 | 5 audit | `--stage audit` | 11 s | 2.2 GB | |
-| 6 evaluate b0 | `evaluate.py --config configs/b0_npdb.yaml --n-jobs 3` | 1,269 s (self check 30 s, cells 1,237 s) | 3.0 GB | cold mkey cache for the guesses: SYN-TIMS C2 376 s, NP-OTHER C1 562 s |
+| 6 evaluate b0 | `evaluate.py --config configs/b0_npdb.yaml --n-jobs 3` | 1,269 s (self check 30 s, cells 1,237 s) | 3.0 GB | cold mkey cache for the guesses: SYN-TIMS C2 376 s, NP-OTHER C1 562 s; warm rerun 214 s (cells 180 s), per-molecule results identical |
+| 6b evaluate b0b | `evaluate.py --config configs/b0b_pubchem.yaml --n-jobs 3` | 2,194 s (cells 2,164 s) | 8.27 GB | pools of about 10k ik14 per molecule kept per cell; `ValidationHooks.compact` (added after this run) drops them per chunk |
 
 WP5 build acceptance on this library (1 core): self-search of 1,000 random spectra (seed
 `Config.seed`): cosine 1.0 at rank 1 for 1,000, own spectrum 967 plus 18 identical-peak

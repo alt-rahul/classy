@@ -21,6 +21,11 @@ Stages (``--stage``, default ``all``):
   headers   print each source's header and fail loudly on a missing expected column
   table     read, filter, RDKit formula/mass, dedup, priors -> np.parquet
   fp        fingerprints for np.parquet rows -> np_fp.npy (re-runnable on its own)
+  priors    R3: append the PubChem documentation priors (sid_count, synonym_count,
+            pc_patent_count, mesh_count, n_vendors, n_depositors) by ik14 from
+            data/external/pubchem/np_priors.parquet (scripts/build_pubchem.py --stage
+            priors); rows, order and existing columns unchanged; skipped with a warning
+            in ``all`` when that file does not exist yet (fresh build: run it after WP3)
   check     acceptance checks (row count, ik14 unique, mass agreement, quercetin,
             lookup speed, public-test pool sizes)
 
@@ -961,9 +966,119 @@ def stage_check(ctx: Ctx) -> None:
     log.info("all checks passed")
 
 
+# ----------------------------------------------------------------------------- priors (R3)
+
+PRIOR_FIELDS = [("sid_count", pa.int32()), ("synonym_count", pa.int32()), ("pc_patent_count", pa.int32()),
+                ("mesh_count", pa.int32()), ("n_vendors", pa.int16()), ("n_depositors", pa.int16())]
+PRIOR_NAMES = [n for n, _ in PRIOR_FIELDS]
+NP_PRIORS_START = "<!-- R3:np-priors:start -->"
+NP_PRIORS_END = "<!-- R3:np-priors:end -->"
+
+
+def _int_quantiles(v: np.ndarray) -> dict:
+    if not len(v):
+        return {}
+    q = np.quantile(v, [0.5, 0.9, 0.99, 0.999], method="inverted_cdf")
+    return {"p50": int(q[0]), "p90": int(q[1]), "p99": int(q[2]), "p99.9": int(q[3]), "max": int(v.max()),
+            "mean": round(float(v.mean()), 3), "frac_zero": round(float((v == 0).mean()), 4)}
+
+
+def stage_priors(ctx: Ctx) -> None:
+    """Append the R3 prior columns to np.parquet (left join on ik14; NP ik14 absent from the
+    priors file get nulls). Idempotent: existing prior columns are replaced."""
+    src = Path(ctx.args.priors) if ctx.args.priors else paths.EXTERNAL / "pubchem" / "np_priors.parquet"
+    if not src.exists():
+        msg = f"{src} missing: run scripts/build_pubchem.py --stage priors first"
+        if ctx.args.stage == "priors":
+            raise SystemExit(msg)
+        log.warning("priors skipped: %s", msg)
+        return
+    t0 = time.time()
+    tbl = pq.read_table(ctx.np_parquet)
+    base = tbl.select([c for c in tbl.column_names if c not in PRIOR_NAMES])
+    n = base.num_rows
+    pr = pq.read_table(src).to_pandas()
+    if not pr["ik14"].is_unique:
+        raise SystemExit(f"{src}: ik14 not unique")
+    j = pr.set_index("ik14").reindex(base.column("ik14").to_pandas())
+    matched = j["sid_count"].notna().to_numpy()
+    for c, t in PRIOR_FIELDS:
+        base = base.append_column(c, pa.array(j[c].astype("Int64").array, type=pa.int64()).cast(t))
+    tmp = ctx.np_parquet.with_suffix(".parquet.part")
+    pq.write_table(base, tmp, compression="zstd", compression_level=9, row_group_size=100_000)
+    chk = pq.read_table(tmp, columns=["ik14"])
+    if chk.num_rows != n or not chk.column("ik14").equals(tbl.column("ik14")):
+        raise SystemExit("priors: row count or order changed")
+    tmp.replace(ctx.np_parquet)
+    in_pc = j["n_pubchem_cids"].fillna(0).to_numpy() > 0 if "n_pubchem_cids" in j else matched
+    stats = {c: _int_quantiles(j[c].dropna().to_numpy(dtype=np.int64)) for c in PRIOR_NAMES}
+    rep = ctx.load_report()
+    rep["np_parquet"] = {"rows": n, "bytes": ctx.np_parquet.stat().st_size, "sha256": sha256_file(ctx.np_parquet)}
+    rep["priors"] = {"source": str(src.relative_to(paths.ROOT)) if src.is_relative_to(paths.ROOT) else str(src),
+                     "source_sha256": sha256_file(src), "rows": n, "rows_matched": int(matched.sum()),
+                     "rows_in_pubchem": int(in_pc.sum()), "columns": PRIOR_NAMES, "stats": stats,
+                     "seconds": round(time.time() - t0, 1)}
+    ctx.save_report(rep)
+    log.info("priors: %d rows, %d matched (%.4f), %d with a PubChem CID (%.4f), np.parquet %.1f MB, %.0f s", n,
+             matched.sum(), matched.mean(), in_pc.sum(), in_pc.mean(), ctx.np_parquet.stat().st_size / 1e6,
+             time.time() - t0)
+    for c in PRIOR_NAMES:
+        log.info("  %-16s %s", c, stats[c])
+    if ctx.out == paths.PROCESSED / "db" / "np" and ctx.limit is None:
+        _priors_docs(ctx, rep)
+
+
+def _priors_docs(ctx: Ctx, rep: dict) -> None:
+    """Refresh the NP tier table row of docs/ARTEFACTS.md and write the R3 NP subsection."""
+    path = paths.DOCS / "ARTEFACTS.md"
+    if not path.exists():
+        return
+    text = path.read_text()
+    npq = rep["np_parquet"]
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.startswith("| NP tier table |"):
+            cells = ln.split(" | ")
+            cells[3] = f"{npq['bytes'] / 1e6:.1f} MB"
+            cells[4] = f"`{npq['sha256']}`"
+            if "--stage priors" not in cells[5]:
+                cells[5] = cells[5].replace("(stages download, headers, table, fp, check)",
+                                            "(stages download, headers, table, fp, priors, check; priors needs "
+                                            "`build_pubchem.py --stage priors` first)")
+            lines[i] = " | ".join(cells)
+    text = "\n".join(lines)
+    pr = rep["priors"]
+    sec = [NP_PRIORS_START, "### PubChem documentation priors in np.parquet (R3)", "",
+           f"`nice -n 10 python -I scripts/build_npdb.py --stage priors` appends " +
+           ", ".join(f"`{c}`" for c in PRIOR_NAMES) + f" (definitions in the R3 PubChem section) by ik14 from "
+           f"`{pr['source']}` (sha256 `{pr['source_sha256']}`); {pr['seconds']:.0f} s, 1 core. Rows matched "
+           f"{pr['rows_matched']:,} of {pr['rows']:,} ({100.0 * pr['rows_matched'] / max(pr['rows'], 1):.2f} percent; "
+           f"unmatched rows get nulls); rows with at least one PubChem CID {pr['rows_in_pubchem']:,} "
+           f"({100.0 * pr['rows_in_pubchem'] / max(pr['rows'], 1):.2f} percent; the others are not in PubChem and "
+           f"have zero counts). Existing columns, row order and np_fp.npy alignment unchanged. np.parquet now "
+           f"{npq['bytes'] / 1e6:.1f} MB, sha256 `{npq['sha256']}`. `pmid_count` is not stored in np.parquet "
+           "(it still comes from the PubChem tier at lookup time, so NP-only lookups such as Baseline 0 are "
+           "unchanged).", "",
+           "| column | p50 | p90 | p99 | p99.9 | max | mean | fraction zero |", "|---|---|---|---|---|---|---|---|"]
+    for c, st in pr["stats"].items():
+        sec.append(f"| {c} | {st.get('p50')} | {st.get('p90')} | {st.get('p99')} | {st.get('p99.9')} | "
+                   f"{st.get('max', 0):,} | {st.get('mean')} | {st.get('frac_zero')} |")
+    sec.append(NP_PRIORS_END)
+    block = "\n".join(sec)
+    if NP_PRIORS_START in text and NP_PRIORS_END in text:
+        a, b = text.index(NP_PRIORS_START), text.index(NP_PRIORS_END) + len(NP_PRIORS_END)
+        text = text[:a] + block + text[b:]
+    else:
+        anchor = "### np_fp.npy recipe"
+        i = text.index(anchor) if anchor in text else len(text)
+        text = text[:i] + block + "\n\n" + text[i:]
+    path.write_text(text)
+    log.info("docs: refreshed the NP tier row and the R3 NP subsection of %s", path)
+
+
 # ----------------------------------------------------------------------------- main
 
-STAGES = ["download", "headers", "table", "fp", "check"]
+STAGES = ["download", "headers", "table", "fp", "priors", "check"]
 
 
 def main(argv=None) -> int:
@@ -973,6 +1088,8 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=2, help="RDKit worker processes (default 2)")
     ap.add_argument("--limit", type=int, default=None, help="read only the first N rows per source (dry run)")
     ap.add_argument("--out", default=None, help="output directory (default PROCESSED/db/np)")
+    ap.add_argument("--priors", default=None,
+                    help="np_priors.parquet for --stage priors (default EXTERNAL/pubchem/np_priors.parquet)")
     ap.add_argument("--fp-raw", action="store_true",
                     help="fingerprint the stored SMILES without casmi.chem.std_mol")
     args = ap.parse_args(argv)

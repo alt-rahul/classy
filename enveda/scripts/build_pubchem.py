@@ -17,6 +17,13 @@ Stages (each resumable, markers in data/external/pubchem/.stage_*):
      filter, write partitioned by floor(mono_mass / 10).
   3  per shard: group by ik14, keep the lowest-CID row, max pmid_count,
      n_cids = group size, sort by mono_mass, zstd level 9.
+  priors   R3 documentation priors: stream CID-InChI-Key (all CIDs, for the
+           ik14 groups), CID-SID, CID-Synonym-filtered, CID-Patent, CID-MeSH and
+           Substance SID-Map (+ RDF source categories), count distinct items per
+           ik14 over all its CIDs and append sid_count, synonym_count,
+           pc_patent_count, mesh_count, n_vendors, n_depositors to every shard
+           (same rows, order and row groups). Also writes np_priors.parquet in
+           the work dir for build_npdb.py --stage priors. Sub-steps resumable.
   check    acceptance checks (row totals, ik14 uniqueness, caffeine and
            paclitaxel at 10 ppm, 20 random public-test masses timed).
   cleanup  delete intermediates (stage 1 and 2 parquet, DuckDB temp dir).
@@ -45,10 +52,12 @@ import shutil
 import subprocess
 import sys
 import time
+import warnings
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.compute as pc
@@ -115,6 +124,7 @@ ADDUCT_SHIFT = {
 SEED = 20261118
 
 log = logging.getLogger("build_pubchem")
+warnings.filterwarnings("ignore", message="Arrow output on a DB-API result")  # small tables only
 
 
 class Cfg:
@@ -222,10 +232,10 @@ def http_text(url: str) -> str:
                           capture_output=True, text=True, check=True).stdout
 
 
-def duck(cfg: Cfg):
+def duck(cfg: Cfg, memory_limit: str | None = None):
     cfg.tmp.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
-    con.execute(f"SET memory_limit='{cfg.memory_limit}'")
+    con.execute(f"SET memory_limit='{memory_limit or cfg.memory_limit}'")
     con.execute(f"SET threads={cfg.threads}")
     con.execute(f"SET temp_directory='{cfg.tmp}'")
     con.execute("SET preserve_insertion_order=true")
@@ -669,8 +679,10 @@ def stage2(cfg: Cfg):
 # ---------------------------------------------------------------- stage 3: per-shard dedup
 
 def schema_ok(sch: pa.Schema) -> bool:
-    """Same column names, order and types as OUT_SCHEMA (nullability ignored)."""
-    return [(f.name, f.type) for f in sch] == [(f.name, f.type) for f in OUT_SCHEMA]
+    """Same column names, order and types as OUT_SCHEMA, or OUT_SCHEMA followed by the
+    R3 prior columns (PRIOR_SCHEMA, after --stage priors); nullability ignored."""
+    got = [(f.name, f.type) for f in sch]
+    return got in ([(f.name, f.type) for f in OUT_SCHEMA], [(f.name, f.type) for f in PRIOR_SCHEMA])
 
 
 def shard_name(bucket: int) -> str:
@@ -781,6 +793,842 @@ def write_index(cfg: Cfg, shards: list, stats: dict):
                    for s in shards},
     }
     (cfg.out / "_index.json").write_text(json.dumps(idx, indent=1))
+
+
+# ---------------------------------------------------------------- priors (R3): documentation counts
+
+# Appended to every shard by --stage priors (docs/ROADMAP.md R3). One ik14 group = every
+# PubChem CID whose InChIKey (CID-InChI-Key, all CIDs, no structure filter) starts with the
+# ik14; counts are of DISTINCT items over the whole group, so a SID, name or patent linked
+# to two stereo, isotope or charge variants of the ik14 is counted once.
+PRIOR_FIELDS = [
+    ("sid_count", pa.int32()),        # distinct SIDs over CID-SID types 1 (standardized) and 2 (component)
+    ("synonym_count", pa.int32()),    # distinct case-folded names of CID-Synonym-filtered
+    ("pc_patent_count", pa.int32()),  # distinct publication numbers of CID-Patent
+    ("mesh_count", pa.int32()),       # distinct MeSH terms of CID-MeSH
+    ("n_vendors", pa.int16()),        # distinct depositors in RDF category Chemical_Vendors (SID-Map)
+    ("n_depositors", pa.int16()),     # distinct depositors of any category except NIST sources (SID-Map)
+]
+PRIOR_NAMES = [n for n, _ in PRIOR_FIELDS]
+PRIOR_SCHEMA = pa.schema(list(OUT_SCHEMA) + [pa.field(n, t) for n, t in PRIOR_FIELDS])
+SUBSTANCE_URL = "https://ftp.ncbi.nlm.nih.gov/pubchem/Substance/Extras"
+SOURCE_RDF_URL = "https://ftp.ncbi.nlm.nih.gov/pubchem/RDF/source/pc_source.ttl.gz"
+NIST_RE = re.compile(r"\bNIST\b|National Institute of Standards", re.I)
+VENDOR_CATEGORY = "concept:Chemical_Vendors"
+PART_BITS = 20                     # pair files hold 2**20 consecutive groups each
+ITEM_BITS = 64 - PART_BITS         # packed key = (group within part) << ITEM_BITS | item
+PRIOR_STEPS = ["map", "sid", "synonym", "patent", "sidmap", "mesh", "write"]
+NP_PRIORS_NAME = "np_priors.parquet"
+PRIOR_CHECK = (("caffeine", "RYYVLZVUVIJVGH", 194.0804), ("quercetin", "REFJWTPEDVJJIY", 302.0427),
+               ("paclitaxel", "RCINICONZNJXQF", 853.3310))
+LETTERS = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+
+
+def mem_available_gb() -> float:
+    try:
+        with open("/proc/meminfo") as fh:
+            for ln in fh:
+                if ln.startswith("MemAvailable:"):
+                    return int(ln.split()[1]) / 1024.0 ** 2
+    except OSError:  # pragma: no cover
+        pass
+    return float("inf")
+
+
+def wait_for_memory(need_gb: float, what: str, max_wait_s: int = 3 * 3600) -> float:
+    """Block until MemAvailable >= need_gb (the machine is shared; never risk an OOM kill)."""
+    t0 = time.time()
+    while True:
+        avail = mem_available_gb()
+        if avail >= need_gb:
+            log.info("%s: %.1f GB available (need %.1f GB)", what, avail, need_gb)
+            return avail
+        if time.time() - t0 > max_wait_s:
+            raise RuntimeError(f"{what}: only {avail:.1f} GB available after {max_wait_s} s")
+        log.warning("%s: %.1f GB available < %.1f GB needed; waiting 60 s", what, avail, need_gb)
+        time.sleep(60)
+
+
+def prior_memory_limit(cfg: Cfg) -> str:
+    """DuckDB memory_limit for the priors stage: min(--memory-limit, 6 GB, available - 1 GB)."""
+    m = re.match(r"^\s*([0-9.]+)\s*([GM])B?\s*$", str(cfg.memory_limit), re.I)
+    cap = float(m.group(1)) / (1024.0 if m.group(2).upper() == "M" else 1.0) if m else 6.0
+    lim = max(0.5, min(cap, 6.0, mem_available_gb() - 1.0))
+    return f"{lim:.1f}GB"
+
+
+def prior_stream(cfg: Cfg, name: str, url: str, colnames: list, types: dict, keep: list, info: dict,
+                 delimiter: str = "\t"):
+    """Yield RecordBatches of a remote gzipped TSV (GzHttpStream: resumable, md5 checked at the
+    end, nothing written to disk). ``info`` receives bytes, rows, md5 and timing."""
+    head = http_head(url)
+    size = int(head["content-length"])
+    md5_expected = None
+    try:
+        md5_expected = http_text(url + ".md5").split()[0]
+    except Exception as e:  # pragma: no cover
+        log.warning("no md5 for %s: %s", url, e)
+    log.info("priors %s: %s, %s bytes, last-modified %s, md5 %s", name, url, fmt_n(size),
+             head.get("last-modified"), md5_expected)
+    cfg.tmp.mkdir(parents=True, exist_ok=True)
+    stream = GzHttpStream(url, size, cfg.tmp / f"prior_{name}.hdr", max_bytes=cfg.max_bytes)
+    n_bad = [0]
+
+    def on_invalid(row):
+        n_bad[0] += 1
+        return "skip"
+
+    reader = pacsv.open_csv(
+        pa.PythonFile(stream, mode="r"),
+        read_options=pacsv.ReadOptions(column_names=colnames, block_size=64 << 20, use_threads=True),
+        parse_options=pacsv.ParseOptions(delimiter=delimiter, quote_char=False, escape_char=False,
+                                         newlines_in_values=False, invalid_row_handler=on_invalid),
+        convert_options=pacsv.ConvertOptions(column_types=types, include_columns=keep,
+                                             strings_can_be_null=False, quoted_strings_can_be_null=False),
+    )
+    t0 = last = time.time()
+    n = 0
+    try:
+        for batch in reader:
+            n += batch.num_rows
+            yield batch
+            if time.time() - last > 120:
+                el = time.time() - t0
+                log.info("  %s: %s rows, %.1f%% of %s bytes, %.1f MB/s, restarts %d, rss %.0f MB, avail %.1f GB",
+                         name, fmt_n(n), 100.0 * stream.offset / size, fmt_n(size), stream.offset / el / 1e6,
+                         stream.restarts, peak_rss_mb(), mem_available_gb())
+                last = time.time()
+    finally:
+        stream.close()
+    md5_got = stream.md5.hexdigest()
+    if cfg.max_bytes is None:
+        if not stream.complete:
+            raise RuntimeError(f"stream for {url} ended early at {stream.offset} of {size}")
+        if md5_expected and md5_got != md5_expected:
+            raise RuntimeError(f"md5 mismatch for {url}: {md5_got} != {md5_expected}")
+    el = time.time() - t0
+    info.update({"url": url, "bytes": size, "last_modified": head.get("last-modified"),
+                 "md5_expected": md5_expected,
+                 "md5_ok": (md5_got == md5_expected) if cfg.max_bytes is None else None,
+                 "rows": n, "invalid_rows_skipped": n_bad[0], "restarts": stream.restarts,
+                 "decompressed_bytes": stream.out_bytes, "seconds": round(el, 1)})
+    log.info("priors %s streamed: %s rows (%s invalid skipped), %.0f s, %.1f MB/s, restarts %d", name,
+             fmt_n(n), fmt_n(n_bad[0]), el, stream.offset / max(el, 1e-9) / 1e6, stream.restarts)
+
+
+class PairCounter:
+    """Distinct items per group. Rows of single-CID groups are distinct by construction
+    (one line per (CID, item) in the PubChem files) and are counted directly; items of
+    multi-CID groups (or every item, for counters fed only through ``add_pairs``) are
+    packed into uint64 keys, spilled to one file per 2**PART_BITS groups, and reduced
+    with np.unique part by part."""
+
+    def __init__(self, pw: Path, name: str, n_groups: int):
+        self.dir = pw / f"pairs_{name}"
+        shutil.rmtree(self.dir, ignore_errors=True)
+        self.dir.mkdir(parents=True)
+        self.name = name
+        self.n_groups = n_groups
+        self.counts = np.zeros(n_groups, dtype=np.int32)
+        self.fh: dict[int, object] = {}
+        self.n_pairs_written = 0
+        self.n_single_rows = 0
+
+    def add_rows(self, g: np.ndarray) -> None:
+        if len(g):
+            np.add.at(self.counts, g, 1)
+            self.n_single_rows += len(g)
+
+    def add_pairs(self, g: np.ndarray, item: np.ndarray, dedupe: bool = False) -> None:
+        if not len(g):
+            return
+        g = g.astype(np.uint64)
+        key = ((g & np.uint64((1 << PART_BITS) - 1)) << np.uint64(ITEM_BITS)) | \
+            (item.astype(np.uint64) & np.uint64((1 << ITEM_BITS) - 1))
+        part = (g >> np.uint64(PART_BITS)).astype(np.int64)
+        order = np.argsort(part, kind="stable")
+        part, key = part[order], key[order]
+        cut = np.flatnonzero(np.diff(part)) + 1
+        for s, e in zip(np.r_[0, cut], np.r_[cut, len(part)]):
+            seg = key[s:e]
+            if dedupe:
+                seg = np.unique(seg)
+            p = int(part[s])
+            fh = self.fh.get(p)
+            if fh is None:
+                fh = self.fh[p] = open(self.dir / f"{p:04d}.bin", "ab")
+            fh.write(seg.tobytes())
+            self.n_pairs_written += len(seg)
+
+    def reduce(self, chunk_keys: int = 40_000_000) -> np.ndarray:
+        for fh in self.fh.values():
+            fh.close()
+        self.fh = {}
+        nloc = 1 << PART_BITS
+        for f in sorted(self.dir.glob("*.bin")):
+            p = int(f.stem)
+            keys = np.memmap(f, dtype=np.uint64, mode="r") if f.stat().st_size else np.zeros(0, np.uint64)
+            n_sub = max(1, -(-len(keys) // chunk_keys))
+            sub = -(-nloc // n_sub)
+            c = np.zeros(nloc, dtype=np.int64)
+            for r in range(n_sub):  # large parts: split by group sub-range, one scan each
+                if n_sub == 1:
+                    sel = np.asarray(keys)
+                else:
+                    loc = keys >> np.uint64(ITEM_BITS)
+                    sel = np.asarray(keys[(loc >= np.uint64(r * sub)) & (loc < np.uint64((r + 1) * sub))])
+                u = np.unique(sel)
+                c += np.bincount((u >> np.uint64(ITEM_BITS)).astype(np.int64), minlength=nloc)
+                del sel, u
+            base = p << PART_BITS
+            hi = min(base + nloc, self.n_groups)
+            self.counts[base:hi] += c[:hi - base].astype(np.int32)
+            del keys
+            f.unlink()
+        shutil.rmtree(self.dir, ignore_errors=True)
+        return self.counts
+
+
+def _letter_writers(root: Path, schema: pa.Schema) -> dict:
+    root.mkdir(parents=True, exist_ok=True)
+    return {L: pq.ParquetWriter(root / f"{L}.parquet", schema, compression="zstd", compression_level=1)
+            for L in LETTERS}
+
+
+def _write_by_letter(tbl: pa.Table, writers: dict) -> int:
+    """Split rows by the first letter of ik14 (InChIKey blocks are A-Z only)."""
+    first = pc.utf8_slice_codeunits(tbl["ik14"], 0, 1)
+    n = 0
+    for L in LETTERS:
+        part = tbl.filter(pc.equal(first, L))
+        if len(part):
+            writers[L].write_table(part)
+            n += len(part)
+    return n
+
+
+def _close_writers(writers: dict) -> None:
+    for w in writers.values():
+        w.close()
+
+
+def _np_tier_path() -> Path:
+    return PROCESSED / "db" / "np" / "np.parquet"
+
+
+def priors_map(cfg: Cfg, pw: Path) -> dict:
+    """Group ids: g = global row of the ik14 in the tier (shards in mass order, rows in file
+    order), then NP-tier ik14s absent from the tier (sorted by ik14). Writes cid2g.npy
+    (int32, -1 = no group), n_all.npy (CIDs per group), np_groups.parquet (NP ik14 -> g)."""
+    t0 = time.time()
+    idx = json.loads((cfg.out / "_index.json").read_text())
+    names = sorted(idx["shards"])
+    by = pw / "by_letter"
+    shutil.rmtree(by, ignore_errors=True)
+    tier_w = _letter_writers(by / "tier", pa.schema([("ik14", pa.string()), ("g", pa.int32())]))
+    offsets = {}
+    off = 0
+    max_cid = 0
+    for name in names:
+        t = pq.read_table(cfg.out / name, columns=["ik14", "cid"])
+        n = len(t)
+        if n:
+            max_cid = max(max_cid, pc.max(t["cid"]).as_py())
+        offsets[name] = [off, n]
+        _write_by_letter(pa.table({"ik14": t["ik14"], "g": pa.array(np.arange(off, off + n, dtype=np.int32))}),
+                         tier_w)
+        off += n
+    _close_writers(tier_w)
+    n_tier = off
+    np_w = _letter_writers(by / "np", pa.schema([("ik14", pa.string())]))
+    n_np = 0
+    if _np_tier_path().exists():
+        t = pq.read_table(_np_tier_path(), columns=["ik14"])
+        t = t.filter(pc.equal(pc.utf8_length(t["ik14"]), 14))
+        n_np = _write_by_letter(t, np_w)
+    else:
+        log.warning("priors map: %s missing; NP-only ik14 groups skipped", _np_tier_path())
+    _close_writers(np_w)
+    log.info("priors map: tier %s rows in %d shards, NP tier %s ik14 split by first letter", fmt_n(n_tier),
+             len(names), fmt_n(n_np))
+
+    wait_for_memory(2.0, "priors map (CID-InChI-Key stream)")
+    cid_w = _letter_writers(by / "cid", pa.schema([("cid", pa.int32()), ("ik14", pa.string())]))
+    info: dict = {}
+    n_badkey = 0
+    max_cid_file = 0
+    for b in prior_stream(cfg, "ik", f"{BASE_URL}/CID-InChI-Key.gz", ["cid", "inchi", "inchikey"],
+                          {"cid": pa.int32(), "inchikey": pa.string()}, ["cid", "inchikey"], info):
+        key = b.column("inchikey")
+        ok = pc.and_(pc.equal(pc.utf8_length(key), 27), pc.is_valid(b.column("cid")))
+        n_badkey += len(key) - pc.sum(ok).as_py() if len(key) else 0
+        b = b.filter(ok)
+        if not b.num_rows:
+            continue
+        max_cid_file = max(max_cid_file, pc.max(b.column("cid")).as_py())
+        _write_by_letter(pa.table({"cid": b.column("cid"), "ik14": pc.utf8_slice_codeunits(b.column("inchikey"), 0, 14)}),
+                         cid_w)
+    _close_writers(cid_w)
+    info["bad_inchikey_rows"] = n_badkey
+    info["max_cid"] = max_cid_file
+    max_cid = max(max_cid, max_cid_file)
+
+    wait_for_memory(1.5, "priors map (per-letter joins)")
+    con = duck(cfg, prior_memory_limit(cfg))
+    cid2g = np.lib.format.open_memmap(pw / "cid2g.part.npy", mode="w+", dtype=np.int32, shape=(max_cid + 1,))
+    cid2g[:] = -1
+    n_extra = 0
+    np_groups = []
+    n_join = 0
+    dup_cids = 0
+    for L in LETTERS:
+        tf, nf, cf = (by / s / f"{L}.parquet" for s in ("tier", "np", "cid"))
+        ex = con.execute(f"SELECT DISTINCT n.ik14 FROM read_parquet('{nf}') n "
+                         f"ANTI JOIN read_parquet('{tf}') t USING (ik14) ORDER BY n.ik14").to_arrow_table()
+        ex = ex.read_all() if hasattr(ex, "read_all") else ex
+        ex_t = pa.table({"ik14": ex.column("ik14"),
+                         "g": pa.array(np.arange(n_tier + n_extra, n_tier + n_extra + len(ex), dtype=np.int32))})
+        n_extra += len(ex)
+        con.register("ex_l", ex_t)
+        grp = f"(SELECT ik14, g FROM read_parquet('{tf}') UNION ALL SELECT ik14, g FROM ex_l)"
+        nrow, ndist = con.execute(f"SELECT count(*), count(DISTINCT cid) FROM read_parquet('{cf}')").fetchone()
+        dup_cids += nrow - ndist
+        j = con.execute(f"SELECT k.cid, t.g FROM read_parquet('{cf}') k JOIN {grp} t USING (ik14)").fetchnumpy()
+        cid2g[np.asarray(j["cid"], dtype=np.int64)] = np.asarray(j["g"], dtype=np.int32)
+        n_join += len(j["cid"])
+        npg = con.execute(f"SELECT n.ik14, t.g FROM read_parquet('{nf}') n JOIN {grp} t USING (ik14)").to_arrow_table()
+        np_groups.append(npg.read_all() if hasattr(npg, "read_all") else npg)
+        con.unregister("ex_l")
+    con.close()
+    n_groups = n_tier + n_extra
+    # Every shard row keeps at least its own (lowest, filtered) CID: a CID missing from the
+    # newer CID-InChI-Key is re-attached to its shard row; a CID whose key moved to another
+    # ik14 follows the newer file (counted, not changed).
+    n_missing = n_moved = 0
+    for name, (o, n) in offsets.items():
+        cid = pq.read_table(cfg.out / name, columns=["cid"])["cid"].to_numpy().astype(np.int64)
+        g = np.arange(o, o + n, dtype=np.int32)
+        cur = cid2g[cid]
+        miss = cur < 0
+        n_missing += int(miss.sum())
+        n_moved += int(((cur >= 0) & (cur != g)).sum())
+        cid2g[cid[miss]] = g[miss]
+    cid2g.flush()
+    n_all = np.zeros(n_groups, dtype=np.int32)
+    step = 20_000_000
+    for s in range(0, len(cid2g), step):
+        v = np.asarray(cid2g[s:s + step])
+        np.add.at(n_all, v[v >= 0], 1)
+    del cid2g
+    (pw / "cid2g.part.npy").replace(pw / "cid2g.npy")
+    np.save(pw / "n_all.npy", n_all)
+    npt = pa.concat_tables(np_groups) if np_groups else pa.table({"ik14": pa.array([], pa.string()),
+                                                                   "g": pa.array([], pa.int32())})
+    npt = npt.sort_by("ik14")
+    pq.write_table(npt, pw / "np_groups.parquet", compression="zstd")
+    tier_all = n_all[:n_tier]
+    meta = {"n_tier": n_tier, "n_np_extra": n_extra, "n_groups": n_groups, "max_cid": max_cid,
+            "offsets": offsets, "cid_rows": info.get("rows"), "cids_mapped": n_join, "dup_cids": dup_cids,
+            "tier_rows_without_inchikey_cid": int((tier_all == 0).sum()),
+            "shard_cids_missing_in_new_inchikey_file": n_missing, "shard_cids_moved_to_other_ik14": n_moved,
+            "multi_cid_groups": int((n_all > 1).sum()), "cids_in_multi_groups": int(n_all[n_all > 1].sum()),
+            "max_cids_per_group": int(n_all.max()) if n_groups else 0,
+            "np_ik14_rows": len(npt), "np_ik14_in_pubchem": int((n_all[npt["g"].to_numpy()] > 0).sum()) if len(npt) else 0,
+            "source": info, "seconds": round(time.time() - t0, 1)}
+    (pw / "groups.json").write_text(json.dumps(meta, indent=1))
+    shutil.rmtree(by, ignore_errors=True)
+    log.info("priors map: %s groups (%s tier + %s NP-only), %s CIDs mapped, %s multi-CID groups holding %s CIDs, "
+             "max %s CIDs per group, shard CIDs re-attached %s, moved %s, %.0f s", fmt_n(n_groups), fmt_n(n_tier),
+             fmt_n(n_extra), fmt_n(n_join), fmt_n(meta["multi_cid_groups"]), fmt_n(meta["cids_in_multi_groups"]),
+             fmt_n(meta["max_cids_per_group"]), fmt_n(n_missing), fmt_n(n_moved), time.time() - t0)
+    return meta
+
+
+class GroupMap:
+    """cid -> group id and multi-CID flag, memory-mapped (file-backed pages, reclaimable)."""
+
+    def __init__(self, pw: Path):
+        self.meta = json.loads((pw / "groups.json").read_text())
+        self.cid2g = np.load(pw / "cid2g.npy", mmap_mode="r")
+        self.multi = np.load(pw / "n_all.npy", mmap_mode="r") > 1
+        self.n_groups = int(self.meta["n_groups"])
+
+    def lookup(self, cid: np.ndarray) -> np.ndarray:
+        cid = np.asarray(cid, dtype=np.int64)
+        g = np.full(len(cid), -1, dtype=np.int32)
+        ok = (cid >= 0) & (cid < len(self.cid2g))
+        if ok.all():
+            g[:] = self.cid2g[cid]
+        else:
+            g[ok] = self.cid2g[cid[ok]]
+        return g
+
+
+def _hash_strings(con, arr: pa.Array, lower: bool) -> np.ndarray:
+    con.register("hs_t", pa.table({"s": arr}))
+    expr = "hash(lower(s))" if lower else "hash(s)"
+    h = con.execute(f"SELECT {expr} AS h FROM hs_t").fetchnumpy()["h"]
+    con.unregister("hs_t")
+    return np.asarray(h, dtype=np.uint64) >> np.uint64(PART_BITS)
+
+
+def priors_count(cfg: Cfg, pw: Path, step: str, gm: GroupMap) -> dict:
+    """Stream one source and write <column>.npy (int32 per group). See PRIOR_FIELDS."""
+    t0 = time.time()
+    info: dict = {}
+    con = duck(cfg, "1GB")
+    con.execute("SET threads=1")
+    if step in ("sid", "synonym", "patent"):
+        fname, cols, types, keep, col = {
+            "sid": ("CID-SID.gz", ["cid", "sid", "type"], {"cid": pa.int32(), "sid": pa.int64(), "type": pa.int8()},
+                    ["cid", "sid", "type"], "sid_count"),
+            "synonym": ("CID-Synonym-filtered.gz", ["cid", "name"], {"cid": pa.int32(), "name": pa.string()},
+                        ["cid", "name"], "synonym_count"),
+            "patent": ("CID-Patent.gz", ["cid", "patent"], {"cid": pa.int32(), "patent": pa.string()},
+                       ["cid", "patent"], "pc_patent_count"),
+        }[step]
+        ctr = PairCounter(pw, step, gm.n_groups)
+        n_in = 0
+        by_type = {}
+        for b in prior_stream(cfg, step, f"{BASE_URL}/{fname}", cols, types, keep, info):
+            g = gm.lookup(b.column("cid").to_numpy(zero_copy_only=False))
+            ok = g >= 0
+            n_in += int(ok.sum())
+            if step == "sid":
+                tv, tc = np.unique(b.column("type").to_numpy(zero_copy_only=False), return_counts=True)
+                for v, c in zip(tv.tolist(), tc.tolist()):
+                    by_type[str(v)] = by_type.get(str(v), 0) + c
+            mul = np.zeros(len(g), dtype=bool)
+            mul[ok] = gm.multi[g[ok]]
+            ctr.add_rows(g[ok & ~mul])
+            if mul.any():
+                if step == "sid":
+                    item = b.column("sid").to_numpy(zero_copy_only=False)[mul].astype(np.uint64)
+                else:
+                    item = _hash_strings(con, b.column(keep[1]).filter(pa.array(mul)), lower=(step == "synonym"))
+                ctr.add_pairs(g[mul], item)
+        info["rows_in_tier_or_np_groups"] = n_in
+        info["pairs_spilled"] = ctr.n_pairs_written
+        info["single_group_rows"] = ctr.n_single_rows
+        if by_type:
+            info["rows_by_type"] = by_type
+        counts = {col: ctr.reduce()}
+    elif step == "sidmap":
+        vend, nist, rdf_info = source_categories(cfg)
+        info["source_categories"] = rdf_info
+        ctr_v = PairCounter(pw, "vendor", gm.n_groups)
+        ctr_d = PairCounter(pw, "depositor", gm.n_groups)
+        src_id: dict[str, int] = {}
+        src_sids: list[int] = []
+        n_with_cid = n_in = 0
+        for b in prior_stream(cfg, "sidmap", f"{SUBSTANCE_URL}/SID-Map.gz", ["line"], {"line": pa.string()},
+                              ["line"], info, delimiter="\x1f"):
+            parts = pc.split_pattern(b.column("line"), "\t")
+            parts = parts.filter(pc.greater_equal(pc.list_value_length(parts), 4))
+            if not len(parts):
+                continue
+            cid_s = pc.list_element(parts, 3)
+            has = pc.match_substring_regex(cid_s, "^[0-9]{1,10}$")
+            parts, cid_s = parts.filter(has), cid_s.filter(has)
+            n_with_cid += len(cid_s)
+            src = pc.list_element(parts, 1).dictionary_encode()
+            lut = np.empty(len(src.dictionary), dtype=np.int64)
+            for i, nm in enumerate(src.dictionary.to_pylist()):
+                j = src_id.get(nm)
+                if j is None:
+                    j = src_id[nm] = len(src_id)
+                    src_sids.append(0)
+                lut[i] = j
+            sid_src = lut[src.indices.to_numpy(zero_copy_only=False)]
+            for j, c in zip(*np.unique(sid_src, return_counts=True)):
+                src_sids[int(j)] += int(c)
+            g = gm.lookup(pc.cast(cid_s, pa.int64()).to_numpy(zero_copy_only=False))
+            ok = g >= 0
+            n_in += int(ok.sum())
+            is_v = np.array([nm in vend for nm in src_id], dtype=bool)
+            is_n = np.array([nm in nist or bool(NIST_RE.search(nm)) for nm in src_id], dtype=bool)
+            dep = ok & ~is_n[sid_src]
+            ctr_d.add_pairs(g[dep], sid_src[dep].astype(np.uint64), dedupe=True)
+            ven = ok & is_v[sid_src] & ~is_n[sid_src]
+            ctr_v.add_pairs(g[ven], sid_src[ven].astype(np.uint64), dedupe=True)
+        names = list(src_id)
+        top = sorted(range(len(names)), key=lambda i: -src_sids[i])
+        info.update({
+            "sids_with_standardized_cid": n_with_cid, "sids_in_groups": n_in, "n_sources_seen": len(names),
+            "n_vendor_sources_seen": int(sum(nm in vend for nm in names)),
+            "sids_of_vendor_sources": int(sum(src_sids[i] for i in range(len(names)) if names[i] in vend)),
+            "nist_sources_excluded": sorted(nm for nm in names if nm in nist or NIST_RE.search(nm)),
+            "top_sources": [[names[i], src_sids[i], names[i] in vend] for i in top[:40]],
+            "pairs_spilled": {"vendor": ctr_v.n_pairs_written, "depositor": ctr_d.n_pairs_written},
+        })
+        log.info("priors sidmap: %s sources seen (%s vendors), %s SIDs with a CID, %s in groups; NIST excluded: %s",
+                 fmt_n(len(names)), info["n_vendor_sources_seen"], fmt_n(n_with_cid), fmt_n(n_in),
+                 info["nist_sources_excluded"])
+        for nm, c, v in info["top_sources"][:15]:
+            log.info("  source %-60s %12s SIDs vendor=%s", nm[:60], fmt_n(c), v)
+        counts = {"n_vendors": ctr_v.reduce(), "n_depositors": ctr_d.reduce()}
+    elif step == "mesh":
+        url = f"{BASE_URL}/CID-MeSH"
+        head = http_head(url)
+        raw = subprocess.run(["curl", "-sS", "--fail", "-L", "--max-time", "600", url], capture_output=True,
+                             check=True).stdout
+        md5_expected = http_text(url + ".md5").split()[0]
+        md5_got = hashlib.md5(raw).hexdigest()
+        if md5_got != md5_expected:
+            raise RuntimeError(f"md5 mismatch for CID-MeSH: {md5_got} != {md5_expected}")
+        cnt = np.zeros(gm.n_groups, dtype=np.int32)
+        multi_sets: dict[int, set] = {}
+        n_lines = n_in = 0
+        for ln in raw.decode("utf-8", errors="replace").splitlines():
+            parts = ln.split("\t")
+            if len(parts) < 2 or not parts[0].isdigit():
+                continue
+            n_lines += 1
+            g = int(gm.lookup(np.array([int(parts[0])]))[0])
+            if g < 0:
+                continue
+            n_in += 1
+            terms = {t.strip().lower() for t in parts[1:] if t.strip()}
+            if gm.multi[g]:
+                multi_sets.setdefault(g, set()).update(terms)
+            else:
+                cnt[g] += len(terms)
+        for g, terms in multi_sets.items():
+            cnt[g] += len(terms)
+        info.update({"url": url, "bytes": len(raw), "last_modified": head.get("last-modified"),
+                     "md5_expected": md5_expected, "md5_ok": True, "rows": n_lines, "rows_in_groups": n_in,
+                     "seconds": round(time.time() - t0, 1)})
+        counts = {"mesh_count": cnt}
+    else:  # pragma: no cover
+        raise ValueError(step)
+    con.close()
+    for col, arr in counts.items():
+        mx = np.iinfo(np.int32).max
+        np.save(pw / f"{col}.npy", np.minimum(arr, mx).astype(np.int32))
+        t = arr[:gm.meta["n_tier"]]
+        log.info("priors %s: %s on tier rows: nonzero %.4f, mean %.2f, max %s", step, col,
+                 float((t > 0).mean()) if len(t) else 0.0, float(t.mean()) if len(t) else 0.0,
+                 fmt_n(int(t.max())) if len(t) else 0)
+    info["seconds_total"] = round(time.time() - t0, 1)
+    return info
+
+
+def _ttl_records(text: str) -> dict:
+    """Minimal reader for PubChem's pc_source.ttl: {subject: {predicate: [objects]}}."""
+    recs: dict = {}
+    subj = pred = None
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("@prefix"):
+            continue
+        if not line.startswith(("\t", " ")):
+            parts = line.split("\t", 2)
+            if len(parts) < 3:
+                continue
+            subj, pred, rest = parts
+        else:
+            rest = line
+        rest = rest.strip()
+        if rest.endswith((",", ".", ";")):
+            rest = rest[:-1].rstrip()
+        if subj is None:
+            continue
+        recs.setdefault(subj, {}).setdefault(pred, []).append(rest)
+    return recs
+
+
+def _ttl_literal(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"':
+        s = s[1:s.rindex('"')]
+        s = s.replace('\\"', '"').replace("\\\\", "\\")
+    return s
+
+
+def source_categories(cfg: Cfg) -> tuple[set, set, dict]:
+    """Names (as they appear in SID-Map) of vendor sources and of NIST sources.
+
+    Categories come from the PubChem RDF source file (dcterms:subject); a source is
+    known by its id (dcterms:title), its display name (dcterms:alternative) and every
+    display name it has had (Substance/Extras/Source-Names)."""
+    ttl = zlib.decompress(subprocess.run(["curl", "-sS", "--fail", "-L", "--max-time", "120", SOURCE_RDF_URL],
+                                         capture_output=True, check=True).stdout, 31).decode("utf-8")
+    names_txt = http_text(f"{SUBSTANCE_URL}/Source-Names")
+    alias: dict[str, set] = {}
+    for ln in names_txt.splitlines():
+        p = ln.split("\t")
+        if len(p) >= 2:
+            alias.setdefault(p[0], set()).add(p[1])
+            alias.setdefault(p[1], set()).add(p[0])
+    vend, nist = set(), set()
+    n_vendor_records = 0
+    for subj, r in _ttl_records(ttl).items():
+        cats = r.get("dcterms:subject", [])
+        nm = {_ttl_literal(x) for x in r.get("dcterms:title", []) + r.get("dcterms:alternative", [])}
+        for x in list(nm):
+            nm |= alias.get(x, set())
+        if any(NIST_RE.search(x) for x in nm):
+            nist |= nm
+        if VENDOR_CATEGORY in cats:
+            n_vendor_records += 1
+            vend |= nm
+    vend -= nist
+    info = {"rdf_url": SOURCE_RDF_URL, "rdf_bytes": len(ttl), "vendor_records": n_vendor_records,
+            "vendor_names": len(vend), "nist_names": sorted(nist)}
+    log.info("source categories: %d vendor records (%d names incl. aliases); NIST names %s", n_vendor_records,
+             len(vend), sorted(nist))
+    return vend, nist, info
+
+
+def _quantiles(x: np.ndarray, qs=(0.5, 0.9, 0.99, 0.999), chunk: int = 10_000_000) -> dict:
+    """Quantiles of a non-negative integer array (or memmap) via its histogram, in chunks."""
+    n = len(x)
+    if not n:
+        return {}
+    mx = max(int(np.max(x[s:s + chunk])) for s in range(0, n, chunk))
+    h = np.zeros(mx + 1, dtype=np.int64)
+    tot = 0
+    for s in range(0, n, chunk):
+        v = np.asarray(x[s:s + chunk])
+        h += np.bincount(v, minlength=mx + 1)
+        tot += int(v.sum(dtype=np.int64))
+    cdf = np.cumsum(h) / n
+    out = {f"p{q * 100:g}": int(np.searchsorted(cdf, q)) for q in qs}
+    out.update({"mean": round(tot / n, 3), "max": mx, "frac_zero": round(float(h[0] / n), 4)})
+    return out
+
+
+def priors_write(cfg: Cfg, pw: Path) -> dict:
+    """Rewrite every shard with the prior columns appended (row groups copied one by one,
+    so rows, order and row-group boundaries are unchanged), refresh _index.json and write
+    np_priors.parquet (NP-tier ik14 -> prior columns) for build_npdb.py --stage priors."""
+    t0 = time.time()
+    meta = json.loads((pw / "groups.json").read_text())
+    arrs = {c: np.load(pw / f"{c}.npy", mmap_mode="r") for c in PRIOR_NAMES}
+    idx = json.loads((cfg.out / "_index.json").read_text())
+    wdir = pw / "write"
+    wdir.mkdir(exist_ok=True)
+    for name, (off, n) in sorted(meta["offsets"].items()):
+        mk = wdir / f"{name}.json"
+        path = cfg.out / name
+        if mk.exists() and pq.read_schema(path).names == PRIOR_SCHEMA.names:
+            sh = json.loads(mk.read_text())
+            idx["shards"].setdefault(name, {}).update({k: sh[k] for k in ("rows", "bytes", "sha256")})
+            continue
+        pf = pq.ParquetFile(path)
+        tmp = path.with_suffix(".parquet.part")
+        w = pq.ParquetWriter(tmp, PRIOR_SCHEMA, compression="zstd", compression_level=9,
+                             use_dictionary=["formula", "pmid_count", "n_cids", *PRIOR_NAMES],
+                             write_statistics=True)
+        pos = off
+        rg_rows = []
+        for i in range(pf.metadata.num_row_groups):
+            t = pf.read_row_group(i)
+            t = t.select(OUT_SCHEMA.names)
+            k = len(t)
+            cols = {}
+            for c, typ in PRIOR_FIELDS:
+                v = np.asarray(arrs[c][pos:pos + k])
+                if typ == pa.int16():
+                    v = np.minimum(v, np.iinfo(np.int16).max).astype(np.int16)
+                cols[c] = pa.array(v, type=typ)
+            for c, a in cols.items():
+                t = t.append_column(c, a)
+            w.write_table(t.cast(PRIOR_SCHEMA), row_group_size=max(k, 1))
+            rg_rows.append(k)
+            pos += k
+        w.close()
+        if pos - off != n or sum(rg_rows) != pf.metadata.num_rows:
+            raise RuntimeError(f"{name}: wrote {pos - off} rows, expected {n}")
+        md = pq.read_metadata(tmp)
+        if md.num_rows != n or [md.row_group(i).num_rows for i in range(md.num_row_groups)] != rg_rows:
+            raise RuntimeError(f"{name}: row groups changed")
+        tmp.replace(path)
+        sh = {"rows": n, "bytes": path.stat().st_size, "sha256": sha256_file(path), "row_groups": len(rg_rows)}
+        mk.write_text(json.dumps(sh))
+        e = idx["shards"].setdefault(name, {})
+        if e.get("rows") not in (None, n):
+            raise RuntimeError(f"{name}: row count {n} differs from _index.json {e.get('rows')}")
+        e.update({k: sh[k] for k in ("rows", "bytes", "sha256")})
+    # stats over the tier rows and over NP ik14
+    n_tier = int(meta["n_tier"])
+    stats = {c: _quantiles(np.asarray(arrs[c][:n_tier])) for c in PRIOR_NAMES}
+    n_all = np.load(pw / "n_all.npy")
+    npg = pq.read_table(pw / "np_groups.parquet")
+    g = npg["g"].to_numpy()
+    np_tbl = pa.table({"ik14": npg["ik14"], **{
+        c: pa.array(np.minimum(np.asarray(arrs[c])[g], np.iinfo(np.int16 if t == pa.int16() else np.int32).max)
+                    .astype(np.int16 if t == pa.int16() else np.int32), type=t) for c, t in PRIOR_FIELDS},
+        "n_pubchem_cids": pa.array(n_all[g].astype(np.int32))})
+    np_out = cfg.work / NP_PRIORS_NAME
+    pq.write_table(np_tbl, np_out.with_suffix(".parquet.part"), compression="zstd")
+    np_out.with_suffix(".parquet.part").replace(np_out)
+    checks = {}
+    for nm, ik, mass in PRIOR_CHECK:
+        t = query_mass(cfg.out, mass, 10.0)
+        hit = t.filter(pc.equal(t["ik14"], ik)).to_pylist()
+        checks[nm] = {k: v for k, v in hit[0].items() if k not in ("smiles",)} if hit else None
+        log.info("priors check %s: %s", nm, checks[nm])
+    total_rows = sum(s["rows"] for s in idx["shards"].values())
+    srcs = {k: v for k, v in load_stats(cfg).get("priors", {}).get("sources", {}).items()}
+    idx.update({
+        "schema": {f.name: str(f.type) for f in PRIOR_SCHEMA},
+        "total_bytes": sum(s["bytes"] for s in idx["shards"].values()),
+        "priors": {
+            "built_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "git_commit": git_commit(),
+            "group": "all PubChem CIDs whose InChIKey (CID-InChI-Key) starts with the ik14; distinct items per group",
+            "columns": {"sid_count": "distinct SIDs linked by CID-SID (type 1 standardized form, type 2 component)",
+                        "synonym_count": "distinct case-folded names in CID-Synonym-filtered",
+                        "pc_patent_count": "distinct publication numbers in CID-Patent",
+                        "mesh_count": "distinct MeSH terms in CID-MeSH",
+                        "n_vendors": "distinct depositors (SID-Map, standardized CID) in RDF category Chemical_Vendors",
+                        "n_depositors": "distinct depositors (SID-Map, standardized CID), NIST sources excluded"},
+            "stats_tier_rows": stats, "groups": {k: v for k, v in meta.items() if k != "offsets"},
+            "sources": srcs, "checks": checks,
+        },
+    })
+    if total_rows != idx.get("total_rows"):
+        raise RuntimeError(f"total rows {total_rows} != _index.json {idx.get('total_rows')}")
+    (cfg.out / "_index.json").write_text(json.dumps(idx, indent=1))
+    log.info("priors write: %d shards, %s rows, %.2f GB, np_priors %s rows, %.0f s", len(idx["shards"]),
+             fmt_n(total_rows), idx["total_bytes"] / 1e9, fmt_n(len(np_tbl)), time.time() - t0)
+    for c in PRIOR_NAMES:
+        log.info("  %-16s %s", c, stats[c])
+    return {"stats_tier_rows": stats, "checks": checks, "np_priors_rows": len(np_tbl),
+            "np_priors_sha256": sha256_file(np_out), "total_bytes": idx["total_bytes"],
+            "index_sha256": sha256_file(cfg.out / "_index.json"), "seconds": round(time.time() - t0, 1)}
+
+
+def stage_priors(cfg: Cfg):
+    if cfg.marker("priors").exists():
+        log.info("priors: marker present, skipping")
+        return
+    if not (cfg.out / "_index.json").exists():
+        raise RuntimeError("priors: no _index.json; run stages 1-3 first")
+    pw = cfg.work / "priors"
+    pw.mkdir(parents=True, exist_ok=True)
+    gj = pw / "groups.json"
+    if gj.exists():  # a group map of older shards is useless: start over
+        rows_now = {k: v["rows"] for k, v in json.loads((cfg.out / "_index.json").read_text())["shards"].items()}
+        rows_map = {k: v[1] for k, v in json.loads(gj.read_text())["offsets"].items()}
+        if rows_now != rows_map:
+            log.warning("priors: group map does not match the current shards; rebuilding from the map step")
+            shutil.rmtree(pw)
+            pw.mkdir(parents=True)
+    stats = load_stats(cfg)
+    ps = stats.setdefault("priors", {})
+    gm = None
+    for step in PRIOR_STEPS:
+        mk = pw / f".done_{step}"
+        if mk.exists():
+            log.info("priors %s: done, skipping", step)
+            continue
+        ts = time.time()
+        if step == "map":
+            res = priors_map(cfg, pw)
+            ps.setdefault("sources", {})["CID-InChI-Key.gz"] = res.pop("source")
+            ps["map"] = {k: v for k, v in res.items() if k != "offsets"}
+        elif step == "write":
+            ps["write"] = priors_write(cfg, pw)
+        else:
+            wait_for_memory(2.0, f"priors {step}")
+            if gm is None:
+                gm = GroupMap(pw)
+            info = priors_count(cfg, pw, step, gm)
+            ps.setdefault("sources", {})[step] = info
+        ps.setdefault("timing_seconds", {})[step] = round(time.time() - ts, 1)
+        ps.setdefault("peak_rss_mb", {})[step] = round(peak_rss_mb())
+        stats["priors"] = ps
+        save_stats(cfg, stats)
+        if step == "write":  # _index.json now carries the sources too
+            idx = json.loads((cfg.out / "_index.json").read_text())
+            idx["priors"]["sources"] = ps.get("sources", {})
+            (cfg.out / "_index.json").write_text(json.dumps(idx, indent=1))
+            ps["write"]["index_sha256"] = sha256_file(cfg.out / "_index.json")
+            save_stats(cfg, stats)
+        mk.write_text(datetime.now(timezone.utc).isoformat())
+        log.info("priors %s finished in %.0f s (peak rss %.0f MB, available %.1f GB)", step, time.time() - ts,
+                 peak_rss_mb(), mem_available_gb())
+    if not cfg.keep_intermediates:
+        freed = 0
+        for p in list(pw.glob("*.npy")) + list(pw.glob("pairs_*")):
+            freed += dir_size(p)
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        log.info("priors: deleted %.2f GB of intermediates (kept groups.json, np_groups.parquet, markers)",
+                 freed / 1e9)
+    cfg.marker("priors").write_text(datetime.now(timezone.utc).isoformat())
+    if not cfg.test:
+        stage_docs(cfg)  # WP3 row and section: new _index.json sha256 and size
+        priors_docs(cfg)
+
+
+PRIORS_START = "<!-- R3:pubchem-priors:start -->"
+PRIORS_END = "<!-- R3:pubchem-priors:end -->"
+
+
+def priors_docs(cfg: Cfg):
+    """Write the R3 PubChem-priors section of docs/ARTEFACTS.md (after the WP3 section)."""
+    ps = load_stats(cfg).get("priors", {})
+    idx = json.loads((cfg.out / "_index.json").read_text())
+    pr = idx.get("priors", {})
+    tim = ps.get("timing_seconds", {})
+    rss = max(ps.get("peak_rss_mb", {}).values() or [0])
+    gm = pr.get("groups", {})
+    lines = [PRIORS_START, "## PubChem documentation priors (R3)", "",
+             f"- Built {pr.get('built_utc')} by `nice -n 10 python3 scripts/build_pubchem.py --stage priors` "
+             f"(git {pr.get('git_commit')}), {sum(tim.values()) / 60:.0f} min wall "
+             f"({', '.join(f'{k} {v / 60:.1f}' for k, v in tim.items())} min), 2 cores, peak RSS "
+             f"{rss / 1024:.1f} GB, DuckDB memory_limit at most min(6 GB, available - 1 GB). Resumable through "
+             "`data/external/pubchem/priors/.done_*`; intermediates (cid2g.npy, pair files) are deleted at the end.",
+             "- Adds to every shard, after the WP3 columns: " + ", ".join(
+                 f"`{n}` {t}" for n, t in PRIOR_FIELDS) + ". Rows, row order and row groups of every shard are "
+             "unchanged (row groups copied one by one; checked against `_index.json`).",
+             f"- Group of an ik14: {pr.get('group')}. Groups: {fmt_n(gm.get('n_tier', 0))} tier rows + "
+             f"{fmt_n(gm.get('n_np_extra', 0))} NP-tier ik14 not in the tier; {fmt_n(gm.get('cids_mapped', 0))} CIDs "
+             f"mapped; {fmt_n(gm.get('multi_cid_groups', 0))} groups with more than one CID (max "
+             f"{fmt_n(gm.get('max_cids_per_group', 0))}). Tier rows with no CID in the newer CID-InChI-Key: "
+             f"{fmt_n(gm.get('tier_rows_without_inchikey_cid', 0))} (join coverage "
+             f"{100.0 * (1 - gm.get('tier_rows_without_inchikey_cid', 0) / max(gm.get('n_tier', 1), 1)):.3f} percent).",
+             "- Definitions: " + "; ".join(f"`{k}`: {v}" for k, v in pr.get("columns", {}).items()) + ". "
+             "No depositor-category flag is stored; NIST sources are excluded from `n_depositors` and are not "
+             "vendors. `pmid_count` is the WP3 column, unchanged.",
+             f"- `np_priors.parquet` (`data/external/pubchem/`, NP ik14 -> the same columns + `n_pubchem_cids`), "
+             f"{fmt_n(ps.get('write', {}).get('np_priors_rows', 0))} rows, sha256 "
+             f"`{ps.get('write', {}).get('np_priors_sha256')}`; joined into np.parquet by "
+             "`build_npdb.py --stage priors`.", "",
+             "Sources (streamed, never stored; md5 checked):", "",
+             "| step | file | Last-Modified | bytes | lines | seconds |", "|---|---|---|---|---|---|"]
+    for k, s in ps.get("sources", {}).items():
+        lines.append(f"| {k} | {s.get('url', '').rsplit('/', 1)[-1]} | {s.get('last_modified')} | "
+                     f"{fmt_n(s.get('bytes') or 0)} | {fmt_n(s.get('rows') or 0)} | {s.get('seconds')} |")
+    sc = ps.get("sources", {}).get("sidmap", {}).get("source_categories", {})
+    if sc:
+        lines += ["", f"Vendor categories: `{SOURCE_RDF_URL}` ({sc.get('vendor_records')} Chemical_Vendors "
+                      f"records, {sc.get('vendor_names')} names with aliases from `Substance/Extras/Source-Names`)."]
+    lines += ["", "Distribution over the tier rows (90.7M):", "",
+              "| column | p50 | p90 | p99 | p99.9 | max | mean | fraction zero |", "|---|---|---|---|---|---|---|---|"]
+    for c, s in pr.get("stats_tier_rows", {}).items():
+        lines.append(f"| {c} | {s.get('p50')} | {s.get('p90')} | {s.get('p99')} | {s.get('p99.9')} | "
+                     f"{fmt_n(s.get('max', 0))} | {s.get('mean')} | {s.get('frac_zero')} |")
+    lines += ["", "Spot checks (tier rows):", "", "| compound | cid | pmid_count | n_cids | " +
+              " | ".join(PRIOR_NAMES) + " |", "|---" * (3 + len(PRIOR_NAMES)) + "|---|"]
+    for nm, r in pr.get("checks", {}).items():
+        if r:
+            lines.append(f"| {nm} | {r['cid']} | {fmt_n(r['pmid_count'])} | {r['n_cids']} | " +
+                         " | ".join(fmt_n(r[c]) for c in PRIOR_NAMES) + " |")
+    lines += ["", f"sha256 of `_index.json` (lists the per-shard sha256): `{sha256_file(cfg.out / '_index.json')}`; "
+                  f"tier size {idx.get('total_bytes', 0) / 1e9:.2f} GB.", PRIORS_END, ""]
+    section = "\n".join(lines)
+    path = DOCS / "ARTEFACTS.md"
+    text = path.read_text()
+    if PRIORS_START in text and PRIORS_END in text:
+        a, b = text.index(PRIORS_START), text.index(PRIORS_END) + len(PRIORS_END)
+        text = text[:a] + section.rstrip("\n") + text[b:]
+    else:
+        anchor = SECTION_END
+        i = text.index(anchor) + len(anchor) if anchor in text else len(text)
+        text = text[:i] + "\n\n" + section.rstrip("\n") + text[i:]
+    path.write_text(text)
+    log.info("docs: wrote the R3 priors section to %s", path)
 
 
 # ---------------------------------------------------------------- self-check
@@ -929,7 +1777,8 @@ def stage_docs(cfg: Cfg):
     stage_min = ", ".join(f"stage {k} {timing[k] / 60:.1f} min" for k in ("1", "2", "3") if k in timing)
     peak_disk = (sum(stats.get(f"stage1_{n}", {}).get("parquet_bytes", 0) for n in STAGE1_ORDER)
                  + stats.get("stage2", {}).get("stage2_bytes", 0))
-    rss = list(stats.get("peak_rss_mb_by_stage", {}).values()) or [stats.get("stage2", {}).get("peak_rss_mb", 0)]
+    rss = [v for k, v in stats.get("peak_rss_mb_by_stage", {}).items() if k in ("1", "2", "3")] or \
+        [stats.get("stage2", {}).get("peak_rss_mb", 0)]
     lines = [SECTION_START, "## PubChem tier (WP3)", ""]
     lines += [
         f"- Built {idx['built_utc']} by `scripts/build_pubchem.py` (git {idx['git_commit']}). "
@@ -951,6 +1800,11 @@ def stage_docs(cfg: Cfg):
         "row groups of 100,000 rows, zstd level 9, so a pyarrow `filters=[('mono_mass', '>=', lo), ...]` read "
         "touches one or two row groups.",
         "- Not done here: RDKit parsing (lazy at inference, PLAN.md 2.2), fingerprints, NP-likeness.",
+    ]
+    if idx.get("priors"):
+        lines.append("- R3 documentation-prior columns (" + ", ".join(f"`{n}`" for n in PRIOR_NAMES) + ") are "
+                     "appended by `--stage priors`; see the PubChem documentation priors section below.")
+    lines += [
         "",
         "Sources (PubChem FTP `Compound/Extras`, streamed, never stored; md5 checked against the published `.md5`):",
         "",
@@ -1032,6 +1886,13 @@ def reconcile_markers(cfg: Cfg) -> None:
     """Drop stage markers whose outputs are gone, so that a rerun rebuilds instead of
     skipping (e.g. data/processed was wiped but data/external/pubchem survived)."""
     idx_path = cfg.out / "_index.json"
+    if cfg.marker("priors").exists() and idx_path.exists():
+        files = [cfg.out / f for f in json.loads(idx_path.read_text()).get("shards", {})]
+        if any(f.exists() and pq.read_schema(f).names != PRIOR_SCHEMA.names for f in files):
+            log.warning("priors marker present but some shards lack the prior columns: redoing the write step")
+            cfg.marker("priors").unlink()
+            (cfg.work / "priors" / ".done_write").unlink(missing_ok=True)
+            shutil.rmtree(cfg.work / "priors" / "write", ignore_errors=True)
     if cfg.marker("3").exists():
         ok = idx_path.exists()
         if ok:
@@ -1059,7 +1920,7 @@ def reconcile_markers(cfg: Cfg) -> None:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--stage", default="all", choices=["all", "1", "2", "3", "check", "cleanup", "docs"])
+    ap.add_argument("--stage", default="all", choices=["all", "1", "2", "3", "priors", "check", "cleanup", "docs"])
     ap.add_argument("--test", action="store_true", help="small dry run in data/external/pubchem_test")
     ap.add_argument("--max-bytes", type=int, default=None, help="stop each download after this many compressed bytes (test)")
     ap.add_argument("--work-dir", default=None)
@@ -1082,13 +1943,13 @@ def main():
     if args.force:
         for m in cfg.work.glob(".stage_*"):
             m.unlink()
-        for d in (cfg.s1, cfg.s2):
+        for d in (cfg.s1, cfg.s2, cfg.work / "priors"):
             shutil.rmtree(d, ignore_errors=True)
         for p in cfg.out.glob("mass_*.parquet"):
             p.unlink()
     t0 = time.time()
     reconcile_markers(cfg)
-    stages = ["1", "2", "3", "check", "cleanup", "docs"] if args.stage == "all" else [args.stage]
+    stages = ["1", "2", "3", "priors", "check", "cleanup", "docs"] if args.stage == "all" else [args.stage]
     for st in stages:
         ts = time.time()
         if st == "1":
@@ -1097,6 +1958,8 @@ def main():
             stage2(cfg)
         elif st == "3":
             stage3(cfg)
+        elif st == "priors":
+            stage_priors(cfg)
         elif st == "check":
             res = stage_check(cfg)
             if not res["ok"]:
@@ -1114,9 +1977,11 @@ def main():
                 log.info("docs skipped in --test mode")
             else:
                 stage_docs(cfg)
+                if cfg.marker("priors").exists():
+                    priors_docs(cfg)
         stats = load_stats(cfg)
         stats.setdefault("timing_seconds", {})[st] = round(time.time() - ts, 1)
-        if st in ("1", "2", "3"):
+        if st in ("1", "2", "3", "priors"):
             stats.setdefault("peak_rss_mb_by_stage", {})[st] = round(peak_rss_mb())
         save_stats(cfg, stats)
         log.info("stage %s finished in %.0f s (peak rss %.0f MB)", st, time.time() - ts, peak_rss_mb())

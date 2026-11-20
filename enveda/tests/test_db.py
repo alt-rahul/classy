@@ -255,3 +255,64 @@ def test_real_union_tiers():
         hit = r[r["ik14"] == ik]
         assert len(hit) == 1 and hit["tier"].iloc[0] == "np" and bool(hit["in_pubchem"].iloc[0])
     db.release()
+
+
+# ---------------------------------------------------------------------- R3 prior columns
+
+def _add_priors(path, values: dict):
+    """Rewrite a parquet file with the R3 prior columns appended (values: column -> list)."""
+    t = pq.read_table(path)
+    for c in cdb.PRIOR_COLUMNS:
+        typ = pa.int16() if c in ("n_vendors", "n_depositors") else pa.int32()
+        t = t.append_column(c, pa.array(values[c], type=typ))
+    pq.write_table(t, path, row_group_size=2)
+
+
+def test_prior_columns(tmp_path):
+    npd = tmp_path / "np"
+    npd.mkdir()
+    np_path, _ = _write_np(npd)
+    # NP tier with priors: AAAA... has its own values, BBBB... has none (NA).
+    na = None
+    _add_priors(np_path, {c: [1, 50, na, 2, 900] for c in cdb.PRIOR_COLUMNS})
+    pcd = _write_pubchem(tmp_path / "pubchem")
+    # Only shard 200 carries priors (mixed tiers during a rebuild must still work).
+    sh = pcd / cdb.shard_name(200)
+    n = pq.read_metadata(sh).num_rows
+    _add_priors(sh, {c: [10 * (i + 1) for i in range(n)] for c in cdb.PRIOR_COLUMNS})
+    db = CandidateDB(np_path=np_path, pubchem_dir=pcd, cfg=Config())
+    r = db.lookup(200.0, 10.0, tiers=("np", "pubchem"))
+    assert list(r.columns) == list(OUT_COLUMNS)
+    assert list(OUT_COLUMNS[-len(cdb.PRIOR_COLUMNS):]) == list(cdb.PRIOR_COLUMNS)
+    a = r.set_index("ik14")
+    for c in cdb.PRIOR_COLUMNS:
+        assert r[c].dtype == "Int32"
+        assert a.at["AAAAAAAAAAAAAA", c] == 50     # NP value kept although the PubChem shard has none
+        assert a.at["BBBBBBBBBBBBBB", c] == 10     # NP NA filled from the PubChem row (shard 200, row 0)
+        assert a.at["QQQQQQQQQQQQQQ", c] == 20     # PubChem-only row with priors
+        assert pd.isna(a.at["PPPPPPPPPPPPPP", c])  # shard 190 predates the priors
+    npo = db.lookup(200.0, 10.0, tiers=("np",)).set_index("ik14")
+    assert npo.at["AAAAAAAAAAAAAA", "sid_count"] == 50 and pd.isna(npo.at["BBBBBBBBBBBBBB", "sid_count"])
+    # Lookups without priors in any file return NA columns of the same dtype.
+    (tmp_path / "np_old").mkdir()
+    old_np, _ = _write_np(tmp_path / "np_old")
+    old = CandidateDB(np_path=old_np, pubchem_dir=_write_pubchem(tmp_path / "pc_old"), cfg=Config())
+    o = old.lookup(200.0, 10.0)
+    assert list(o.columns) == list(OUT_COLUMNS)
+    assert all(o[c].isna().all() and o[c].dtype == "Int32" for c in cdb.PRIOR_COLUMNS)
+    assert dict(o.dtypes) == dict(r.dtypes)
+
+
+@pytest.mark.data(REAL_NP, "data/processed/db/pubchem/_index.json")
+def test_real_prior_columns():
+    idx = json.loads((cdb.pubchem_dir() / "_index.json").read_text())
+    if "priors" not in idx:
+        pytest.skip("PubChem tier built before R3 (no prior columns)")
+    db = CandidateDB()
+    for m, ik in ((194.0804, "RYYVLZVUVIJVGH"), (302.0427, "REFJWTPEDVJJIY"), (853.3310, "RCINICONZNJXQF")):
+        r = db.lookup(m, 10.0, tiers=("np", "pubchem"))
+        hit = r[r["ik14"] == ik].iloc[0]
+        assert hit["sid_count"] > 500 and hit["pc_patent_count"] > 1000 and hit["synonym_count"] > 50
+        assert hit["n_vendors"] > 10 and hit["mesh_count"] >= 1
+        assert r["sid_count"].notna().all()
+    db.release()
