@@ -1,0 +1,25 @@
+tag gw2 todo 31
+2/31 scored_0218 len 331 old 333 55.6s elapsed 110s improved 2 gain 11
+4/31 scored_0405 len 325 old 327 49.4s elapsed 207s improved 4 gain 17
+6/31 scored_1000 len 280 old 277 68.6s elapsed 324s improved 5 gain 18
+7/31 scored_0036 len 287 old 275 68.0s elapsed 392s improved 5 gain 18
+8/31 scored_0905 len 270 old 275 69.6s elapsed 462s improved 6 gain 23
+9/31 scored_0865 len 272 old 273 65.4s elapsed 527s improved 7 gain 24
+10/31 scored_0445 len 267 old 271 65.1s elapsed 592s improved 8 gain 28
+12/31 scored_0796 len 260 old 263 55.7s elapsed 707s improved 9 gain 31
+14/31 scored_0784 len 264 old 260 61.5s elapsed 829s improved 9 gain 31
+16/31 scored_0918 len 246 old 255 50.3s elapsed 940s improved 10 gain 40
+18/31 scored_0647 len 244 old 251 61.1s elapsed 1058s improved 12 gain 51
+20/31 scored_0702 len 242 old 247 63.6s elapsed 1182s improved 14 gain 65
+22/31 scored_0410 len 207 old 211 33.0s elapsed 1260s improved 15 gain 69
+25/31 scored_0411 len 203 old 207 28.7s elapsed 1342s improved 17 gain 83
+28/31 scored_0013 len 203 old 197 21.3s elapsed 1423s improved 19 gain 106
+30/31 scored_0754 len 197 old 196 22.8s elapsed 1476s improved 19 gain 106
+31/31 scored_0422 len 187 old 181 30.0s elapsed 1506s improved 19 gain 106
+done gw2 improved 19 gain 106 1506s
+  indep<20  puzzles   27 targets    359 ops     1884 ops/target 5.25
+  indep>=20 puzzles  215 targets   6450 ops    53651 ops/target 8.32
+  other<20  puzzles  107 targets    980 ops     3559 ops/target 3.63
+  other>=20 puzzles  635 targets  19068 ops   106848 ops/target 5.60
+  tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
+  total 165999

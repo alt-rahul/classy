@@ -1,0 +1,41 @@
+tag sm2 todo 107 grid 3
+1/107 scored_0103 len 47 old 51 runs 2 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 76s elapsed 76s improved 1 gain 4
+2/107 scored_0282 len 47 old 50 runs 2 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 63s elapsed 139s improved 2 gain 7
+3/107 scored_0858 len 44 old 48 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 65s elapsed 205s improved 3 gain 11
+4/107 scored_0021 len 46 old 46 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 46s elapsed 251s improved 3 gain 11
+5/107 scored_0084 len 45 old 46 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 59s elapsed 310s improved 4 gain 12
+6/107 scored_0271 len 45 old 46 runs 2 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 61s elapsed 371s improved 5 gain 13
+7/107 scored_0211 len 44 old 45 runs 3 best {"beam": {"width": 12, "branch": 5, "gamma": 0.6, "alpha": 0.15}} 54s elapsed 425s improved 6 gain 14
+8/107 scored_0296 len 43 old 45 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 64s elapsed 489s improved 7 gain 16
+9/107 scored_0233 len 42 old 43 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 58s elapsed 546s improved 8 gain 17
+10/107 scored_0300 len 43 old 43 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 45s elapsed 591s improved 8 gain 17
+11/107 scored_0962 len 40 old 43 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 23s elapsed 614s improved 9 gain 20
+12/107 scored_0029 len 41 old 42 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 64s elapsed 679s improved 10 gain 21
+13/107 scored_0066 len 40 old 42 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 60s elapsed 738s improved 11 gain 23
+14/107 scored_0560 len 41 old 42 runs 2 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 65s elapsed 803s improved 12 gain 24
+15/107 scored_0065 len 40 old 41 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 34s elapsed 837s improved 13 gain 25
+16/107 scored_0092 len 38 old 41 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 25s elapsed 862s improved 14 gain 28
+17/107 scored_0396 len 37 old 41 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 36s elapsed 898s improved 15 gain 32
+18/107 scored_0873 len 38 old 41 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 32s elapsed 931s improved 16 gain 35
+19/107 scored_0221 len 41 old 40 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 23s elapsed 954s improved 16 gain 35
+20/107 scored_0222 len 37 old 40 runs 3 best {"beam": {"width": 12, "branch": 5, "gamma": 0.6, "alpha": 0.15}} 23s elapsed 976s improved 17 gain 38
+21/107 scored_0620 len 36 old 40 runs 3 best {"beam": {"width": 12, "branch": 5, "gamma": 0.6, "alpha": 0.15}} 33s elapsed 1009s improved 18 gain 42
+22/107 scored_0777 len 39 old 40 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 63s elapsed 1072s improved 19 gain 43
+23/107 scored_0880 len 39 old 40 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 24s elapsed 1096s improved 20 gain 44
+24/107 scored_0897 len 38 old 40 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 45s elapsed 1141s improved 21 gain 46
+25/107 scored_0009 len 38 old 39 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 42s elapsed 1183s improved 22 gain 47
+26/107 scored_0095 len 40 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 22s elapsed 1205s improved 22 gain 47
+27/107 scored_0308 len 36 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 27s elapsed 1233s improved 23 gain 49
+28/107 scored_0548 len 37 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 31s elapsed 1264s improved 24 gain 50
+29/107 scored_0637 len 36 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 16s elapsed 1280s improved 25 gain 52
+30/107 scored_0822 len 40 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 32s elapsed 1312s improved 25 gain 52
+31/107 scored_0828 len 37 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 18s elapsed 1330s improved 26 gain 53
+32/107 scored_0863 len 38 old 38 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 30s elapsed 1360s improved 26 gain 53
+33/107 scored_0492 len 36 old 37 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 32s elapsed 1392s improved 27 gain 54
+34/107 scored_0559 len 35 old 37 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 20s elapsed 1412s improved 28 gain 56
+35/107 scored_0583 len 35 old 36 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 57s elapsed 1469s improved 29 gain 57
+36/107 scored_0654 len 35 old 36 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 19s elapsed 1488s improved 30 gain 58
+37/107 scored_0320 len 33 old 35 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 18s elapsed 1506s improved 31 gain 60
+38/107 scored_0368 len 33 old 35 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 26s elapsed 1532s improved 32 gain 62
+39/107 scored_0515 len 34 old 35 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 31s elapsed 1563s improved 33 gain 63
+40/107 scored_0650 len 32 old 35 runs 3 best {"beam": {"width": 16, "branch": 6, "gamma": 0.4}} 10s elapsed 1573s improved 34 gain 66

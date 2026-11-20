@@ -1,0 +1,23 @@
+tag gw5 todo 38
+2/38 scored_0774 len 339 old 332 62.5s elapsed 121s improved 0 gain 0
+4/38 scored_0258 len 329 old 327 56.7s elapsed 234s improved 0 gain 0
+6/38 scored_0780 len 317 old 310 46.9s elapsed 331s improved 0 gain 0
+8/38 scored_0970 len 270 old 269 63.0s elapsed 441s improved 0 gain 0
+10/38 scored_0398 len 241 old 239 45.9s elapsed 545s improved 0 gain 0
+12/38 scored_0765 len 208 old 231 28.1s elapsed 627s improved 1 gain 23
+14/38 scored_0224 len 209 old 215 28.5s elapsed 692s improved 3 gain 41
+17/38 scored_0026 len 212 old 211 29.2s elapsed 775s improved 4 gain 50
+20/38 scored_0990 len 202 old 207 24.8s elapsed 852s improved 7 gain 75
+23/38 scored_0338 len 199 old 205 28.5s elapsed 925s improved 8 gain 81
+26/38 scored_0389 len 200 old 200 25.1s elapsed 1009s improved 10 gain 99
+29/38 scored_0483 len 188 old 193 24.4s elapsed 1080s improved 13 gain 113
+30/38 scored_0042 len 187 old 189 19.2s elapsed 1099s improved 14 gain 115
+32/38 scored_0977 len 187 old 189 27.2s elapsed 1152s improved 16 gain 118
+37/38 scored_0276 len 79 old 78 5.2s elapsed 1216s improved 18 gain 127
+done gw5 improved 19 gain 129 1218s
+  indep<20  puzzles   27 targets    359 ops     1880 ops/target 5.24
+  indep>=20 puzzles  215 targets   6450 ops    53238 ops/target 8.25
+  other<20  puzzles  107 targets    980 ops     3497 ops/target 3.57
+  other>=20 puzzles  635 targets  19068 ops   104387 ops/target 5.47
+  tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
+  total 163059

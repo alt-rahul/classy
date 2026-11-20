@@ -26,6 +26,8 @@ _lib.derive_failed.restype = C.c_int
 _lib.set_wemin.argtypes = [C.c_double]
 _lib.window_cands.restype = C.c_int64
 _lib.level_hist.argtypes = [C.c_int, i64p]
+if hasattr(_lib, 'set_pair_eps'):
+    _lib.set_pair_eps.argtypes = [C.c_double]
 if hasattr(_lib, 'regret_pick'):
     _lib.regret_pick.restype = C.c_int
     _lib.regret_pick.argtypes = [u64p, C.c_int, C.c_int, C.c_double, u64p, C.c_int, C.POINTER(C.c_int)]
@@ -108,6 +110,11 @@ def set_wemin(e):
 
 def derive_failed():
     return _lib.derive_failed()
+
+
+def set_pair_eps(e):
+    if hasattr(_lib, 'set_pair_eps'):
+        _lib.set_pair_eps(C.c_double(e))
 
 
 def regret_pick(ts, maxc, alpha):

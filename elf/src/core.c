@@ -195,6 +195,18 @@ static void radix_range(u64 *a, i64 n, u64 *tmp) {
     if (src != a) memcpy(a, src, 8 * n);
 }
 static inline void isort_u64(u64 *a, i64 n) {
+    if (n <= 1) return;
+    if (n <= 32) {
+        // branchless rank sort (stable): rank_i = #{j: a_j < a_i} + #{j < i: a_j == a_i}
+        u64 b[32];
+        for (i64 i = 0; i < n; i++) {
+            u64 v = a[i]; i64 r = 0;
+            for (i64 j = 0; j < n; j++) r += (a[j] < v) | ((a[j] == v) & (j < i));
+            b[r] = v;
+        }
+        memcpy(a, b, 8 * n);
+        return;
+    }
     for (i64 i = 1; i < n; i++) {
         u64 v = a[i]; i64 j = i - 1;
         while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; }
@@ -202,9 +214,10 @@ static inline void isort_u64(u64 *a, i64 n) {
     }
 }
 // two-level MSD radix on a log-linear key (bit length, then mantissa bits), then small sorts.
-#define D1N (65 * 64)
+#define D1B 10
+#define D1N (65 << D1B)
 static i64 MC1[D1N + 1];
-static inline int msd_d1(u64 v) { int b = 64 - __builtin_clzll(v); u64 x = v << (64 - b); return (b << 6) | (int)((x >> 57) & 63); }
+static inline int msd_d1(u64 v) { int b = 64 - __builtin_clzll(v); u64 x = v << (64 - b); return (b << D1B) | (int)((x >> (63 - D1B)) & ((1 << D1B) - 1)); }
 static i64 RCNT[24][4097];
 // a[0..n): all values have bit length b and equal bits of x = v << (64 - b) above position top.
 static void rec_sort(u64 *a, i64 n, u64 *tmp, int top, int b, int depth) {
@@ -230,45 +243,78 @@ static void rec_sort(u64 *a, i64 n, u64 *tmp, int top, int b, int depth) {
         prev = end;
     }
 }
-static void msd_sort(u64 *a, i64 n, u64 *tmp) {
-    if (n < 4096) { radix_range(a, n, tmp); return; }
-    memset(MC1, 0, sizeof(MC1));
-    for (i64 i = 0; i < n; i++) MC1[msd_d1(a[i])]++;
+// src -> dst (sorted), same preconditions as rec_sort.
+static void rec_sort_from(const u64 *src, u64 *dst, u64 *scratch, i64 n, int top, int b) {
+    if (n <= 32) { memcpy(dst, src, 8 * n); isort_u64(dst, n); return; }
+    int lg = 63 - __builtin_clzll((u64)n);
+    int w = lg - 1; if (w < 4) w = 4; if (w > 12) w = 12; if (w > top) w = top;
+    if (w <= 0) { memcpy(dst, src, 8 * n); return; }
+    int nb = 1 << w; u64 msk = (u64)nb - 1;
+    i64 *cnt = RCNT[23];
+    memset(cnt, 0, 8 * (nb + 1));
+    int sh = 64 - b, s2 = top - w;
+    for (i64 i = 0; i < n; i++) cnt[(((src[i] << sh) >> s2) & msk) + 1]++;
+    for (int d = 0; d < nb; d++) cnt[d + 1] += cnt[d];
+    for (i64 i = 0; i < n; i++) { u64 v = src[i]; dst[cnt[((v << sh) >> s2) & msk]++] = v; }
+    i64 prev = 0;
+    for (int d = 0; d < nb; d++) {
+        i64 end = cnt[d];
+        i64 m = end - prev;
+        if (m > 1) rec_sort(dst + prev, m, scratch + prev, s2, b, 1);
+        prev = end;
+    }
+}
+// Sort a[0..n) (tmp scratch, a is clobbered), drop duplicates and values present in levels < k,
+// write the result to out (capacity >= n). Returns the number written.
+static i64 msd_sort_dedupe(u64 *a, i64 n, u64 *tmp, int k, u64 *out) {
+    static i64 C4[4][D1N];
+    memset(C4, 0, sizeof(C4));
+    i64 i = 0;
+    for (; i + 4 <= n; i += 4) {
+        C4[0][msd_d1(a[i])]++; C4[1][msd_d1(a[i + 1])]++;
+        C4[2][msd_d1(a[i + 2])]++; C4[3][msd_d1(a[i + 3])]++;
+    }
+    for (; i < n; i++) C4[0][msd_d1(a[i])]++;
     i64 s = 0;
-    for (int b = 0; b < D1N; b++) { i64 c = MC1[b]; MC1[b] = s; s += c; }
+    for (int bk = 0; bk < D1N; bk++) { i64 c = C4[0][bk] + C4[1][bk] + C4[2][bk] + C4[3][bk]; MC1[bk] = s; s += c; }
     MC1[D1N] = n;
     {
         static i64 pos[D1N];
         memcpy(pos, MC1, sizeof(pos));
-        for (i64 i = 0; i < n; i++) { u64 v = a[i]; tmp[pos[msd_d1(v)]++] = v; }
-    }
-    for (int bk = 0; bk < D1N; bk++) {
-        i64 st = MC1[bk], m = MC1[bk + 1] - st;
-        if (m <= 0) continue;
-        memcpy(a + st, tmp + st, 8 * m);
-        if (m > 1) rec_sort(a + st, m, tmp + st, 57, bk >> 6, 0);
-    }
-}
-static void finalize_k(int k, i64 n) {
-    msd_sort(K1, n, K2);
-    i64 m = 0;
-    for (i64 i = 0; i < n; i++) {
-        if (m > 0 && K1[m - 1] == K1[i]) continue;
-        K1[m++] = K1[i];
+        for (i = 0; i + 2 <= n; i += 2) {
+            u64 v0 = a[i], v1 = a[i + 1];
+            int d0 = msd_d1(v0), d1 = msd_d1(v1);
+            if (d0 == d1) { i64 p = pos[d0]; tmp[p] = v0; tmp[p + 1] = v1; pos[d0] = p + 2; }
+            else { tmp[pos[d0]++] = v0; tmp[pos[d1]++] = v1; }
+        }
+        for (; i < n; i++) { u64 v = a[i]; tmp[pos[msd_d1(v)]++] = v; }
     }
     i64 ptr[MAXLEV] = {0};
     i64 r = 0;
-    for (i64 i = 0; i < m; i++) {
-        u64 v = K1[i]; int dup = 0;
-        for (int j = 0; j < k; j++) {
-            while (ptr[j] < LN[j] && LV[j][ptr[j]] < v) ptr[j]++;
-            if (ptr[j] < LN[j] && LV[j][ptr[j]] == v) { dup = 1; break; }
+    u64 last = 0;
+    for (int bk = 0; bk < D1N; bk++) {
+        i64 st = MC1[bk], m = MC1[bk + 1] - st;
+        if (m <= 0) continue;
+        u64 *d = a + st;
+        if (m == 1) d[0] = tmp[st];
+        else rec_sort_from(tmp + st, d, tmp + st, m, 63 - D1B, bk >> D1B);
+        for (i64 q = 0; q < m; q++) {
+            u64 v = d[q];
+            if (v == last) continue;
+            last = v;
+            int dup = 0;
+            for (int j = 0; j < k; j++) {
+                while (ptr[j] < LN[j] && LV[j][ptr[j]] < v) ptr[j]++;
+                if (ptr[j] < LN[j] && LV[j][ptr[j]] == v) { dup = 1; break; }
+            }
+            if (!dup) out[r++] = v;
         }
-        if (!dup) K1[r++] = v;
     }
-    ensure_level(k, r, 0);
-    memcpy(LV[k], K1, 8 * r);
-    LN[k] = r;
+    return r;
+}
+static void finalize_k(int k, i64 n) {
+    ensure_level(k, n, 0);
+    LN[k] = msd_sort_dedupe(K1, n, K2, k, LV[k]);
 }
 
 static inline i64 emit_vw(i64 n, u64 x, int la, i64 ia, u64 y, int lb, i64 ib) {
@@ -541,15 +587,29 @@ static int pair_search(u64 t, int a, int b, PairRes *res) {
                 if (j >= 0) { res->op = OP_MUL; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
             }
         }
-        for (i64 j = 0; j < ny; j++) {
-            u64 w = Y[j];
-            u128 p = (u128)t * w;
-            if (p > LIM) break;
-            if (w >= 2) {
-                i64 i = bsearch_u64(X, nx, (u64)p);
-                if (i >= 0) { res->op = OP_DIV; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+        // t = x / w, w in Y (w >= 2, ascending), x = t * w in X
+        {
+            i64 j0 = lower_bound(Y, ny, 2);
+            i64 j1 = lower_bound(Y, ny, LIM / t + 1);
+            if (j1 - j0 <= 64) {
+                for (i64 j = j0; j < j1; j++) {
+                    u128 p = (u128)t * Y[j];
+                    if (p > LIM) break;
+                    i64 i = bsearch_u64(X, nx, (u64)p);
+                    if (i >= 0) { res->op = OP_DIV; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+                }
+            } else {
+                i64 i = lower_bound(X, nx, (u64)((u128)t * 2 <= LIM ? t * 2 : LIM));
+                for (i64 j = j0; j < j1 && i < nx; j++) {
+                    u128 p128 = (u128)t * Y[j];
+                    if (p128 > LIM) break;
+                    u64 p = (u64)p128;
+                    while (i < nx && X[i] < p) i++;
+                    if (i < nx && X[i] == p) { res->op = OP_DIV; res->la = lx; res->ia = i; res->lb = ly; res->ib = j; return 1; }
+                }
             }
         }
+        if (a == b) break;  // same level: the second direction repeats the first
     }
     return 0;
 }
@@ -730,6 +790,8 @@ void level_hist(int k, i64 *h) {
 // order as find_pair). Commits argmin of (cost - alpha * bitlen, cost, t) lexicographically.
 // Searches run breadth-first by cost and skip any (target, cost) that cannot beat the current best.
 // Returns the chosen index (or -1); writes the plan to out and the cost to *cost_out.
+static double RP_EPS = 0.0;
+void set_pair_eps(double e) { RP_EPS = e; }
 int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outcap, int *cost_out) {
     OUT = out; OUTN = 0; OUTCAP = outcap;
     static int st_lev[4096]; static i64 st_idx[4096]; static int st_c[4096]; static PairRes st_r[4096];
@@ -759,6 +821,8 @@ int regret_pick(const u64 *ts, int n, int maxc, double alpha, u64 *out, int outc
             for (int b = 0; b <= (c - 1) / 2; b++) {
                 int a = c - 1 - b;
                 if (a >= NLEV) continue;
+                // skip level pairs whose expected number of solutions for t is negligible
+                if (RP_EPS > 0 && a >= 2 && 4.0 * (double)LN[a] * (double)LN[b] < RP_EPS * (double)t) continue;
                 PairRes r;
                 if (pair_search(t, a, b, &r)) {
                     st_r[i] = r; st_c[i] = c; st_lev[i] = -1; alive[i] = 0;

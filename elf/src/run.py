@@ -60,9 +60,10 @@ def main():
     ap.add_argument('--classes', default='')
     ap.add_argument('--redo', action='store_true')
     ap.add_argument('--skip', default='', help='comma list of tags whose done puzzles are skipped')
-    ap.add_argument('--order', default='id', help="id | len (longest stored program first) | opt (highest ops/target first)")
+    ap.add_argument('--order', default='id', help="id | len (longest stored program first) | opt (highest ops/target first) | optasc (lowest first)")
     ap.add_argument('--repair', action='store_true', help='apply the repair post-pass to each result')
     ap.add_argument('--top', type=int, default=0, help='keep only the first N puzzles after ordering')
+    ap.add_argument('--nstarts', default='', help='comma list of allowed numbers of distinct start values')
     a = ap.parse_args()
     cfgd = json.loads(a.cfg)
     puzzles = load_puzzles(a.which)
@@ -77,6 +78,9 @@ def main():
     if a.classes:
         cl = set(a.classes.split(','))
         ids = [i for i in ids if pclass(P[i]) in cl]
+    if a.nstarts:
+        ns = set(int(x) for x in a.nstarts.split(','))
+        ids = [i for i in ids if len(set(P[i].sv)) in ns]
     if not a.redo:
         ids = [i for i in ids if i not in done]
     for tg in a.skip.split(','):
@@ -88,6 +92,8 @@ def main():
         ids.sort(key=lambda i: -st[i]['len'])
     elif a.order == 'opt' and st:
         ids.sort(key=lambda i: -st[i]['len'] / len(P[i].targets))
+    elif a.order == 'optasc' and st:
+        ids.sort(key=lambda i: st[i]['len'] / len(P[i].targets))
     if a.top:
         ids = ids[:a.top]
     print('tag', a.tag, 'todo', len(ids), flush=True)

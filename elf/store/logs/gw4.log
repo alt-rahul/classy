@@ -1,0 +1,27 @@
+tag gw4 todo 31
+2/31 scored_0218 len 340 old 331 58.4s elapsed 113s improved 1 gain 3
+4/31 scored_0405 len 325 old 325 57.9s elapsed 230s improved 2 gain 8
+6/31 scored_1000 len 275 old 277 70.6s elapsed 351s improved 4 gain 12
+7/31 scored_0036 len 270 old 275 78.0s elapsed 429s improved 5 gain 17
+8/31 scored_0865 len 269 old 272 68.0s elapsed 497s improved 6 gain 20
+9/31 scored_0905 len 276 old 270 68.4s elapsed 565s improved 6 gain 20
+10/31 scored_0445 len 274 old 267 69.9s elapsed 635s improved 6 gain 20
+11/31 scored_0916 len 268 old 267 70.1s elapsed 705s improved 6 gain 20
+12/31 scored_0352 len 262 old 262 66.8s elapsed 772s improved 6 gain 20
+13/31 scored_0784 len 256 old 260 62.5s elapsed 835s improved 7 gain 24
+15/31 scored_0015 len 254 old 258 65.7s elapsed 958s improved 9 gain 30
+17/31 scored_0918 len 255 old 246 59.6s elapsed 1070s improved 9 gain 30
+19/31 scored_0702 len 236 old 242 53.1s elapsed 1167s improved 11 gain 43
+20/31 scored_0166 len 244 old 240 55.9s elapsed 1223s improved 11 gain 43
+21/31 scored_0454 len 246 old 240 42.8s elapsed 1266s improved 11 gain 43
+24/31 scored_0411 len 206 old 203 29.7s elapsed 1350s improved 12 gain 55
+26/31 scored_0013 len 199 old 197 31.9s elapsed 1414s improved 12 gain 55
+29/31 scored_0313 len 193 old 190 27.9s elapsed 1496s improved 14 gain 60
+30/31 scored_0417 len 195 old 189 23.8s elapsed 1520s improved 14 gain 60
+done gw4 improved 14 gain 60 1548s
+  indep<20  puzzles   27 targets    359 ops     1884 ops/target 5.25
+  indep>=20 puzzles  215 targets   6450 ops    53322 ops/target 8.27
+  other<20  puzzles  107 targets    980 ops     3497 ops/target 3.57
+  other>=20 puzzles  635 targets  19068 ops   104434 ops/target 5.48
+  tiny      puzzles   16 targets     45 ops       57 ops/target 1.27
+  total 163194

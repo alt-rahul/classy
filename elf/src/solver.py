@@ -134,6 +134,17 @@ class Cfg:
         self.perm_mix = 1.0       # fraction of rounds that follow the permutation (rest: normal greedy round)
         self.regret = 0.0         # >0: regret ordering, commit argmin(cost - regret * bits) over pair plans <= regret_maxc
         self.regret_maxc = 7
+        self.regret_multi = 1     # >1: commit up to this many targets per L3 build (speed)
+        self.regret_multi_c = 7   # max cost of the extra targets
+        self.pair_eps = 0.0       # >0: regret_pick skips level pairs (a>=2) with 4|La||Lb| < pair_eps * t
+        self.warm = 0             # >0: grow the start pool to this many values first (few-start puzzles)
+        self.warm_lev = 3         # level depth used to score warm-up candidates
+        self.warm_min = 0
+        self.warm_one = 0         # 1: the first warm-up step makes 1 = v / v
+        self.warm_ns = 3          # warm-up only when the puzzle has at most this many distinct starts
+        self.regret_deep = 0      # pool size below which regret rounds build cfg.maxlev levels
+        self.regret_deep_extra = 2  # ... and allow pair plans this much costlier than regret_maxc
+        self.regret_jit = 0.0     # >0: per-round alpha drawn uniformly from regret +- regret_jit (restarts)
         self.__dict__.update(kw)
 
 
@@ -144,6 +155,7 @@ class Solver:
         self.rng = random.Random(cfg.seed)
         engine.set_seed(cfg.seed + 1)
         engine.set_wemin(cfg.wemin)
+        engine.set_pair_eps(cfg.pair_eps)
         self.stats = {}
         self.times = {}
         self.uses = {}
@@ -267,6 +279,11 @@ class Solver:
             r = engine.find_pair(t, mc)
             if r is not None and (best is None or r[0] < best[0]):
                 best = (r[0], t, r[1], 'p3')
+        return self.deep_rest(ts, best)
+
+    def deep_rest(self, ts, best):
+        """Window, Horner and guaranteed fallback (levels must be current)."""
+        cfg = self.cfg
         if best is None or best[0] > 7:
             for t in ts[:cfg.win_k]:
                 bc = 99 if best is None else best[0]
@@ -326,6 +343,8 @@ class Solver:
         uncovered target; commit argmin(cost - alpha * bits). Falls back to search_round."""
         cfg, limit = self.cfg, self.p.limit
         a = cfg.regret
+        if cfg.regret_jit > 0:
+            a = max(0.0, a + cfg.regret_jit * (2 * self.rng.random() - 1))
         # exact shortcut: costs <= 3 are exact on L0..L2 (pairs (2,0), (1,1)); if the best such
         # score beats every possible cost-4 score, the full pick would choose the same plan.
         engine.build(pool_order, limit, 2, 0)
@@ -335,13 +354,38 @@ class Solver:
             if s2 <= 4 - a * max(t.bit_length() for t in ts):
                 self.stats['reg2'] = self.stats.get('reg2', 0) + 1
                 return (b2[0], b2[1], b2[2], 'reg')
-        engine.build(pool_order, limit, 3, 0)
+        small = len(pool_order) < cfg.regret_deep
+        if small:
+            # small pool: deeper (partial) levels are cheap; let the pick see plans through L4+
+            sz = engine.build(pool_order, limit, cfg.maxlev, 0, cfg.cap)
+        else:
+            sz = engine.build(pool_order, limit, 3, 0)
         self.n_l3 += 1
-        self.deep_age = 0
+        # let the fallback reuse this L3 unless the pool is small (then a deeper build is cheap and better)
+        self.deep_age = 0 if len(pool_order) >= 30 else None
         self.evicted = False
-        best = engine.regret_pick(ts, cfg.regret_maxc, a)
+        best = engine.regret_pick(ts, cfg.regret_maxc + (cfg.regret_deep_extra if small else 0), a)
         if best is not None:
+            if cfg.regret_multi > 1:
+                # also commit the next-best targets planned on the same levels (one L3 build for
+                # several targets); plans are concatenated so commit protects all their operands
+                c, t, st = best
+                rest = [u for u in ts if u != t and u not in set(x[3] for x in st)]
+                for _ in range(cfg.regret_multi - 1):
+                    if not rest:
+                        break
+                    b2 = engine.regret_pick(rest, min(cfg.regret_maxc, cfg.regret_multi_c), a)
+                    if b2 is None:
+                        break
+                    c += b2[0]; st = st + b2[2]
+                    got = set(x[3] for x in b2[2])
+                    rest = [u for u in rest if u != b2[1] and u not in got]
+                    self.stats['multi'] = self.stats.get('multi', 0) + 1
+                return (c, t, st, 'reg')
             return (best[0], best[1], best[2], 'reg')
+        if self.deep_age == 0 and len(sz) <= 4 and cfg.regret_maxc >= 7:
+            # every pair plan on L0..L3 (cost <= 7) was already searched for all targets
+            return self.deep_rest(ts, None)
         return self.search_round(ts, pool_order, pool)
 
     def lookahead(self, ts, pool_order):
@@ -401,6 +445,8 @@ class Solver:
         self.deep_age = None
         self.evicted = False
         st_counts = self.stats
+        if cfg.warm > 0 and len(pool) <= cfg.warm_ns:
+            self.warmup(pool, steps, last_use, created, uncovered)
         while uncovered:
             rnd += 1
             order = self.pool_order(pool, last_use)
@@ -424,6 +470,46 @@ class Solver:
                 self.deep_age += 1
         st_counts['l3builds'] = self.n_l3
         return steps
+
+    def warmup(self, pool, steps, last_use, created, uncovered):
+        """Few start values: grow the pool to cfg.warm values before the main loop. Each step adds
+        the L1 value (one op from the pool) that maximises the size of L0..L3 of the new pool."""
+        cfg, limit = self.cfg, self.p.limit
+        if cfg.warm_one and 1 not in pool and len(pool) < cfg.warm:
+            # 1 = v / v breaks the common-divisor structure of a few-start pool
+            v = pool[0]
+            steps.append(('/', v, v, 1)); pool.append(1)
+            last_use[1] = 0; created[1] = 0
+            uncovered.discard(1)
+        while len(pool) < cfg.warm:
+            cands = {}
+            for a in pool:
+                for b in pool:
+                    for op in '+-*/':
+                        if op == '-' and a <= b:
+                            continue
+                        if op == '/' and (a % b or b == 1):
+                            continue
+                        r = OPF[op](a, b)
+                        if r < 1 or r > limit or r in pool or r in cands:
+                            continue
+                        if cfg.warm_min and r < cfg.warm_min and r not in (1, 2):
+                            continue
+                        cands[r] = (op, a, b, r)
+            if not cands:
+                break
+            best = None
+            for r, stp in cands.items():
+                sz = engine.build(pool + [r], limit, cfg.warm_lev, 0)
+                sc = sum(sz)
+                if best is None or sc > best[0]:
+                    best = (sc, stp)
+            op, a, b, r = best[1]
+            steps.append(best[1])
+            pool.append(r)
+            last_use[r] = 0; created[r] = 0
+            uncovered.discard(r)
+        self.stats['warm'] = len(pool)
 
     def commit(self, pool, st, last_use, created, rnd, uncovered, steps):
         p, cfg = self.p, self.cfg
@@ -462,7 +548,14 @@ class Solver:
         if len(pool) <= cap:
             return
         cand = [v for v in pool if v > self.cfg.keep_small and v not in protect]
-        if self.cfg.evict_size:
+        if self.cfg.evict_size == 2:
+            # coarser size classes (4-bit buckets), LRU within
+            cand.sort(key=lambda v: (-(v.bit_length() // 4), last_use.get(v, 0), created.get(v, 0)))
+        elif self.cfg.evict_size == 3:
+            # largest first, but values used in the last round are kept if possible
+            now = max(last_use.values()) if last_use else 0
+            cand.sort(key=lambda v: (last_use.get(v, 0) >= now, -v.bit_length(), last_use.get(v, 0), created.get(v, 0)))
+        elif self.cfg.evict_size:
             cand.sort(key=lambda v: (-v.bit_length(), last_use.get(v, 0), created.get(v, 0)))
         elif self.cfg.evict_unused:
             cand.sort(key=lambda v: (self.uses.get(v, 0) > 0, last_use.get(v, 0), created.get(v, 0)))
