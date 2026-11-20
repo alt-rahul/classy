@@ -1,0 +1,17 @@
+candidates 81 ops 15792
+scored_0096 indep>=20 40 206 -> 199 stored 53s
+scored_0098 indep>=20 40 214 -> 211 stored 74s
+scored_0108 indep>=20 40 205 -> 198 stored 62s
+scored_0114 indep>=20 40 187 -> 182 stored 44s
+scored_0122 indep>=20 40 174 -> 169 stored 34s
+scored_0139 indep>=20 40 202 -> 196 stored 64s
+scored_0150 indep>=20 40 194 -> 193 stored 31s
+scored_0215 indep>=20 40 184 -> 179 stored 35s
+scored_0224 indep>=20 40 209 -> 203 stored 45s
+scored_0231 indep>=20 40 203 -> 197 stored 69s
+scored_0232 indep>=20 40 181 -> 178 stored 43s
+scored_0234 indep>=20 40 210 -> 204 stored 72s
+scored_0239 indep>=20 40 196 -> 193 stored 29s
+scored_0242 indep>=20 40 174 -> 167 stored 34s
+gain 70 of 2739 (2.56%) in 689s => 366 ops/CPU-h
+done

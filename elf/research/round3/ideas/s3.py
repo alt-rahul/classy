@@ -160,10 +160,21 @@ class PEEL(Solver):
         pmin = getattr(cfg, 'peel_min', 6); pmax = getattr(cfg, 'peel_max', 7)
         tiers = eng3.TIERS[:getattr(cfg, 'peel_tiers', 4)]
         best = None
+        R = None
+        if getattr(cfg, 'rel', 0):
+            import rel as relmod
+            R = relmod.Rel(limit, getattr(cfg, 'rel_cmax', 4096))
+            R.index_pool(pool_order, getattr(cfg, 'rel_minv', 1 << 16))
         for t, b in zip(ts, base):
             plan = None; c = b
-            if b is None or b >= pmin:
-                r = eng3.peel(t, min(pmax, (b - 1) if b is not None else pmax), tiers)
+            if R is not None and (c is None or c >= getattr(cfg, 'rel_min', 5)):
+                rmax = getattr(cfg, 'rel_max', 8)
+                r = R.best(t, min(rmax, (c - 1) if c is not None else rmax))
+                if r is not None:
+                    c, plan = r
+                    plan = ('rel', plan)
+            if (c is None or c >= pmin) and getattr(cfg, 'peel_on', 1):
+                r = eng3.peel(t, min(pmax, (c - 1) if c is not None else pmax), tiers)
                 if r is not None:
                     c, plan = r
                 p3 = getattr(cfg, 'peel3', 0)
@@ -183,21 +194,28 @@ class PEEL(Solver):
         if plan is None:
             r = engine.find_pair(t, c)
             return (r[0], t, r[1], 'reg')
-        self.stats['peelsave'] = self.stats.get('peelsave', 0) + 1
+        if plan[0] == 'rel':
+            return (c, t, plan[1], 'rel')
         return (c, t, plan, 'peel')
 
     # optional: protect chain bases from eviction (peel_protect=1). A pool value y is a base for an
     # uncovered target t if t = (y op v1) op v2 with v1, v2 in L<=1 (levels of the pre-commit pool).
     def commit(self, pool, st, last_use, created, rnd, uncovered, steps):
         self._unc = uncovered
+        self._tset = set(self.p.targets)
         return Solver.commit(self, pool, st, last_use, created, rnd, uncovered, steps)
 
     def evict(self, pool, last_use, created, cap, protect):
-        if len(pool) <= cap or not getattr(self.cfg, 'peel_protect', 0):
+        if len(pool) <= cap or not (getattr(self.cfg, 'peel_protect', 0) or getattr(self.cfg, 'rel_keep', 0)):
             return Solver.evict(self, pool, last_use, created, cap, protect)
         prot = set(protect)
         pset = set(pool)
-        for t in self._unc:
+        if getattr(self.cfg, 'rel_keep', 0):
+            # keep the most recent rel_keep covered targets as relation partners
+            cov = [v for v in pool if v in self._tset and v not in self._unc]
+            cov.sort(key=lambda v: -created.get(v, 0))
+            prot |= set(cov[:self.cfg.rel_keep])
+        for t in (self._unc if getattr(self.cfg, 'peel_protect', 0) else ()):
             for (la, lb, full) in eng3.TIERS:
                 c = eng3._lib.peel2(t, la, lb, 0, full, 4, eng3._PB)
                 if c >= 0:
@@ -208,6 +226,52 @@ class PEEL(Solver):
         if len(pool) - len([v for v in pool if v in prot]) < len(pool) - cap:
             prot = set(protect)
         return Solver.evict(self, pool, last_use, created, cap, prot)
+
+    # optional (peel_deep=1): in the deep tier, also try chain plans whose inner value y sits in the
+    # (partial) deep levels; accepts only plans strictly cheaper than the window / Horner result.
+    def deep_rest(self, ts, best):
+        best = Solver.deep_rest(self, ts, best)
+        if getattr(self.cfg, 'peel_deep', 0) and best[0] >= 8:
+            for t in dict.fromkeys([best[1], ts[0]]):
+                r = eng3.peel(t, best[0] - 1, eng3.TIERS, self.cfg.maxlev)
+                if r is not None and not engine.derive_failed():
+                    best = (r[0], t, r[1], 'peeld')
+        return best
+
+
+class DIV(Solver):
+    """Diversity eviction: when the pool is over the cap, drop the value whose removal leaves the largest
+    level set (|L2| by default, div_lev), instead of the largest value. Mirrors what warm-up does for
+    additions. div_k: only the div_k candidates ranked first by the size policy are evaluated (0 = all)."""
+    def commit(self, pool, st, last_use, created, rnd, uncovered, steps):
+        self._unc = uncovered
+        return Solver.commit(self, pool, st, last_use, created, rnd, uncovered, steps)
+
+    def evict(self, pool, last_use, created, cap, protect):
+        if len(pool) <= cap:
+            return
+        lev = getattr(self.cfg, 'div_lev', 2); K = getattr(self.cfg, 'div_k', 0)
+        limit = self.p.limit
+        while len(pool) > cap:
+            cand = [v for v in pool if v > self.cfg.keep_small and v not in protect]
+            cand.sort(key=lambda v: (-v.bit_length(), last_use.get(v, 0), created.get(v, 0)))
+            if K:
+                cand = cand[:K]
+            best = None
+            for v in cand:
+                rest = [x for x in pool if x != v]
+                sz = engine.build(rest, limit, lev, 0)
+                if getattr(self.cfg, 'div_metric', 0) and len(sz) > lev and self._unc:
+                    h = engine.hist(lev)
+                    lo = min(self._unc).bit_length() - 1; hi = max(self._unc).bit_length()
+                    sc = sum(h[lo:hi + 1])
+                else:
+                    sc = sz[lev] if len(sz) > lev else sum(sz)
+                if best is None or sc > best[0]:
+                    best = (sc, v)
+            pool.remove(best[1])
+            self.evicted = True
+        self.deep_age = None
 
 
 def solve3(p, cls=S3, **kw):
@@ -230,11 +294,11 @@ if __name__ == '__main__':
         for k, c in enumerate(cfgs):
             t0 = time.time()
             kw = dict(pool_cap=46, evict_size=1, regret=0.1); kw.update(c)
-            cls = {'S3': S3, 'LA': LA, 'EV': EV, 'BIG': BIG, 'PEEL': PEEL}[kw.pop('cls', 'S3')]
+            cls = {'S3': S3, 'LA': LA, 'EV': EV, 'BIG': BIG, 'PEEL': PEEL, 'DIV': DIV}[kw.pop('cls', 'S3')]
             prog, stats, st = solve3(p, cls, **kw)
             err = check(p, prog) if prog else 'regalloc'
             n = len(prog) if prog and not err else 10**6
             tot[k] += n
-            row.append('%d (%.0fs%s)' % (n, time.time() - t0, ' ' + ','.join('%s%d' % (k, stats[k]) for k in ('hub', 'peel', 'la') if stats.get(k))))
+            row.append('%d (%.0fs%s)' % (n, time.time() - t0, ' ' + ','.join('%s%d' % (k, stats[k]) for k in ('hub', 'peel', 'peeld', 'rel', 'la') if stats.get(k))))
         print(i, p.family, len(p.targets), max(p.targets).bit_length(), ' | '.join(row), flush=True)
     print('TOTAL', tot)

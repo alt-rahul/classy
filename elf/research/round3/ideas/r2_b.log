@@ -1,0 +1,9 @@
+candidates 384 ops 71091
+scored_0068 54 store 189 peel 176 +rep 173 stored 136s peel11
+scored_0186 54 store 156 peel 162 +rep 162  88s peel4
+scored_0295 52 store 145 peel 151 +rep 150  97s peel5
+scored_0413 53 store 173 peel 169 +rep 167 stored 112s peel8
+scored_0509 47 store 158 peel 158 +rep 153 stored 81s peel5
+scored_0624 55 store 131 peel 134 +rep 132  80s peel1
+store 952  single PEEL run 937 (-1.58%)  accepted gain 27 (2.84%)  594s => 164 ops/CPU-h
+done

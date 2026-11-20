@@ -5,9 +5,10 @@ import repair
 from repair_store import prog_to_steps
 maxbits = int(sys.argv[1]); lim = int(sys.argv[2]); classes = sys.argv[3].split(',')
 skip = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+minbits = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 repair.self_thr[0] = 10**9
 st = load_store()
-ps = [p for p in load_puzzles('scored') if pclass(p) in classes and max(p.targets).bit_length() <= maxbits and st[p.id]['len'] > 150]
+ps = [p for p in load_puzzles('scored') if pclass(p) in classes and minbits <= max(p.targets).bit_length() <= maxbits and st[p.id]['len'] > 150]
 print('candidates', len(ps), 'ops', sum(st[p.id]['len'] for p in ps), flush=True)
 gain = 0; T0 = time.time(); base = 0
 for p in ps[skip:skip + lim]:

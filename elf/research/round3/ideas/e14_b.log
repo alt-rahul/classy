@@ -1,0 +1,14 @@
+   covered targets not in pool: 0 of 4
+ rnd 5 pool 35 consts 1236 index 89126 (0.1s + 0.7s)  pair/peel/rel: 7/6/- 7/7/- 7/7/- 7/-/- 7/7/9 -/-/- -/-/- -/-/- 7/-/- -/-/- -/-/- -/-/- 7/-/7 -/-/- -/-/- 7/-/- 6/6/7 -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/-
+   covered targets not in pool: 6 of 9
+ rnd 10 pool 46 consts 1681 index 226103 (0.1s + 2.1s)  pair/peel/rel: 7/7/10 7/7/- 7/7/- -/-/- 7/-/- -/-/- 7/7/- -/-/- -/-/- 7/7/- -/-/- 7/-/- -/7/- -/-/- -/-/- 7/-/- -/-/- -/-/- 7/-/- -/-/- -/-/- -/-/-
+   covered targets not in pool: 13 of 14
+ rnd 15 pool 46 consts 2771 index 409021 (0.4s + 1.8s)  pair/peel/rel: 7/6/- -/7/- -/-/- 7/7/- -/7/- -/7/- -/-/- -/-/- 4/4/4 -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/- -/-/-
+   covered targets not in pool: 18 of 19
+ rnd 20 pool 46 consts 3574 index 585287 (0.6s + 1.4s)  pair/peel/rel: -/-/10 -/7/- -/-/- -/-/- -/-/- -/7/- -/-/8 -/-/- -/-/- -/-/- -/-/- -/-/-
+   covered targets not in pool: 23 of 24
+ rnd 25 pool 46 consts 3881 index 961541 (1.3s + 1.0s)  pair/peel/rel: -/7/- -/7/- -/-/8 -/-/- -/-/- -/-/- -/-/-
+   covered targets not in pool: 28 of 29
+ rnd 30 pool 46 consts 4000 index 1545949 (2.3s + 0.3s)  pair/peel/rel: -/-/8 -/-/8
+practice_0015 200 {'win': 6, 'reg': 16, 'peel': 9, 'l3builds': 37}
+done

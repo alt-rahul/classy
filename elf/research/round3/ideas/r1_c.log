@@ -1,0 +1,6 @@
+candidates 303 ops 60562
+scored_0003 other>=20 60 247 -> 246 stored 124s
+scored_0006 other>=20 53 162 -> 162  10s
+scored_0007 other>=20 59 211 -> 211  30s
+scored_0011 other>=20 59 158 -> 158  11s
+gain 1 of 778 (0.13%) in 175s => 21 ops/CPU-h

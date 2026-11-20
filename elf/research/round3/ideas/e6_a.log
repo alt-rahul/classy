@@ -1,0 +1,13 @@
+dumped pool                  L1 2450 L2 132264 L3 7404809  mean cost 6.70  hist [(6, 12), (7, 28)]  1s
+ pool bits: [7, 7, 9, 10, 10, 10, 11, 11, 11, 12, 12, 12, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 20, 21, 21, 21, 21, 22, 22, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 28, 40, 40]
+loguniform to 2^12 s0        L1 2197 L2 109072 L3 5824882  mean cost 7.58  hist [(6, 2), (7, 13), (8, 25)]  2s
+loguniform to 2^12 s1        L1 2216 L2 112604 L3 6177767  mean cost 7.62  hist [(6, 2), (7, 11), (8, 27)]  2s
+loguniform to 2^20 s0        L1 3137 L2 249637 L3 20747829  mean cost 6.62  hist [(6, 15), (7, 25)]  5s
+loguniform to 2^20 s1        L1 3044 L2 234201 L3 19165015  mean cost 6.62  hist [(6, 15), (7, 25)]  4s
+loguniform to 2^28 s0        L1 2990 L2 215118 L3 16533955  mean cost 6.65  hist [(6, 14), (7, 26)]  3s
+loguniform to 2^28 s1        L1 2991 L2 216471 L3 16505361  mean cost 6.65  hist [(6, 14), (7, 26)]  3s
+loguniform to 2^40 s0        L1 2729 L2 162281 L3 10163456  mean cost 6.83  hist [(6, 7), (7, 33)]  2s
+loguniform to 2^40 s1        L1 2604 L2 141290 L3 8109791  mean cost 6.83  hist [(6, 7), (7, 33)]  2s
+uniform to 2^20              L1 3198 L2 255400 L3 19788667  mean cost 5.90  hist [(4, 1), (5, 4), (6, 33), (7, 2)]  2s
+uniform to 2^30              L1 2117 L2 64999 L3 1497814  mean cost 8.00  hist [(8, 40)]  0s
+uniform to 2^40              L1 1755 L2 48121 L3 997560  mean cost 8.00  hist [(8, 40)]  1s

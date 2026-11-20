@@ -1,0 +1,7 @@
+candidates 74 ops 18796
+scored_0001 indep>=20 50 265 -> 263 stored 144s
+scored_0004 indep>=20 50 238 -> 237 stored 109s
+scored_0015 indep>=20 50 254 -> 254  64s
+scored_0033 indep>=20 50 243 -> 243  54s
+gain 3 of 1000 (0.30%) in 371s => 29 ops/CPU-h
+done
