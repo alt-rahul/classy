@@ -125,3 +125,8 @@ Environment probe (rerun when the Kaggle image may have changed):
 ```
 python scripts/package_kaggle.py probe   # log text in dist/kaggle/output/casmi-probe_vN/
 ```
+
+## Submissions so far
+
+See docs/SUBMISSIONS.md. #1: `casmi-inference` v2 (b0_npdb), submitted 2026-11-20 19:08:04 UTC,
+ref 58630976, scored about 12 minutes later (hidden-test rerun included): public 0.154.
