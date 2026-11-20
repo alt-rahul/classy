@@ -429,3 +429,36 @@ Training kernel `ograhulrajkumar/casmi-encoder-train` (private, GPU T4 x2 via ma
 `NvidiaTeslaT4`, internet off) mounts the two datasets above plus `casmi-db-np` and
 `metric/rdkit-2026-3-3-wheel`; outputs are fetched to `dist/kaggle/output/casmi-encoder-train_<stamp>/`.
 <!-- ENCODER:end -->
+
+<!-- WP8:b1:start -->
+## Baseline 1: library match plus DB prior (WP8)
+
+No new data artefact: the `lib` stage (`casmi.libmatch`, plugin in `configs/b1_library.yaml`)
+reads the WP5 library `data/processed/library/` (built 2026-11-20 18:51 by WP6
+`ingest_train.py --stage library`, `library_info.json` sha256 `c070c1cc...939e7e`: 2,505,117
+spectra, 275,775 structures, 625,990 consensus spectra). Files b1 reads and their sizes (the
+Kaggle notebook needs these as a dataset; `open_index_*.npz` are only for open/analog search,
+PLAN 4.3, which b1 does not use):
+
+| file | bytes | needed by b1 |
+|---|---|---|
+| `peaks_mz.npy`, `peaks_int.npy` | 264,945,508 each | yes (memory-mapped) |
+| `offsets.npy` | 20,041,072 | yes |
+| `meta.parquet` | 94,896,562 | yes |
+| `structures.parquet` | 18,536,089 | yes |
+| `consensus_mz.npy`, `consensus_int.npy` | 86,056,488 each | yes (consensus pairs) |
+| `consensus_offsets.npy` | 5,008,056 | yes |
+| `consensus_meta.parquet` | 22,595,475 | yes |
+| `library_info.json` | 605 | yes (cleaning settings check) |
+| `open_index_pos.npz`, `open_index_neg.npz` | 263,311,309 / 63,224,181 | no (WP10 analog search) |
+| total | 1,189,617,341 (863,081,851 without the open index) | |
+
+Loading costs about 1.75 GB RSS (pandas metadata frames and per-spectrum object arrays; the peak
+arrays are mmap'd). Location: `cfg.lib_dir` ("" = `paths.PROCESSED/library`, so
+`CASMI_ARTEFACTS/processed/library` on Kaggle). Without a library the stage logs a warning and
+the run degrades to Baseline 0 behaviour.
+
+| file | rows x guesses | bytes | sha256 | command | wall | peak RSS |
+|---|---|---|---|---|---|---|
+| `submissions/20261120_b1_library_prior.csv` | 400 x 25 | 405,959 | `406b36df8a93532ceb7dd04fc4b1cc9c49c3e0bdedd52bf49e5e43943239c760` | `python scripts/predict.py --config configs/b1_library.yaml` (NP + PubChem tiers, 2 mkey workers, warm mkey cache, `nice -n 10`, other agents busy) | 120 s (pipeline 118 s) | 4.85 GB |
+<!-- WP8:b1:end -->

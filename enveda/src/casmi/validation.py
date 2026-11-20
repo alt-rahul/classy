@@ -629,6 +629,7 @@ class ValidationHooks:
         self.lib_mkeys = lib_mkeys
         self.active: tuple[str, ...] = ()
         self.pools: dict[str, dict[str, set]] = defaultdict(lambda: {"main": set(), "any": set()})
+        self.pool_summary: dict[str, dict] = {}     # filled by compact()
         self.violations: list[str] = []
         self._lib_cache: dict[tuple[int, str], np.ndarray] = {}   # excluded spectrum indices
         self._lib_index: dict[int, dict] = {}
@@ -753,6 +754,33 @@ class ValidationHooks:
         p["any"] |= s
         if main:
             p["main"] |= s
+
+    def compact(self, ids: Iterable[str], keys: Mapping[str, frozenset]) -> None:
+        """Replace the candidate sets of finished molecules by what the result table needs
+        (sizes and whether a truth key is in the pool). PubChem pools hold about 10,000 ik14
+        per molecule, so keeping every set of a 3,000-molecule cell costs gigabytes. A
+        molecule recorded again after compaction (not expected: lookups are per chunk) gets
+        the union of the counts and hits."""
+        for m in ids:
+            m = str(m)
+            p = self.pools.pop(m, None)
+            if p is None:
+                continue
+            tk = keys.get(m, frozenset())
+            new = {"n_main": len(p["main"]), "n_any": len(p["any"]),
+                   "hit_main": bool(p["main"] & tk), "hit_any": bool(p["any"] & tk)}
+            old = self.pool_summary.get(m)
+            if old is not None:
+                new = {"n_main": old["n_main"] + new["n_main"], "n_any": old["n_any"] + new["n_any"],
+                       "hit_main": old["hit_main"] or new["hit_main"],
+                       "hit_any": old["hit_any"] or new["hit_any"]}
+            self.pool_summary[m] = new
+
+    def pool_info(self, molecule_id: str, keys: Mapping[str, frozenset]) -> dict:
+        """Pool sizes and truth hits of one molecule (compacting it first)."""
+        self.compact([molecule_id], keys)
+        return self.pool_summary.get(str(molecule_id),
+                                     {"n_main": 0, "n_any": 0, "hit_main": False, "hit_any": False})
 
     def check_rows(self, ids: Sequence[str], ik14: Sequence[Any], where: str) -> None:
         """Every row (molecule id, ik14) must be free of that molecule's DB exclusions; and
@@ -1002,6 +1030,7 @@ def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, 
             for m in chunk:
                 g = out.get(m)
                 preds[m] = list(g) if g is not None else []
+            hooks.compact(chunk, keys)
     hooks.active = ()
     tsmi = dict(zip(truth["molecule_id"].astype(str), truth["smiles"]))
     truth_cell = {m: tsmi[m] for m in cell_ids}
@@ -1024,8 +1053,7 @@ def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, 
     tr = truth.set_index(truth["molecule_id"].astype(str))
     for m in truth["molecule_id"].astype(str):
         r = tr.loc[m]
-        pool = hooks.pools.get(m, {"main": set(), "any": set()})
-        tkeys = keys.get(m, frozenset())
+        pool = hooks.pool_info(m, keys)
         v = float(rr.get(m, np.nan)) if in_cell[m] else np.nan
         rank = int(round(1.0 / v)) if isinstance(v, float) and v > 0 else 0
         pc = r["pubmed_count"]
@@ -1033,8 +1061,8 @@ def run_cell(predict_fn: Predictor, queries: pd.DataFrame, truth: pd.DataFrame, 
             "set": set_name, "condition": condition, "molecule_id": m, "mkey": r["mkey"],
             "fold": int(r["fold"]), "in_cell": bool(in_cell[m]), "rr": v, "rank": rank,
             "top1": 0 < rank <= 1, "top5": 0 < rank <= 5, "top25": 0 < rank <= 25,
-            "in_pool_main": bool(pool["main"] & tkeys), "in_pool_any": bool(pool["any"] & tkeys),
-            "n_pool_main": len(pool["main"]), "n_pool_any": len(pool["any"]),
+            "in_pool_main": pool["hit_main"], "in_pool_any": pool["hit_any"],
+            "n_pool_main": pool["n_main"], "n_pool_any": pool["n_any"],
             "n_guesses": len(preds.get(m, [])), "truth_in_preds": bool(leak.get(m, False)),
             "pubmed0": bool(pd.isna(pc) or int(pc) == 0), "mass_tercile": int(r["mass_tercile"]),
             "n_query_spectra": int(r["n_query_spectra"]),

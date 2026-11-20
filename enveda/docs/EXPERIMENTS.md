@@ -147,3 +147,51 @@ by hit Tanimoto) needs train and is untested. Probe scripts live only in the WP1
 | NN same molecule, same polarity (1,090; pos 916 / neg 174) | 0.975 (0.976 / 0.971) | 0.925 (0.921 / 0.943) |
 | control, no peaks used: NN by closest precursor m/z, same polarity (1,090) = 0.972 | - | - |
 | NN same molecule within 0.02 Da precursor window (491) | 0.994 | 1.000 |
+
+### 2026-11-20 WP8 tuning: library match rules (Baseline 1)
+
+Method: `casmi.libmatch` "lib" stage run once per cell through the WP7 harness (exclusions,
+library guard, checks; NP tier only, so pools are small), every scored pool stored, then an
+offline grid re-scores the stored pools with `fusion.fuse` under each setting (rank = first
+truth-key row after `fusion.sort_pool` order, dedupe by ik14; the harness reproduces the offline
+numbers exactly for the chosen setting). Tuned on NP-TIMS (C1 n 250, C2 n 250) and NP-OTHER (C1
+n 1,871, C2 n 3,000); C3 is 0 for every setting (no generator). "w" = worst-case blend with C3 =
+0; "p0" = C2 restricted to pubmed_count = 0 (NP-TIMS n 14, NP-OTHER n 1,350), the least
+popularity-biased class 2 proxy (PLAN 5.6). Scripts kept in the WP8 scratchpad only.
+
+| setting (lib_best_cos from `lib_sim`) | NP-TIMS C1 | C2 | p0 | w | NP-OTHER C1 | C2 | p0 | w |
+|---|---|---|---|---|---|---|---|---|
+| no LIB rule (LIB rows ranked by prior only, about Baseline 0) | 0.820 | 0.820 | 0.462 | 0.492 | 0.483 | 0.412 | 0.145 | 0.261 |
+| plan rule 1 (0.7, 4 peaks), cos_max | 0.916 | 0.679 | 0.460 | 0.455 | 0.855 | 0.393 | 0.140 | 0.328 |
+| plan rule 1 (0.7, 4 peaks), graded | 0.929 | 0.673 | 0.460 | 0.455 | 0.878 | 0.390 | 0.140 | 0.331 |
+| + rule 1b band (0.5, 2 peaks: 2.3 to 3.0, above all NP) | 0.938 | 0.582 | 0.388 | 0.420 | 0.891 | 0.367 | 0.137 | 0.325 |
+| additive 1b (weight 1.0, from 0.5, 2 peaks) + rule 1 only at >= 0.95 | 0.951 | 0.668 | 0.424 | 0.457 | 0.890 | 0.389 | 0.140 | 0.334 |
+| **same + demotion below 0.2 (chosen, `configs/b1_library.yaml`)** | **0.941** | **0.679** | **0.464** | **0.460** | **0.858** | **0.424** | **0.156** | **0.341** |
+| additive (0.5, from 0.7, 4 peaks) + rule 1 >= 0.95 + demotion below 0.4 | 0.926 | 0.765 | 0.505 | 0.491 | 0.836 | 0.448 | 0.164 | 0.347 |
+
+Findings:
+- The search's single "best pair" can be a 2-peak spectrum at cosine 1.0 that hides a 20-peak
+  match (the only public-test miss of the first version, m_e80818). `lib_sim: graded` (best
+  pair over ALL spectrum and consensus pairs by (passes rule 1, passes 1b, cosine)) fixes it and
+  is the best similarity source in every setting (+0.013 C1 NP-TIMS, +0.022 NP-OTHER at the plan
+  thresholds over cos_max; consensus cosine alone is worse on C1).
+- On NP-TIMS the NP-tier prior alone already ranks the truth first for 72 percent of molecules
+  (common natural products), so any rule that hard-overrides the prior lifts C1 and costs C2.
+  The C2 loss sits on popular truths: on the pubmed_count = 0 subset rule 1 costs nothing
+  (0.462 vs 0.460). This is the popularity bias of simulated class 2 (PLAN 5.6): a real class 2
+  molecule has no public spectra and is less popular than its library isomers, which the prior
+  already ranks above it.
+- Plan rule 1 misses on NP-TIMS C1 (0.7, 4 peaks): 20 of 29 are an isomer that also passes
+  rule 1 with a higher cosine, 8 a truth with cosine below 0.7 (cross-instrument references), 1
+  without a same-polarity reference. A prior tie-break inside rule 1 adds only +0.004; adding
+  the similarity to the prior score instead (additive 1b) gains +0.022 C1 and loses no C2.
+- Demotion (measured best cosine below a threshold: LIB candidate below every NP-tier one) is
+  real evidence, not a popularity effect: it raises C2 on the pubmed_count = 0 subset of
+  NP-OTHER (n 1,350) from 0.140 to 0.156 (0.2) and 0.164 (0.4), at a C1 cost (true references
+  across instruments can score below 0.2: NP-OTHER C1 -0.032 at 0.2). 0.2 was chosen: on the
+  proxy blend 0.2 x NP-TIMS C1 + 0.4 x NP-OTHER p0 every demotion setting ties (0.2506 to
+  0.2508), and 0.2 keeps the most C1.
+- Under the plan's primary number (NP-TIMS worst-case blend) no LIB setting beats "prior only"
+  (0.492) by more than noise; the strongest-demotion row ties it (0.491) and wins clearly on
+  NP-OTHER (0.347 vs 0.261). The ranker (WP11) should learn this trade-off from the LIB
+  features rather than from fixed rules.
