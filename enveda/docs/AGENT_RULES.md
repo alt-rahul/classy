@@ -15,7 +15,7 @@ Several agents work in this repo at the same time on one machine. Follow these r
 
 ## Shared machine
 - 4 CPUs, 15 GB RAM, about 29 GB free disk, no GPU, shared with other agents. Stay within the cores and RAM your WP lists; run heavy jobs under `nice -n 10`.
-- A PubChem build (WP3) runs in the background for hours using 2 cores and up to 7 GB RAM. Do not touch `scripts/build_pubchem.py`, `data/external/pubchem/`, `data/external/tmp/` or `data/processed/db/pubchem/`.
+- Several agents run at once and RAM is the tightest resource (15 GB): check `free -g` before any job over 2 GB and never start one that would leave under 1 GB free. Jobs over about 30 CPU-minutes should run as Kaggle CPU kernels where possible (ROADMAP 3).
 - Long jobs: run them in the background with nohup, log to `logs/`, and check on them with the Monitor tool or periodic checks (foreground sleep is blocked). Do not end your task while your own job is still running unless you hit a real blocker.
 
 ## Git
