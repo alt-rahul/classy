@@ -224,9 +224,9 @@ def mol_graph(smiles: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
     mol = smiles if isinstance(smiles, Chem.Mol) else mol_from_smiles(smiles)
     if mol is None or mol.GetNumAtoms() == 0:
         return None
-    if any(a.GetAtomicNum() == 1 for a in mol.GetAtoms()):
+    if any(a.GetAtomicNum() == 1 and not a.GetIsotope() for a in mol.GetAtoms()):
         try:
-            mol = Chem.RemoveHs(mol, sanitize=False)
+            mol = Chem.RemoveHs(mol)
         except Exception:  # noqa: BLE001 - keep explicit H atoms as graph atoms then
             pass
     pt = Chem.GetPeriodicTable()
@@ -241,9 +241,7 @@ def mol_graph(smiles: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
     ea = np.fromiter((b.GetBeginAtomIdx() for b in bonds), dtype=np.int64, count=len(bonds))
     eb = np.fromiter((b.GetEndAtomIdx() for b in bonds), dtype=np.int64, count=len(bonds))
     ri = mol.GetRingInfo()
-    try:
-        ri.NumRings()
-    except RuntimeError:  # ring info not initialised (unsanitised input)
+    if ri.NumAtoms() == 0 and n:      # ring info not initialised (unsanitised input)
         Chem.FastFindRings(mol)
         ri = mol.GetRingInfo()
     in_ring = np.fromiter((ri.NumBondRings(b.GetIdx()) > 0 for b in bonds), dtype=bool,

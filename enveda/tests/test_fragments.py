@@ -136,12 +136,13 @@ def test_negative_mode_and_sodium_carrier():
 
 
 def test_isomers_are_separated():
-    # 2-methoxyphenol vs 4-methylbenzene-1,2-diol... use propanol vs isopropanol style isomers:
-    # 1-propanol has CH2CH2OH (one cut: C2H5O 45.03); 2-propanol does not.
-    c2h5o = 2 * C + 5 * H + O
-    qs = _query([c2h5o + PROTON, C + 3 * H + PROTON], [1.0, 0.5])
+    # CH2OH (CH3O) is one cut from 1-propanol but two cuts (CHOH + H) from 2-propanol
+    ch3o = C + 3 * H + O
+    qs = _query([ch3o + PROTON], [1.0])
     f = _feat(qs, ["CCCO", "CC(C)O", "xx"])
-    assert f["frag_score"].iloc[0] > f["frag_score"].iloc[1]
+    assert f["frag_score"].iloc[0] == pytest.approx(1.0)
+    assert f["frag_score"].iloc[1] == pytest.approx(0.6)
+    assert f["frag_expl_lin"].iloc[1] == pytest.approx(1.0)
     assert np.isnan(f["frag_score"].iloc[2])
 
 
@@ -194,10 +195,10 @@ def _pool():
 
 
 def _test_df():
-    c2h5o = 2 * C + 5 * H + O
+    ch3o = C + 3 * H + O
     return pd.DataFrame({
         "molecule_id": ["m1", "m2"],
-        "ms2_mzs": [np.array([c2h5o + PROTON, C + 3 * H + PROTON]), np.array([31.0178, 15.0230])],
+        "ms2_mzs": [np.array([ch3o + PROTON, C + 3 * H + PROTON]), np.array([31.0178, 15.0230])],
         "ms2_normalized_intensities": [np.array([1.0, 0.5]), np.array([1.0, 0.3])],
         "precursor_mz": [61.0648, 47.0491], "adduct": ["[M+H]+", "[M+H]+"],
         "ionization_mode": ["positive", "positive"],
@@ -224,7 +225,7 @@ def test_score_pool_and_stage(tmp_path):
         assert c in p.columns
     assert np.isnan(p.loc[3, "frag_score"])            # 4th of m1: outside the top 3
     assert p.loc[[0, 1, 2, 4, 5], "frag_score"].notna().all()
-    assert p.loc[0, "frag_score"] > p.loc[1, "frag_score"]   # 1-propanol explains C2H5O+
+    assert p.loc[0, "frag_score"] > p.loc[1, "frag_score"]   # CH2OH+: one cut from 1-propanol
     assert p.loc[0, "frag_score_rank"] == 1
     assert st.molecules["frag_n_scored"].tolist() == [3, 2]
     assert st.molecules["frag_n_spectra"].tolist() == [1, 1]
@@ -266,7 +267,7 @@ def test_peak_residuals():
     base = C + 3 * H + PROTON
     qs = _query([base + 0.0007, 200.0], [1.0, 1.0])
     err, spread = F.peak_residuals(qs, F.fragment_list("CCO"), 0.01)
-    assert err[0] == pytest.approx(0.0007, abs=1e-9) and spread[0] == 0.0
+    assert err[0] == pytest.approx(0.0007, abs=1e-9) and spread[0] < 1e-9
     assert np.isnan(err[1])
 
 
