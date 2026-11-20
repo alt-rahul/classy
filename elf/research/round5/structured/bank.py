@@ -88,7 +88,8 @@ if __name__=='__main__':
         new=[b for b in gen(p,prog,ns,ltl) if (b[0],b[1]) not in have] if len(bank)<ns*2 else []
         bank+=new; pickle.dump(bank,open(bf,'wb'))
         tg=time.time()-t0
-        pr,status=recombine(p,prog,[b[3] for b in bank],stl)
+        KB=int(os.environ.get('BANK_KEEP','99')); use=sorted(bank,key=lambda b:b[2])[:KB]
+        pr,status=recombine(p,prog,[b[3] for b in use],stl)
         res=len(pr) if pr is not None and check(p,pr) is None else None
         print(pid,'stored',len(prog),'bank',sorted(b[2] for b in bank),'gen %.0fs'%tg,'recomb',status,res,flush=True)
         if res is not None and res<len(prog):
