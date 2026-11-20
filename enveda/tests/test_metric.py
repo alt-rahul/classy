@@ -176,3 +176,58 @@ def test_mrr_edge_cases():
         mrr_at_25({"a": ["C"]}, {})
     assert metric.split_guesses(" CCO ; C ") == ["CCO", "C"]
     assert metric.split_guesses(None) == [] and metric.split_guesses(float("nan")) == []
+
+
+# --- parity with the official metric (docs/METRIC_NOTEBOOK.md) ------------------------
+
+def _official_ik14(smiles):
+    """Verbatim logic of canonicalize_smiles_to_ik14 from the official metric notebook."""
+    from rdkit import Chem
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    with rdBase.BlockLogs():
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None
+            Chem.RemoveStereochemistry(mol)
+            canonical = rdMolStandardize.TautomerEnumerator().Canonicalize(mol)
+            return Chem.MolToInchiKey(canonical)[:14]
+        except (ValueError, RuntimeError, TypeError):
+            return None
+
+
+def test_official_stereo_pinned_enone_regression():
+    # From the official notebook's doctests: before stereo was stripped first these two
+    # canonicalised to different tautomers (UMCVTKGFWFSNGJ vs PUSIBJUZNMNGHT).
+    a = mkey("C=C(C)C1CCC2CCC(=O)C=C2C1")
+    b = mkey("C=C(C)[C@@H]1CCC2CCC(=O)C=C2C1")
+    assert a == b == "UMCVTKGFWFSNGJ"
+    assert mkey("C[C@H](N)C(=O)O") == mkey("CC(N)C(=O)O")
+
+
+def test_mkey_does_not_mutate_input_mol():
+    from rdkit import Chem
+
+    mol = Chem.MolFromSmiles("C=C(C)[C@@H]1CCC2CCC(=O)C=C2C1")
+    before = Chem.MolToSmiles(mol)
+    metric.mkey_mol(mol)
+    assert Chem.MolToSmiles(mol) == before
+
+
+def test_parity_with_official_metric_nci():
+    smiles = _nci(400)
+    mismatches = [s for s in smiles if mkey(s) != _official_ik14(s)]
+    assert not mismatches, mismatches[:5]
+
+
+@pytest.mark.data("data/processed/db/np/np.parquet")
+def test_parity_with_official_metric_natural_products():
+    import pyarrow.parquet as pq
+
+    from casmi import paths
+
+    tab = pq.read_table(paths.PROCESSED / "db" / "np" / "np.parquet", columns=["smiles"])
+    smiles = tab.column("smiles").to_pylist()[::2000][:400]  # stereo-rich, deterministic
+    mismatches = [s for s in smiles if mkey(s) != _official_ik14(s)]
+    assert not mismatches, mismatches[:5]

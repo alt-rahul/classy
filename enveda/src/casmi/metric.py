@@ -72,11 +72,18 @@ def _enumerator() -> Any:
 
 
 def mkey_mol(mol: Chem.Mol | None) -> str | None:
-    """THE metric key of a parsed molecule. Keep every metric detail in this function."""
+    """THE metric key of a parsed molecule. Keep every metric detail in this function.
+
+    Mirrors ``canonicalize_smiles_to_ik14`` in docs/METRIC_NOTEBOOK.md (the official
+    metric): stereochemistry is removed BEFORE tautomer canonicalisation, because a
+    stereocentre can pin a double bond and change the canonical tautomer.
+    """
     if mol is None:
         return None
     with rdBase.BlockLogs():
         try:
+            mol = Chem.Mol(mol)  # copy: never mutate the caller's molecule
+            Chem.RemoveStereochemistry(mol)
             canon = _enumerator().Canonicalize(mol)
             key = Chem.MolToInchiKey(canon)
         except Exception:  # noqa: BLE001
