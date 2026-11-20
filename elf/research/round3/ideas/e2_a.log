@@ -1,0 +1,50 @@
+  rnd 1 pool 5 uncov 29 L [39, 262, 1822] base 99999999999999999999999999999
+   lu1: n 0 best []
+   lu2: n 0 best []
+  rnd 5 pool 27 uncov 25 L [948, 37565, 1659238] base 5555555655565665667779979
+   lu1: n 1 best [(1, 2)]
+   lu2: n 27 best [(3, 3), (2, 3), (2, 3), (2, 4)]
+  rnd 9 pool 43 uncov 21 L [2355, 138982, 8976686] base 444545545565656667779
+   lu1: n 4 best [(3, 4), (1, 2), (1, 2), (1, 2)]
+   lu2: n 70 best [(4, 4), (4, 4), (4, 4), (3, 4)]
+  rnd 13 pool 46 uncov 17 L [2779, 187204, 13816687] base 44445555666666677
+   lu1: n 6 best [(3, 4), (1, 2), (1, 2), (1, 2)]
+   lu2: n 106 best [(4, 5), (4, 4), (4, 4), (4, 4)]
+  rnd 17 pool 46 uncov 13 L [2821, 197131, 15275402] base 5554645666777
+   lu1: n 5 best [(1, 2), (1, 2), (1, 2), (1, 2)]
+   lu2: n 43 best [(2, 3), (2, 3), (2, 3), (1, 2)]
+  rnd 21 pool 46 uncov 9 L [2829, 197126, 15188181] base 333666777
+   lu1: n 0 best []
+   lu2: n 1 best [(2, 2)]
+  rnd 25 pool 46 uncov 5 L [2808, 195322, 15085614] base 62676
+   lu1: n 0 best []
+   lu2: n 0 best []
+  rnd 29 pool 46 uncov 1 L [2861, 205148, 16224218] base 7
+   lu1: n 0 best []
+   lu2: n 0 best []
+practice_0004 shared 29 bits 42 len 121 None 33s
+  rnd 1 pool 4 uncov 30 L [22, 89, 408] base 999999999999999999999999999999
+   lu1: n 0 best []
+   lu2: n 0 best []
+  rnd 5 pool 26 uncov 26 L [852, 31480, 1285128] base 55656666666656666677799999
+   lu1: n 0 best []
+   lu2: n 11 best [(3, 3), (2, 2), (2, 3), (1, 2)]
+  rnd 9 pool 43 uncov 22 L [2364, 144572, 9631094] base 4555554454555666677779
+   lu1: n 18 best [(1, 2), (1, 2), (1, 2), (1, 2)]
+   lu2: n 134 best [(3, 4), (3, 4), (2, 3), (2, 3)]
+  rnd 13 pool 46 uncov 18 L [2870, 209216, 16384256] base 555454555555677779
+   lu1: n 67 best [(2, 3), (2, 3), (2, 3), (1, 2)]
+   lu2: n 365 best [(3, 3), (2, 3), (2, 4), (2, 3)]
+  rnd 17 pool 46 uncov 14 L [2890, 213161, 17235501] base 44444444555777
+   lu1: n 2 best [(1, 2), (1, 2)]
+   lu2: n 8 best [(1, 2), (1, 3), (1, 3), (1, 3)]
+  rnd 21 pool 46 uncov 10 L [2898, 219692, 18419716] base 4444455777
+   lu1: n 1 best [(1, 2)]
+   lu2: n 10 best [(1, 2), (1, 2), (1, 3), (1, 3)]
+  rnd 25 pool 46 uncov 6 L [2938, 230361, 20384728] base 355777
+   lu1: n 0 best []
+   lu2: n 0 best []
+  rnd 29 pool 46 uncov 2 L [2875, 212826, 17792178] base 77
+   lu1: n 0 best []
+   lu2: n 0 best []
+practice_0001 multiplicative 30 bits 49 len 137 None 46s
