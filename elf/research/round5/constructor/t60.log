@@ -1,0 +1,9 @@
+scored_0002 cons4 42,0,0,1,1,0,6,34,1,47,200,0.02,8,40,8000000,0,2,3000,40 store 243 -> None regs None [19, 14, 10] 59s
+step cost 19 (gmin 19, cands 1/1) pool 4 rem 27 total 19  t 1
+  [fallback L4 size 12082632 gmin 14]
+step cost 14 (gmin 14, cands 4/1) pool 21 rem 26 total 33  t 8
+  [fallback L4 size 93449233 gmin 10]
+step cost 10 (gmin 10, cands 1/1) pool 33 rem 25 total 43  t 57
+  [fallback L3 size 5097227 gmin 99]
+STUCK rem 25 pool 41
+

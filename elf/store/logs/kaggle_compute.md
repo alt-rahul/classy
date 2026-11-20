@@ -72,3 +72,5 @@ engines on shards of our store; a local loop harvests their outputs and merges t
   21 CPU-h together). Public engines yield nothing on the long random-like puzzles, as the research agent predicted.
   Decision: c01-c04 -> lever B (grun), c05 stays on public engines for the 80-180 band (where public notes report
   their gains) as the running comparison; reallocate by merged gain per CPU-hour when lever B results are in.
+- 2026-11-20 21:56:38 UTC harvested elf-c01 v4 [public] (complete): kernel gain 0, merged gain 0 on 0 puzzles (0 rejected), 10.0 CPU-h, store now 133862
+- 2026-11-20 21:56:40 UTC push elf-c01 FAILED: Maximum batch CPU session count of 5 reached.
