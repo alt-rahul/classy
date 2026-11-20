@@ -1,0 +1,51 @@
+practice_0001 multiplicative 30 144 4.80/t None 20.9s {'p3': 7, 'p2': 22, 'redo': 4, 'win': 1, 'l3builds': 15}
+practice_0005 independent 32 244 7.62/t None 13.4s {'win': 13, 'p3': 19, 'l3builds': 32}
+practice_0009 multiplicative 28 137 4.89/t None 13.4s {'redo': 4, 'p3': 8, 'p2': 18, 'win': 2, 'l3builds': 15}
+practice_0013 independent 31 232 7.48/t None 15.8s {'p3': 21, 'win': 10, 'l3builds': 31}
+practice_0017 shared 29 171 5.90/t None 32.5s {'win': 4, 'p3': 12, 'p2': 13, 'redo': 1, 'l3builds': 25}
+practice_0021 multiplicative 29 131 4.52/t None 9.6s {'redo': 3, 'p3': 6, 'p2': 23, 'l3builds': 9}
+practice_0025 mixed 29 182 6.28/t None 20.4s {'p3': 21, 'p2': 6, 'redo': 1, 'win': 2, 'l3builds': 28}
+practice_0029 mixed 30 221 7.37/t None 36.2s {'win': 15, 'p2': 9, 'p3': 6, 'l3builds': 26}
+practice_0033 shared 12 30 2.50/t None 0.2s {'redo': 1, 'p2': 12, 'l3builds': 0}
+practice_0037 independent 32 363 11.34/t None 42.2s {'fb': 1, 'win': 31, 'l3builds': 32}
+practice_0042 shared 29 194 6.69/t None 36.6s {'win': 6, 'p2': 8, 'p3': 14, 'redo': 1, 'hor': 1, 'l3builds': 28}
+practice_0046 independent 30 325 10.83/t None 40.5s {'fb': 1, 'win': 29, 'l3builds': 30}
+practice_0053 mixed 28 266 9.50/t None 51.3s {'win': 22, 'p3': 3, 'p2': 1, 'hor': 2, 'l3builds': 28}
+practice_0058 independent 30 288 9.60/t None 33.6s {'win': 28, 'hor': 2, 'l3builds': 30}
+practice_0062 independent 29 350 12.07/t None 53.5s {'win': 12, 'hor': 17, 'l3builds': 29}
+practice_0066 multiplicative 30 114 3.80/t None 9.0s {'p3': 4, 'p2': 26, 'l3builds': 8}
+practice_0070 independent 30 290 9.67/t None 39.0s {'fb': 1, 'win': 28, 'p3': 1, 'l3builds': 30}
+practice_0075 mixed 32 199 6.22/t None 21.7s {'win': 3, 'p3': 23, 'p2': 6, 'l3builds': 30}
+practice_0079 multiplicative 28 131 4.68/t None 14.4s {'redo': 3, 'p3': 6, 'p2': 21, 'win': 1, 'l3builds': 13}
+practice_0083 shared 31 147 4.74/t None 14.2s {'p3': 9, 'p2': 21, 'win': 1, 'l3builds': 13}
+practice_0087 mixed 29 250 8.62/t None 54.0s {'win': 18, 'p2': 7, 'p3': 1, 'hor': 3, 'l3builds': 23}
+practice_0091 shared 32 251 7.84/t None 51.1s {'win': 16, 'p2': 5, 'p3': 9, 'hor': 2, 'l3builds': 27}
+practice_0095 mixed 31 258 8.32/t None 48.1s {'win': 20, 'p3': 11, 'l3builds': 31}
+practice_0100 independent 31 362 11.68/t None 63.2s {'fb': 1, 'hor': 10, 'win': 20, 'l3builds': 31}
+practice_0105 mixed 31 191 6.16/t None 19.9s {'p3': 20, 'p2': 11, 'redo': 1, 'l3builds': 30}
+practice_0109 multiplicative 32 144 4.50/t None 15.3s {'redo': 4, 'p3': 6, 'p2': 25, 'win': 1, 'l3builds': 12}
+practice_0113 independent 28 349 12.46/t None 52.0s {'win': 5, 'hor': 23, 'l3builds': 28}
+practice_0117 multiplicative 30 144 4.80/t None 13.3s {'p3': 10, 'p2': 20, 'redo': 3, 'l3builds': 14}
+practice_0121 independent 32 302 9.44/t None 37.4s {'win': 29, 'hor': 1, 'p3': 2, 'l3builds': 32}
+practice_0127 mixed 31 191 6.16/t None 22.0s {'redo': 3, 'p3': 19, 'p2': 11, 'win': 1, 'l3builds': 30}
+practice_0132 mixed 29 181 6.24/t None 21.0s {'win': 2, 'p3': 17, 'p2': 10, 'redo': 1, 'l3builds': 27}
+practice_0136 mixed 12 52 4.33/t None 0.5s {'redo': 1, 'p3': 2, 'p2': 10, 'l3builds': 3}
+practice_0141 shared 28 153 5.46/t None 25.5s {'redo': 3, 'p3': 13, 'p2': 14, 'win': 1, 'l3builds': 24}
+practice_0145 shared 32 228 7.12/t None 48.7s {'win': 12, 'p3': 13, 'p2': 6, 'hor': 1, 'l3builds': 27}
+practice_0149 shared 31 212 6.84/t None 44.4s {'win': 13, 'p2': 11, 'p3': 6, 'hor': 1, 'l3builds': 22}
+practice_0153 shared 31 154 4.97/t None 20.4s {'win': 3, 'p3': 7, 'p2': 21, 'redo': 1, 'l3builds': 17}
+practice_0157 shared 32 148 4.62/t None 20.9s {'redo': 5, 'win': 1, 'p2': 25, 'p3': 6, 'l3builds': 18}
+practice_0161 mixed 28 280 10.00/t None 48.8s {'win': 14, 'p3': 6, 'hor': 8, 'l3builds': 28}
+practice_0165 mixed 32 230 7.19/t None 43.0s {'p3': 10, 'p2': 7, 'win': 15, 'l3builds': 31}
+practice_0170 multiplicative 11 27 2.45/t None 0.2s {'redo': 1, 'p2': 11, 'l3builds': 0}
+practice_0177 mixed 28 177 6.32/t None 17.3s {'win': 2, 'p3': 22, 'p2': 4, 'l3builds': 28}
+practice_0181 independent 31 297 9.58/t None 37.2s {'fb': 1, 'win': 24, 'p3': 6, 'l3builds': 31}
+practice_0185 shared 30 172 5.73/t None 33.9s {'redo': 4, 'win': 5, 'p3': 10, 'p2': 15, 'l3builds': 24}
+practice_0189 shared 30 189 6.30/t None 38.8s {'p3': 13, 'p2': 10, 'redo': 3, 'win': 7, 'l3builds': 25}
+practice_0193 multiplicative 31 140 4.52/t None 8.5s {'redo': 2, 'p3': 5, 'p2': 25, 'win': 1, 'l3builds': 9}
+practice_0197 mixed 28 209 7.46/t None 33.1s {'win': 15, 'p2': 6, 'p3': 7, 'l3builds': 25}
+independent 11 336 3402 10.12 ops/t 427.8s
+mixed 14 398 2887 7.25 ops/t 437.1s
+multiplicative 9 249 1112 4.47 ops/t 104.4s
+shared 12 347 2049 5.90 ops/t 367.0s
+total 9450 1336.4s {'p3': 381, 'p2': 440, 'redo': 50, 'win': 433, 'l3builds': 1049, 'fb': 5, 'hor': 71}
