@@ -92,6 +92,48 @@ def main(argv):
                     gain += cur - len(prog)
             if wins:
                 print(f'  {ref} [{x["licenseName"]}] {name}: improves {wins} puzzles by {gain}')
+    # Public competition notebooks (Kaggle's default license for public notebooks is Apache 2.0): merge their output CSVs.
+    nk = int(argv[argv.index('--kernels') + 1]) if '--kernels' in argv else 40
+    try:
+        ks = json.loads(get(f'{API}/kernels/list?competition=santa-2026&sortBy=scoreAscending&pageSize=100'))[:nk]
+    except Exception:
+        ks = []
+    for k in ks:
+        user, slug = k['ref'].split('/', 1)
+        try:
+            files = json.loads(get(f'{API}/kernels/output?userName={user}&kernelSlug={slug}')).get('files', [])
+        except Exception:
+            continue
+        for f in files:
+            name = f.get('fileName', '')
+            if not name.endswith('.csv'):
+                continue
+            fp = os.path.join(tmp, 'k.csv')
+            get(f['url'], fp)
+            try:
+                with open(fp, newline='', errors='replace') as fh:
+                    rd = csv.DictReader(fh)
+                    if not rd.fieldnames or 'id' not in rd.fieldnames or 'program' not in rd.fieldnames:
+                        continue
+                    progs = {}
+                    for r in rd:
+                        try:
+                            progs[r['id']] = json.loads(r['program'])
+                        except Exception:
+                            pass
+            except Exception:
+                continue
+            wins = gain = 0
+            for p in puzzles:
+                prog = progs.get(p.id)
+                if not isinstance(prog, list):
+                    continue
+                cur = st[p.id]['len']
+                if len(prog) < cur and offer(st, p, prog, f'pubnb:{k["ref"]}/{name}'):
+                    wins += 1
+                    gain += cur - len(prog)
+            if wins:
+                print(f'  notebook {k["ref"]} {name}: improves {wins} puzzles by {gain}')
     after = sum(v['len'] for v in st.values())
     print(f'store after {after} (gain {before - after})')
     if not dry and after < before:
