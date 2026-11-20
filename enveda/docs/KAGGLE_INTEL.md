@@ -34,8 +34,9 @@ Scores quoted for notebooks are what the Code tab displays (best public score ov
 9. Permitted and unused in public: the ICEBERG PubChem atlas (predicted MS/MS for 91.4M PubChem structures,
    host-approved for library and training use), FRIGID de novo checkpoints, the Enveda-180 Zenodo release
    (816 structures absent from train), newer GNPS / MassBank / MoNA releases. NIST is forbidden.
-10. A private fork of the 0.495 notebook is on our account (section 9). It needs a GPU T4 and a scoring rerun of
-    several hours (stage guards up to 8.6 h of the 9 h limit).
+10. A private fork of the 0.495 notebook is on our account, `ograhulrajkumar/casmi26-taeyangg4-0495-fork`,
+    versions 1 (byte-identical, 365 s commit) and 2 (smoke mode, all stages verified on 12 molecules, 1,914 s).
+    It needs a GPU T4 and a scoring rerun of several hours (stage guards up to 8.6 h of the 9 h limit). Section 9.
 
 ## 1. Leaderboard
 
@@ -311,10 +312,25 @@ statistics.
   internet off, competition data, the 11 datasets and the kernel output `popwenman/casmi26-scorer-train-v80`.
   All attached datasets are on the same versions the original pinned (their latest versions predate 2026-11-18;
   the scorer kernel has a single version).
-- Status: FORK_STATUS_PLACEHOLDER
-- Submitting: the coordinator submits a version with `scripts/kaggle_submit.py`. In the scoring rerun the
-  notebook runs every stage (`IS_RERUN` is true whenever the test file differs from the visible one), with stage
-  guards up to 8.6 h of the 9 h limit; expect a GPU-hours cost of several hours per submission. Not submitted.
+- Version 1 (code byte-identical, `COMMIT_MODE = 'fast'`): COMPLETE in 365 s on GPU T4. Wrote a valid
+  `submission.csv` (400 unique ids equal to the sample's, 25 dummy SMILES each; the fast commit never runs the
+  base pipeline). Datasets, the RDKit 2026.03.3 wheel, the scorer v80 bundle and CUDA all resolved; the overlay
+  self-tests passed; P5's Engine 1 rerun ran on 12 molecules on CUDA with 0 errors.
+- Version 2 (one line changed: `COMMIT_MODE = 'smoke'`, so the commit run executes every stage on 12 visible
+  molecules): COMPLETE in 1,914 s. Valid `submission.csv` (400 ids, 12 real lists of 25, 388 one-guess
+  placeholders). Stages seen working: frozen 0.465 base (19.8 min for 12 molecules, Engine 1 + Engine 2 +
+  PubChem channel, ICEBERG 793 of 814 candidates scored on CUDA at 42 predictions/s, GLACIER 11 molecules),
+  neural ensemble 0.5 z(public) + 0.5 z(v80), fragment check, leader-safe merge, v8 mass prior, neighbour network
+  (412 s, 114 molecules with neighbours), extlib overlay (322,741 references), FR 3-25. P5 tail raised its own
+  guarded assertion ("Engine 1 rerun molecules differ from the submission") and kept its input file; this looks
+  like a smoke-subset artefact (its 12 molecules are not the pipeline's 12), it cannot be checked without a
+  scoring rerun.
+- The scoring rerun is identical for both versions (`RUN_PIPELINE = IS_RERUN or COMMIT_MODE != 'fast'`, and
+  `IS_RERUN` is true when `KAGGLE_IS_COMPETITION_RERUN` is set or the test file's hash differs from the visible
+  one). Submit version 1 for an exact replica of taeyangg4's 0.495 submission. Expect a GPU T4 run of several
+  hours (stage guards up to 8.6 h of the 9 h limit), i.e. several of the weekly 30 GPU hours per submission.
+- Not submitted. The coordinator submits with `scripts/kaggle_submit.py` (kernel owner `ograhulrajkumar`, slug
+  `casmi26-taeyangg4-0495-fork`, version 1).
 
 ## 10. How to refresh this snapshot
 

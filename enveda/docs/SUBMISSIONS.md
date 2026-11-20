@@ -8,3 +8,4 @@ Times are UTC. "kernel" is `owner/slug vN` of the private inference notebook tha
 | # | submitted (UTC) | kernel | config | local validation | message | status | public score | ref |
 |---|---|---|---|---|---|---|---|---|
 | 1 | 2026-11-20 19:08:04 | ograhulrajkumar/casmi-inference v2 | b0_npdb | n/a (no local validation yet) | b0_npdb: NP-tier prior baseline (WP4), casmi-inference v2 | COMPLETE | 0.154 | 58630976 |
+| 2 | 2026-11-20 20:04:10 | ograhulrajkumar/casmi26-taeyangg4-0495-fork v1 | public_fork_taeyangg4_0495 | n/a (public fork) | Private fork of public taeyangg4 0.495 notebook, unchanged (base for fork-and-extend) | PENDING |  | 58633848 |
