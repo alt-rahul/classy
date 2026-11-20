@@ -217,13 +217,15 @@ def mol_graph(smiles: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
     heavy-atom graph, or None if the SMILES does not parse. ``atom_mass`` includes the
     atom's hydrogens; ``bridges`` are the acyclic bonds; ``ring_pairs`` are the pairs of
     ring bonds inside one ring system (rings sharing >= 2 atoms)."""
-    from rdkit import Chem
+    from rdkit import Chem, rdBase
 
     from .chem import mol_from_smiles
 
     mol = smiles if isinstance(smiles, Chem.Mol) else mol_from_smiles(smiles)
     if mol is None or mol.GetNumAtoms() == 0:
         return None
+    if isinstance(smiles, Chem.Mol):
+        mol.UpdatePropertyCache(strict=False)
     if any(a.GetAtomicNum() == 1 and not a.GetIsotope() for a in mol.GetAtoms()):
         try:
             mol = Chem.RemoveHs(mol)
@@ -241,9 +243,12 @@ def mol_graph(smiles: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
     ea = np.fromiter((b.GetBeginAtomIdx() for b in bonds), dtype=np.int64, count=len(bonds))
     eb = np.fromiter((b.GetEndAtomIdx() for b in bonds), dtype=np.int64, count=len(bonds))
     ri = mol.GetRingInfo()
-    if ri.NumAtoms() == 0 and n:      # ring info not initialised (unsanitised input)
-        Chem.FastFindRings(mol)
-        ri = mol.GetRingInfo()
+    with rdBase.BlockLogs():
+        try:
+            ri.NumRings()
+        except RuntimeError:          # ring info not initialised (unsanitised input)
+            Chem.FastFindRings(mol)
+            ri = mol.GetRingInfo()
     in_ring = np.fromiter((ri.NumBondRings(b.GetIdx()) > 0 for b in bonds), dtype=bool,
                           count=len(bonds))
     bridges = np.flatnonzero(~in_ring).astype(np.int64)
