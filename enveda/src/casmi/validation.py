@@ -1514,8 +1514,8 @@ def c3h_neighbours(truth: pd.DataFrame, cfg: Config, *, train_dir: Path | str | 
                 continue
             t0 = time.perf_counter()
             if s in ("train", "np"):
-                if s == "train":
-                    ik, fps = train_fingerprints(cfg, train_dir, n_jobs)
+                if s == "train":   # cache next to the neighbour cache (one per validation dir)
+                    ik, fps = train_fingerprints(cfg, train_dir, n_jobs, cache_dir=cp.parent)
                 else:
                     ik, fps = _np_tier_fps(db)
                 index = TanimotoIndex(fps)

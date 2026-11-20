@@ -53,8 +53,8 @@ size, sha256, git commit).
 | slug | content | version | size |
 |---|---|---|---|
 | `ograhulrajkumar/casmi-code` | `casmi/` (src/casmi), `configs/`, `pyproject.toml` | 1 | 0.6 MB |
-| `ograhulrajkumar/casmi-db-np` | `np.parquet`, `np_fp.npy`, `build_report.json`, `mass_disagreements.csv` (data/processed/db/np) | 1 | 470 MB |
-| `ograhulrajkumar/casmi-db-pubchem` | 120 `mass_XXXX.parquet` shards + `_index.json` (data/processed/db/pubchem) | 1 | 2.19 GB |
+| `ograhulrajkumar/casmi-db-np` | `np.parquet`, `np_fp.npy`, `build_report.json`, `mass_disagreements.csv` (data/processed/db/np) | 2 (R3 prior columns; v1 without) | 473 MB |
+| `ograhulrajkumar/casmi-db-pubchem` | 120 `mass_XXXX.parquet` shards + `_index.json` (data/processed/db/pubchem) | 2 (R3 prior columns; v1 without) | 2.30 GB |
 
 Later artefacts (library, models) get their own datasets the same way and one line each in
 `ARTEFACTS` in `scripts/package_kaggle.py` (artefact subdir under `CASMI_ARTEFACTS` -> slug),

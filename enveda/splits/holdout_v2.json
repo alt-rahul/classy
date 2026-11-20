@@ -1,6 +1,6 @@
 {
-  "built": "2026-11-20 21:09:44",
-  "git": "5ea6bafed28c-dirty",
+  "built": "2026-11-20 21:36:30",
+  "git": "cafa7bebb9b7-dirty",
   "alpha": {
     "A": 0.796,
     "B": 0.522,
@@ -76,11 +76,11 @@
   "pmid_definition": "max over the molecule's ik14 of max(pmid_count, pubmed_count)",
   "n_ext_lib_source": null,
   "c2_zen_source": null,
-  "sid_count_filled": false,
+  "sid_count_filled": true,
   "b0_check_fast": {
-    "A": 0.15513637706829592,
-    "B": 0.15473383462656662,
-    "C": 0.1859440428001661
+    "A": 0.15508316493747823,
+    "B": 0.154639332245555,
+    "C": 0.18596161664487926
   },
   "b0_check_full": {
     "A": 0.15402717527802595,

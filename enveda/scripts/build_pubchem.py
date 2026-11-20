@@ -1621,8 +1621,9 @@ def priors_docs(cfg: Cfg):
     lines = [PRIORS_START, "## PubChem documentation priors (R3)", "",
              f"- Built {pr.get('built_utc')} by `nice -n 10 python3 scripts/build_pubchem.py --stage priors` "
              f"(git {pr.get('git_commit')}), {sum(tim.values()) / 60:.0f} min wall "
-             f"({', '.join(f'{k} {v / 60:.1f}' for k, v in tim.items())} min), 2 cores, peak RSS "
-             f"{rss / 1024:.1f} GB, DuckDB memory_limit at most min(6 GB, available - 1 GB). Resumable through "
+             f"({', '.join(f'{k} {tim[k] / 60:.1f}' for k in PRIOR_STEPS if k in tim)} min), 2 cores, peak RSS "
+             f"{rss / 1024:.1f} GB including memory-mapped files (anonymous RSS at most about 3 GB), DuckDB "
+             "memory_limit at most min(6 GB, available - 1 GB). Resumable through "
              "`data/external/pubchem/priors/.done_*`; intermediates (cid2g.npy, pair files) are deleted at the end.",
              "- Adds to every shard, after the WP3 columns: " + ", ".join(
                  f"`{n}` {t}" for n, t in PRIOR_FIELDS) + ". Rows, row order and row groups of every shard are "
@@ -1641,10 +1642,14 @@ def priors_docs(cfg: Cfg):
              f"`{ps.get('write', {}).get('np_priors_sha256')}`; joined into np.parquet by "
              "`build_npdb.py --stage priors`.", "",
              "Sources (streamed, never stored; md5 checked):", "",
-             "| step | file | Last-Modified | bytes | lines | seconds |", "|---|---|---|---|---|---|"]
-    for k, s in ps.get("sources", {}).items():
-        lines.append(f"| {k} | {s.get('url', '').rsplit('/', 1)[-1]} | {s.get('last_modified')} | "
-                     f"{fmt_n(s.get('bytes') or 0)} | {fmt_n(s.get('rows') or 0)} | {s.get('seconds')} |")
+             "| step | file | Last-Modified | bytes | lines | seconds streamed |", "|---|---|---|---|---|---|"]
+    srcs = ps.get("sources", {})
+    for k in ["CID-InChI-Key.gz", *PRIOR_STEPS]:
+        if k in srcs:
+            s = srcs[k]
+            lines.append(f"| {'map' if k.endswith('.gz') else k} | {s.get('url', '').rsplit('/', 1)[-1]} | "
+                         f"{s.get('last_modified')} | {fmt_n(s.get('bytes') or 0)} | {fmt_n(s.get('rows') or 0)} | "
+                         f"{s.get('seconds')} |")
     sc = ps.get("sources", {}).get("sidmap", {}).get("source_categories", {})
     if sc:
         lines += ["", f"Vendor categories: `{SOURCE_RDF_URL}` ({sc.get('vendor_records')} Chemical_Vendors "
@@ -1890,7 +1895,9 @@ def stage_docs(cfg: Cfg):
            f"`_index.json` | {fmt_n(idx['total_rows'])} | {idx['total_bytes'] / 1e9:.2f} GB | "
            f"`{sha256_file(cfg.out / '_index.json')}` (`_index.json`) | "
            f"`nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras ({dates}); "
-           f"about {wall_min:.0f} min wall, 2 cores, 7 GB RAM |")
+           f"about {wall_min:.0f} min wall, 2 cores, 7 GB RAM"
+           + ("; stage `priors` (R3, six more FTP files) adds the prior columns, see the R3 section" if idx.get("priors")
+              else "") + " |")
     path = DOCS / "ARTEFACTS.md"
     if path.exists():
         text = path.read_text()

@@ -26,8 +26,9 @@ belongs in `src/casmi/`. Other conventions:
 
 | Script | Owner | Purpose |
 |---|---|---|
-| `build_npdb.py` | WP2 | NP-tier database `data/processed/db/np/` |
-| `build_pubchem.py` | WP3 | PubChem tier `data/processed/db/pubchem/mass_*.parquet` |
+| `build_npdb.py` | WP2 | NP-tier database `data/processed/db/np/` (R3: `--stage priors` joins the PubChem documentation priors) |
+| `build_pubchem.py` | WP3 | PubChem tier `data/processed/db/pubchem/mass_*.parquet` (R3: `--stage priors` appends the documentation-prior columns) |
+| `eval_priors.py` | R3 | spectrum-free prior-only MRR@25 of the documentation priors vs the pmid-only prior on the class-2 proxies |
 | `ingest_train.py` | WP6 | cleaned train spectra, `structures.parquet`, mkey cache, `docs/DATA_AUDIT.md` |
 | `build_library.py` | WP5 | library index `data/processed/library/` |
 | `make_splits.py` | WP7 | `splits/holdout_v1.csv` (tracked) |

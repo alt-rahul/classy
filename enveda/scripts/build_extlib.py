@@ -673,17 +673,27 @@ TRAIN_LIB_COLS = ["spectrum_id", "inchikey14", "normalized_smiles", "molecular_f
                   "precursor_error_ppm", "mono_mass", "instrument_family", "n_peaks_raw", "prec_intensity"]
 
 
+_LIB_TYPES = {"ms2_mzs": pa.list_(pa.float32()), "ms2_normalized_intensities": pa.list_(pa.float32()),
+              "collision_energy_ev": pa.list_(pa.float64()), "precursor_mz": pa.float64(),
+              "base_peak_intensity": pa.float64(), "precursor_error_ppm": pa.float64(),
+              "mono_mass": pa.float64(), "n_peaks_raw": pa.float64(), "prec_intensity": pa.float64()}
+
+
 def _build_small_library(frames: list[pd.DataFrame], cfg: Config, out: Path):
     from casmi.library import Library
 
-    cols = TRAIN_LIB_COLS
+    schema = pa.schema([(c, _LIB_TYPES.get(c, pa.string())) for c in TRAIN_LIB_COLS])
     tabs = []
     for df in frames:
-        df = df[[c for c in cols if c in df.columns]].copy()
+        df = df.reindex(columns=TRAIN_LIB_COLS).copy()
         for c in ("ms2_mzs", "ms2_normalized_intensities"):
             df[c] = [np.asarray(x, np.float32) for x in df[c]]
-        tabs.append(pa.Table.from_pandas(df, preserve_index=False))
-    tab = pa.concat_tables(tabs, promote_options="permissive")
+        df["collision_energy_ev"] = [None if x is None or (isinstance(x, float) and math.isnan(x))
+                                     else np.asarray(x, np.float64) for x in df["collision_energy_ev"]]
+        for c in ("n_peaks_raw", "prec_intensity"):
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype(np.float64)
+        tabs.append(pa.Table.from_pandas(df, schema=schema, preserve_index=False))
+    tab = pa.concat_tables(tabs)
     return Library.build(tab, cfg, out_dir=out, precleaned=True)
 
 
@@ -725,7 +735,7 @@ def _threshold_table(res: pd.DataFrame, cfg: Config) -> dict:
     out = {"n_queries": int(len(res)), "top1_correct_rate": float(res["correct"].mean()) if len(res) else float("nan"),
            "by_k": {}}
     best = None
-    grid = np.round(np.arange(0.50, 1.0001, 0.01), 2)
+    grid = np.round(np.arange(0.30, 1.0001, 0.01), 2)
     for k in (1, 2, 3, 4, 5, 6, 8, 10):
         rk = res[res["n_matched"] >= k]
         chosen = None

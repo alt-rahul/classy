@@ -285,6 +285,8 @@ class Config:
     enc_model_path: str = ""                 # pipeline stage "encoder": checkpoint, relative = under MODELS
     enc_device: str = "cpu"                  # pipeline stage "encoder": torch device
     enc_batch_queries: int = 256             # queries per forward pass at inference
+    enc_pos_mz_offset_da: float = 0.000548   # subtracted from positive-mode fragment m/z of enc_offset_libs (bundle only; R7: one electron mass high, test corrected)
+    enc_offset_libs: tuple = ("enveda-180", "enveda-np-examples")
 
     # --- MetFrag-lite fragment features (ROADMAP R7; casmi.fragments) -----------------
     frag_top_k: int = 100                    # candidates per molecule that get fragment features
@@ -310,6 +312,21 @@ class Config:
     extlib_calib_precision: float = 0.95     # rank-1 precision target of the per-source thresholds
     extlib_calib_max_molecules: int = 1500   # timsTOF query molecules per source for calibration
     extlib_calib_min_hits: int = 20          # fewest accepted queries for a threshold to count
+
+    # --- Analog evidence features (ROADMAP R6; casmi.analogs) -------------------------
+    analog_feat_top_k: int = 50              # analog hits per molecule that feed the features
+    analog_feat_coarse_top: int = 500        # open-index shortlist rescored by modified cosine
+    analog_feat_power: float = 4.0           # hit weight = modified cosine ** power (public 3 to 4)
+    analog_feat_min_matched: int = 3         # hits with fewer matched peaks are dropped
+    analog_feat_min_sim: float = 0.0         # hits below this modified cosine are dropped
+    analog_feat_max_dm_da: float = 0.0       # |M - hit mass| limit in Da (0 = whole library; public 200)
+    analog_feat_delta_tol_da: float = 0.01   # query-vs-hit mass difference matching an edit delta
+    analog_feat_close_tanimoto: float = 0.6  # Tanimoto counted as a close hit (an_n_close)
+    analog_feat_struct_top_k: int = 100      # candidates per molecule with scaffold / substructure features (0 = all)
+    analog_feat_struct_hits: int = 20        # best hits used for the scaffold / substructure features
+    analog_feat_rank_col: str = "score"      # pool column choosing the struct top K (absent: fusion.fuse)
+    analog_feat_fp_path: str = ""            # optional precomputed hit fingerprints: <x>.npy + <x>_ik14.parquet ("" = on the fly)
+    analog_feat_n_jobs: int = 1              # processes for candidate fingerprints (0 = n_jobs)
 
     def __post_init__(self) -> None:
         for f in dataclasses.fields(self):

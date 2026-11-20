@@ -14,8 +14,8 @@ Columns:
 
 | artefact | path | rows | size | sha256 | how to rebuild |
 |---|---|---|---|---|---|
-| PubChem tier (120 shards) | `data/processed/db/pubchem/mass_XXXX.parquet`, `_index.json` | 90,719,171 | 2.19 GB | `f08bdde0be1c814797f3f16cbf6c4e764aba72ca84cafff9f5cbaf5ed9c96346` (`_index.json`) | `nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras (CID-Mass.gz 16 Nov 2026, CID-SMILES.gz 17 Nov 2026, CID-PMID.gz 29 Aug 2025, CID-InChI-Key.gz 17 Nov 2026); about 14 min wall, 2 cores, 7 GB RAM |
-| NP tier table | `data/processed/db/np/np.parquet` | 854,475 | 32.5 MB | `ba9fe19ddda93a5bc473d387f279bd1e1829fcbd430baa5859884157a477513f` | `nice -n 10 python -I scripts/build_npdb.py` (stages download, headers, table, fp, check); inputs: the 4 raw NP files below, downloaded 2026-11-18; about 10 min wall after downloads, 2 cores, 2.4 GB RAM peak |
+| PubChem tier (120 shards) | `data/processed/db/pubchem/mass_XXXX.parquet`, `_index.json` | 90,719,171 | 2.30 GB | `eca9537a44fbb1336823d37ab6cfb51b27f7e8fcb4fa5f99a850d787220391fa` (`_index.json`) | `nice -n 10 python3 scripts/build_pubchem.py`; PubChem FTP Compound/Extras (CID-Mass.gz 16 Nov 2026, CID-SMILES.gz 17 Nov 2026, CID-PMID.gz 29 Aug 2025, CID-InChI-Key.gz 17 Nov 2026); about 14 min wall, 2 cores, 7 GB RAM; stage `priors` (R3, six more FTP files) adds the prior columns, see the R3 section |
+| NP tier table | `data/processed/db/np/np.parquet` | 854,475 | 35.9 MB | `22b2b72c982ea419b33b9354cdfc3a4e7ab1a1a8317ad6ec84b70e2f5b9d4a87` | `nice -n 10 python -I scripts/build_npdb.py` (stages download, headers, table, fp, priors, check; priors needs `build_pubchem.py --stage priors` first); inputs: the 4 raw NP files below, downloaded 2026-11-18; about 10 min wall after downloads, 2 cores, 2.4 GB RAM peak |
 | NP tier fingerprints | `data/processed/db/np/np_fp.npy` | (854,475, 512) uint8 | 437.5 MB | `a526ef2081ad323e26960db128e5902f21785bf6eeb882cd5197e3ad5920f9a9` | same command (`nice -n 10 python -I scripts/build_npdb.py --stage fp` alone redoes it, 11.3 min on 2 cores since the InChI round trip, rebuilt 2026-11-18); row-aligned to np.parquet, recipe in the WP2 section |
 | NP raw: COCONUT | `data/external/coconut/coconut_csv-11-2026.zip` | 738,793 | 248.0 MB | `74582c17f34ce33ea8ff27ba721a7bcfb654e2521aa94d6d3caf53f19159187a` | `https://coconut.s3.uni-jena.de/prod/downloads/2026-11/coconut_csv-11-2026.zip` (2026-11 release), `build_npdb.py --stage download` |
 | NP raw: NPAtlas | `data/external/npatlas/NPAtlas_download.tsv` | 36,454 | 33.7 MB | `4fa5ce93cf5e271d65649f7f5c40e031b1e3d59144cb50c12c5fc9ee041cc72b` | `https://www.npatlas.org/static/downloads/NPAtlas_download.tsv` (no version in the URL: a later download may differ) |
@@ -32,9 +32,10 @@ one section per WP.
 
 - Built 2026-11-18T02:18:04+00:00 by `scripts/build_pubchem.py` (git 763e494). Rebuild: `nice -n 10 python3 scripts/build_pubchem.py`; measured 14 min wall (stage 1 8.4 min, stage 2 2.9 min, stage 3 3.1 min; downloads ran at about 20 MB/s), 2 cores, peak RSS 4.2 GB (DuckDB memory_limit 7GB), peak disk about 8 GB of intermediates (stage 1 parquet is deleted after stage 2, stage 2 after the checks). Resumable via `data/external/pubchem/.stage_*`; `--stage 1|2|3|check|cleanup|docs` runs one stage, `--force` rebuilds from scratch.
 - Location: `data/processed/db/pubchem/`, 120 shards `mass_0100.parquet` ... `mass_1290.parquet` (shard XXXX holds 10 * floor(mono_mass / 10) = XXXX), plus `_index.json` (per shard: rows, min and max mass, bytes, sha256).
-- Rows: 90,719,171 (one per ik14 within a shard; ik14 is unique across the tier because one ik14 implies one formula). Size: 2.19 GB. sha256 of `_index.json`: `f08bdde0be1c814797f3f16cbf6c4e764aba72ca84cafff9f5cbaf5ed9c96346`.
+- Rows: 90,719,171 (one per ik14 within a shard; ik14 is unique across the tier because one ik14 implies one formula). Size: 2.30 GB. sha256 of `_index.json`: `eca9537a44fbb1336823d37ab6cfb51b27f7e8fcb4fa5f99a850d787220391fa`.
 - Schema (PLAN.md 2.3): `ik14` string, `smiles` string (PubChem isomeric SMILES of the lowest CID), `formula` string (PubChem Hill formula), `mono_mass` float64 (PubChem monoisotopic mass), `cid` int32 (lowest CID in the ik14 group), `pmid_count` int32 (max over the group of distinct PMIDs per CID, 0 if none), `n_cids` int16 (CIDs collapsed into the ik14, capped at 32767). Rows sorted by mono_mass then cid, row groups of 100,000 rows, zstd level 9, so a pyarrow `filters=[('mono_mass', '>=', lo), ...]` read touches one or two row groups.
 - Not done here: RDKit parsing (lazy at inference, PLAN.md 2.2), fingerprints, NP-likeness.
+- R3 documentation-prior columns (`sid_count`, `synonym_count`, `pc_patent_count`, `mesh_count`, `n_vendors`, `n_depositors`) are appended by `--stage priors`; see the PubChem documentation priors section below.
 
 Sources (PubChem FTP `Compound/Extras`, streamed, never stored; md5 checked against the published `.md5`):
 
@@ -60,8 +61,52 @@ Filter cascade (rows remaining after each filter, applied in this order, then ik
 | no_isotope_spec | 106,915,623 | 392,216 |
 | dedup on ik14 (lowest CID kept) | 90,719,171 | 16,196,452 |
 
-Self-check: caffeine found=True (2,495 candidates at 10 ppm), paclitaxel found=True (849 candidates); 20 public-test masses at 10 ppm: candidates min 1,338, median 10,072, max 19,527, slowest query 0.032 s (pyarrow, one shard file read with row-group pruning).
+Self-check: caffeine found=True (2,495 candidates at 10 ppm), paclitaxel found=True (849 candidates); 20 public-test masses at 10 ppm: candidates min 1,338, median 10,072, max 19,527, slowest query 0.097 s (pyarrow, one shard file read with row-group pruning).
 <!-- WP3:pubchem:end -->
+
+<!-- R3:pubchem-priors:start -->
+## PubChem documentation priors (R3)
+
+- Built 2026-11-20T21:24:03+00:00 by `nice -n 10 python3 scripts/build_pubchem.py --stage priors` (git cafa7be), 45 min wall (map 6.0, sid 3.7, synonym 1.2, patent 15.8, sidmap 13.7, mesh 0.1, write 4.6 min), 2 cores, peak RSS 4.0 GB including memory-mapped files (anonymous RSS at most about 3 GB), DuckDB memory_limit at most min(6 GB, available - 1 GB). Resumable through `data/external/pubchem/priors/.done_*`; intermediates (cid2g.npy, pair files) are deleted at the end.
+- Adds to every shard, after the WP3 columns: `sid_count` int32, `synonym_count` int32, `pc_patent_count` int32, `mesh_count` int32, `n_vendors` int16, `n_depositors` int16. Rows, row order and row groups of every shard are unchanged (row groups copied one by one; checked against `_index.json`).
+- Group of an ik14: all PubChem CIDs whose InChIKey (CID-InChI-Key) starts with the ik14; distinct items per group. Groups: 90,719,171 tier rows + 45,190 NP-tier ik14 not in the tier; 108,361,923 CIDs mapped; 9,731,425 groups with more than one CID (max 752). Tier rows with no CID in the newer CID-InChI-Key: 0 (join coverage 100.000 percent).
+- Definitions: `sid_count`: distinct SIDs linked by CID-SID (type 1 standardized form, type 2 component); `synonym_count`: distinct case-folded names in CID-Synonym-filtered; `pc_patent_count`: distinct publication numbers in CID-Patent; `mesh_count`: distinct MeSH terms in CID-MeSH; `n_vendors`: distinct depositors (SID-Map, standardized CID) in RDF category Chemical_Vendors; `n_depositors`: distinct depositors (SID-Map, standardized CID), NIST sources excluded. No depositor-category flag is stored; NIST sources are excluded from `n_depositors` and are not vendors. `pmid_count` is the WP3 column, unchanged.
+- `np_priors.parquet` (`data/external/pubchem/`, NP ik14 -> the same columns + `n_pubchem_cids`), 854,475 rows, sha256 `5334b44885cc5ecd44bbcc6fe5df46d232a5f6a69098d6f3a416abfe9feccc56`; joined into np.parquet by `build_npdb.py --stage priors`.
+
+Sources (streamed, never stored; md5 checked):
+
+| step | file | Last-Modified | bytes | lines | seconds streamed |
+|---|---|---|---|---|---|
+| map | CID-InChI-Key.gz | Fri, 20 Nov 2026 12:06:15 GMT | 7,380,360,283 | 124,870,873 | 208.0 |
+| sid | CID-SID.gz | Fri, 20 Nov 2026 11:58:53 GMT | 2,037,776,615 | 391,541,715 | 122.4 |
+| synonym | CID-Synonym-filtered.gz | Fri, 20 Nov 2026 12:47:25 GMT | 1,081,169,113 | 128,271,932 | 48.7 |
+| patent | CID-Patent.gz | Fri, 20 Nov 2026 11:46:09 GMT | 6,598,443,543 | 1,149,202,040 | 331.3 |
+| sidmap | SID-Map.gz | Fri, 20 Nov 2026 13:22:44 GMT | 3,612,191,429 | 351,871,142 | 407.1 |
+| mesh | CID-MeSH | Fri, 20 Nov 2026 11:13:29 GMT | 3,094,412 | 91,382 | 3.5 |
+
+Vendor categories: `https://ftp.ncbi.nlm.nih.gov/pubchem/RDF/source/pc_source.ttl.gz` (547 Chemical_Vendors records, 1262 names with aliases from `Substance/Extras/Source-Names`).
+
+Distribution over the tier rows (90.7M):
+
+| column | p50 | p90 | p99 | p99.9 | max | mean | fraction zero |
+|---|---|---|---|---|---|---|---|
+| sid_count | 2 | 7 | 28 | 104 | 124,944 | 3.666 | 0.0 |
+| synonym_count | 1 | 3 | 14 | 32 | 2,587 | 1.286 | 0.4272 |
+| pc_patent_count | 0 | 3 | 23 | 382 | 877,107 | 7.109 | 0.7064 |
+| mesh_count | 0 | 0 | 0 | 0 | 20 | 0.001 | 0.9992 |
+| n_vendors | 1 | 3 | 14 | 60 | 202 | 1.558 | 0.4524 |
+| n_depositors | 2 | 6 | 22 | 74 | 323 | 2.96 | 0.0392 |
+
+Spot checks (tier rows):
+
+| compound | cid | pmid_count | n_cids | sid_count | synonym_count | pc_patent_count | mesh_count | n_vendors | n_depositors |
+|---|---|---|---|---|---|---|---|---|---|
+| caffeine | 2519 | 31,835 | 1 | 2,960 | 580 | 31,078 | 5 | 111 | 226 |
+| quercetin | 5280343 | 18,204 | 1 | 1,642 | 392 | 104,580 | 2 | 150 | 266 |
+| paclitaxel | 4666 | 35,671 | 167 | 2,384 | 668 | 99,528 | 7 | 157 | 265 |
+
+sha256 of `_index.json` (lists the per-shard sha256): `eca9537a44fbb1336823d37ab6cfb51b27f7e8fcb4fa5f99a850d787220391fa`; tier size 2.30 GB.
+<!-- R3:pubchem-priors:end -->
 
 <!-- WP1:mkey-cache:start -->
 ## mkey cache (WP1)
@@ -160,6 +205,21 @@ null when not in it), `cid` (int64, PubChemLite CID, else LOTUS `structureCleane
 supplied the SMILES, null otherwise). `n_collections` (number of COCONUT source collections),
 `smiles_source`, `coconut_id`, `npaid` are additions to the PLAN 2.3 schema.
 RDKit mass vs the source mass of the supplying row: 854,475 of 854,475 within 0.001 Da.
+
+<!-- R3:np-priors:start -->
+### PubChem documentation priors in np.parquet (R3)
+
+`nice -n 10 python -I scripts/build_npdb.py --stage priors` appends `sid_count`, `synonym_count`, `pc_patent_count`, `mesh_count`, `n_vendors`, `n_depositors` (definitions in the R3 PubChem section) by ik14 from `data/external/pubchem/np_priors.parquet` (sha256 `5334b44885cc5ecd44bbcc6fe5df46d232a5f6a69098d6f3a416abfe9feccc56`); 6 s, 1 core. Rows matched 854,475 of 854,475 (100.00 percent; unmatched rows get nulls); rows with at least one PubChem CID 809,505 (94.74 percent; the others are not in PubChem and have zero counts). Existing columns, row order and np_fp.npy alignment unchanged. np.parquet now 35.9 MB, sha256 `22b2b72c982ea419b33b9354cdfc3a4e7ab1a1a8317ad6ec84b70e2f5b9d4a87`. `pmid_count` is not stored in np.parquet (it still comes from the PubChem tier at lookup time, so NP-only lookups such as Baseline 0 are unchanged).
+
+| column | p50 | p90 | p99 | p99.9 | max | mean | fraction zero |
+|---|---|---|---|---|---|---|---|
+| sid_count | 15 | 91 | 360 | 1283 | 124,944 | 39.769 | 0.0526 |
+| synonym_count | 6 | 28 | 94 | 267 | 2,587 | 11.91 | 0.248 |
+| pc_patent_count | 0 | 106 | 9005 | 78089 | 877,107 | 453.848 | 0.6408 |
+| mesh_count | 0 | 0 | 1 | 3 | 20 | 0.069 | 0.9406 |
+| n_vendors | 4 | 49 | 119 | 150 | 202 | 15.183 | 0.3569 |
+| n_depositors | 11 | 65 | 150 | 203 | 323 | 23.173 | 0.054 |
+<!-- R3:np-priors:end -->
 
 ### np_fp.npy recipe (for `casmi.chem.morgan_fp` users)
 
@@ -386,8 +446,8 @@ size, sha256); the local copy is `dist/kaggle/<slug>/MANIFEST.json`. Mounted on 
 | slug | version | files | bytes (without manifest) | MANIFEST.json sha256 |
 |---|---|---|---|---|
 | `casmi-code` | 1 | 25 | 584,159 | `4c834891ad96b34f7a6c41516bff2bee43e697964b73a9fc580d0a1d3682ac3b` |
-| `casmi-db-np` | 1 | 4 | 470,023,481 | `b4eb658b1818e41efba8e88ecc5f890cc16e97551671c4f7bdaba7b6f7b51d2f` |
-| `casmi-db-pubchem` | 1 | 121 | 2,189,271,723 | `347677e9ad81a8e465cb1e06fa22a256129e14bad4dda432f33344d6bd435ef8` |
+| `casmi-db-np` | 2 (R3 priors, 2026-11-20) | 4 | 473,377,691 | `7ee92686fe07d07accbdfdb18c6b91a4ca0b537b554ed5fb1f1977bf6799d94b` |
+| `casmi-db-pubchem` | 2 (R3 priors, 2026-11-20) | 121 | 2,304,355,184 | `76f2c686183ed69b9dfd0c911f9e822283b2a328a555d00782bcbb6bcb71b68f` |
 
 Upload time: about 10 s for casmi-db-np, 40 s for casmi-db-pubchem (3 parallel uploads), then
 20 s and 183 s of Kaggle processing until READY.
@@ -487,3 +547,28 @@ falls back to memory with a warning). The table name carries the enumeration ver
 settings, so a change of `frag_max_cuts`, `frag_max_pairs` or `ENUM_VERSION` never reads stale
 lists. Scoring settings (credits, tolerance, H shifts, offsets) are applied at match time and do
 not invalidate the cache.
+
+## Validation protocol v2 (R1)
+<!-- R1:v2:start -->
+
+Built by `python scripts/make_splits.py --v2 [--c3h --c3h-pubchem 20] --n-jobs 2` (ROADMAP 2.3;
+`casmi.validation.build_holdout_v2`, `casmi.splits.make_holdout_v2`). Deterministic.
+`splits/holdout_v1.csv` is unchanged (its 9 columns are byte-identical inside v2).
+
+| file | bytes | sha256 | tracked | notes |
+|---|---|---|---|---|
+| `splits/holdout_v2.csv` | 799,729 | `f4aa200add6b3655263b1e018b1a77781c5cf0212e5a6bc8b9c72c3a7482fc31` | yes | 6,454 rows, 6,250 molecules; v1 columns + in_np, in_pubchem, pmid_count, sid_count (empty until R3), n_ext_lib (0 until R2), has_public_spectra, c2_cell, w_obs (mix A), fast, w_fast; no C2-ZEN rows yet (R2 hook: `data/processed/validation/truth_c2_zen.parquet`) |
+| `splits/holdout_v2.json` | 2,177 | `823796896e41964d52db3e48cfcf6c00168652b86fddad79534ee20a168bce2d` | yes | alpha per mix (A 0.796, B 0.522, C 1.165 = out of range), calibration record, b0 checks, counts |
+| `data/processed/validation/train_fp.npy` | 141,196,928 | `135947efa0eb3c368e382bd22fb2dc84f9bfba590fedca899bff83a441cc5636` | no | packed Morgan-2 4096 (`chem.morgan_fps`, as np_fp.npy) of the 275,775 train structures; 600 to 650 s on 2 processes under load |
+| `data/processed/validation/train_fp_ik14.parquet` | 4,030,980 | `40d87b481dcbbea9a3655f544be7e6bd8b8f752ec7ff94e614eb4b4483d19ec6` | no | row order of train_fp.npy (ik14 sorted) |
+| `data/processed/validation/c3h_neighbours.parquet` | 1,873,036 | `05f02ba1aa979961714ca0c7bc5c5429fea61fe7d82f47d1fc1c981b716da770` | no | (mkey, source train/np/pubchem, thr 0.75, ik14 list) for the 3,250 NP-TIMS + NP-OTHER molecules; PubChem-only window neighbours for 20 NP-TIMS molecules (30 s each) |
+| `data/processed/validation/c3h_removed_counts.parquet` | 95,664 | `f9bfc42adabe5e89814bae78a745de4ef6fded441e9ccc0168204bede7615f9c` | no | per molecule: truth keys, neighbours by source, total removed |
+
+Evaluator outputs (`scripts/evaluate.py`, protocol v2 is the default): `results_v2_<tag>.parquet`
+(one row per molecule and cell, `validation.RESULT_V2_COLUMNS`), `summary_v2_<tag>.json` (the
+proxy report), `pools/<tag>/<set>__<cell>.parquet` with `--store-pools` (scored pools before
+assembly: every LIB / NP / GEN row and the truth, PubChem-only rows down to
+`val_v2_store_keep` = 300 per molecule; identity columns `validation.POOL_ID_COLUMNS` plus every
+numeric feature), `compare_v2_<a>__<b>.json` with `--compare`. Timings and the results are in
+docs/EXPERIMENTS.md, "Protocol v2".
+<!-- R1:v2:end -->

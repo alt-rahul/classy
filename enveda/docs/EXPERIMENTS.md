@@ -333,3 +333,33 @@ candidate, worst 9.7 ms (0.91 s per molecule). Single structures from 3,000 rand
 SMILES: median 0.82 ms, p99 6.0 ms; 200 NP-tier structures above 1,000 Da: median 4.8 ms, p99
 22.7 ms, worst 30 ms (a C80 polyprenol with about 90 acyclic bonds). From the disk cache a
 candidate costs about 0.07 ms (300k rows re-scored in 20 s).
+
+### 2026-11-20 R3 PubChem documentation priors: prior-only MRR on the class-2 proxies
+
+Method: `scripts/eval_priors.py` (spectrum-free; logs/r3_eval_priors.json and .parquet). One query per holdout molecule of `splits/holdout_v1.csv` (6,250 mkeys); pool = all-tier lookup (NP + PubChem, NP rows win) at 10 ppm around the primary ik14's mass (median 5,267 candidates for C2-NP, 10,346 for C2-PC); correct = any ik14 of the mkey; MRR@25 with ties scored by their expectation under a random order; priors declared before the run, nothing tuned: `pmid` = log1p(pmid_count); `b0` = Baseline 0b order (NP-tier rows first, then `fusion.prior_score`); `sid` = log1p(sid_count); `sid+pmid`; `doc` = log1p(sid) + log1p(pmid) + 1.0 in_np + 0.5 log1p(n_citations) + 0.5 log1p(synonym_count) (the public documentation prior without its depositor-source term). holdout_v2 (R1) is not built yet, so C2-PC here is SYN-TIMS whose truth is not in the NP tier and has no spectra in another train library, and w_obs = (1 + pmid_count)^-alpha is shown for two alphas instead of the calibrated one. Brackets: paired bootstrap 90 percent interval of `doc` minus `pmid` (2,000 resamples of molecules).
+
+| cell | n | truth in pool | pmid | b0 | sid | sid+pmid | doc | doc - pmid |
+|---|---|---|---|---|---|---|---|---|
+| C2-NP (NP-TIMS + NP-OTHER), unweighted | 3,250 | 0.999 | 0.369 | 0.440 | 0.428 | 0.435 | 0.472 | +0.103 [+0.097, +0.110] |
+| C2-NP, w_obs alpha 0.5 | 3,250 | 0.999 | 0.121 | 0.250 | 0.237 | 0.205 | 0.257 | +0.136 [+0.127, +0.145] |
+| C2-NP, w_obs alpha 1.0 | 3,250 | 0.999 | 0.049 | 0.198 | 0.182 | 0.131 | 0.186 | +0.137 [+0.127, +0.147] |
+| C2-NP, pmid_count = 0 | 760 | 0.996 | 0.001 | 0.156 | 0.136 | 0.070 | 0.124 | +0.122 [+0.108, +0.136] |
+| NP-TIMS only, unweighted | 250 | 1.000 | 0.756 | 0.832 | 0.776 | 0.784 | 0.822 | +0.066 [+0.048, +0.086] |
+| C2-PC (SYN-TIMS, not NP tier, no other-library spectra) | 2,948 | 0.964 | 0.001 | 0.001 | 0.000 | 0.001 | 0.001 | +0.000 [-0.000, +0.000] |
+| C2-PC, pmid_count = 0 | 2,886 | 0.963 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 [+0.000, +0.000] |
+
+Same per-molecule results rescored on `splits/holdout_v2.csv` (R1: `c2_cell`, calibrated `w_obs`, pmid = max(pmid_count, pubmed_count); `python scripts/eval_priors.py --reuse logs/r3_eval_priors_v1_results.parquet --out logs/r3_eval_priors_v2.json`); C2-PC shown to 4 decimals:
+
+| cell | n | pmid | b0 | sid | sid+pmid | doc | doc - pmid |
+|---|---|---|---|---|---|---|---|
+| v2 C2-NP, w_obs (alpha A 0.796) | 3,250 | 0.069 | 0.210 | 0.194 | 0.151 | 0.205 | +0.136 [+0.126, +0.146] |
+| v2 C2-NP, unweighted | 3,250 | 0.369 | 0.440 | 0.428 | 0.435 | 0.472 | +0.103 [+0.096, +0.110] |
+| v2 C2-NP, pmid_count = 0 | 746 | 0.001 | 0.153 | 0.132 | 0.068 | 0.121 | +0.120 [+0.107, +0.133] |
+| v2 C2-PC | 2,850 | 0.0008 | 0.0006 | 0.0005 | 0.0010 | 0.0009 | +0.0001 [-0.0002, +0.0005] |
+| v2 C2-PC, pmid_count = 0 | 2,784 | 0.0000 | 0.0003 | 0.0003 | 0.0002 | 0.0002 | +0.0002 [+0.0001, +0.0004] |
+
+Findings:
+- C2-NP: every new prior beats the pmid-only prior, with intervals well above 0: `doc` +0.103 unweighted, +0.136 with the calibrated v2 `w_obs` (0.069 -> 0.205). On the pmid_count = 0 subset (760 molecules, where the pmid-only prior is blind) `sid` alone reaches 0.136 and `doc` 0.124. The R3 acceptance on C2-NP holds.
+- `b0` (NP tier first + the WP4 NP prior) is as strong as `doc` once fame is down-weighted (0.198 vs 0.186 at alpha 1.0) and stronger on pmid_count = 0 (0.156 vs 0.124): its NP-tier features (annotation level, organisms, citations, source count) carry information the PubChem counts do not. The two should be combined by the R8 ranker on `w_obs`-weighted groups, not hand-weighted from this table.
+- C2-PC: every prior-only ranking is at the floor (MRR about 0.001; the truth, an obscure enveda-180 synthetic, is 1 of about 10,000 PubChem decoys with similar or larger counts). The new priors are not above the pmid-only prior there except negligibly on pmid_count = 0 (+0.0002 [+0.0001, +0.0004]). That part of the R3 acceptance does not hold for a prior alone; on this route the priors can only help as ranker features next to spectral evidence (R4, R5, R7).
+- Data checks: `sid_count` equals PubChem PUG REST (`compound/cid/<cid>/sids?sids_type=all`, union over the group's CIDs) on 50 of 50 random tier rows (40 single-CID, 10 multi-CID groups); Baseline 0 and 0b reproduce `submissions/20261118_b0_npdb_prior.csv` and `..._b0b_pubchem_prior.csv` byte for byte on the rewritten tiers.

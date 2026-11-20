@@ -6,7 +6,8 @@ Inputs (all local artefacts): the WP5 library store (cleaned peaks, ``data/proce
 library``), WP6 ``meta.parquet`` and ``structures.parquet`` (``data/processed/train``), the
 holdout ``splits/holdout_v1.csv`` (excluded with ``splits.training_exclusion``), the NP tier
 (``np.parquet``, ``np_fp.npy``) and the validation queries / truth of NP-TIMS and NP-OTHER
-(``data/processed/validation``). Output: ``data/processed/encoder/bundle_v2/`` (v1: precursor_error_ppm filter, ik14 structures) in the layout
+(``data/processed/validation``). Output: ``data/processed/encoder/bundle_v3/`` (v1: precursor_error_ppm filter, ik14
+structures; v2: no positive-mode m/z offset correction) in the layout
 of ``casmi.encoder.Bundle`` (module docstring there), plus ``info.json`` with counts,
 filters, input checksums and diagnostics.
 
@@ -15,7 +16,9 @@ in [fpm_mass_min, fpm_mass_max], a parseable adduct, |precursor error| <=
 fpm_max_precursor_error_ppm (NaN passes), RDKit-parseable label SMILES, and not a holdout
 molecule (by ik14 and mkey); the error filter uses the recomputed ``m_err_ppm`` of WP6 meta.
 A structure is an mkey group (ik14 when the mkey is missing) represented by its ik14 with
-the most training spectra; every ik14 of the group is excluded from its negatives. Targets:
+the most training spectra; every ik14 of the group is excluded from its negatives.
+Positive-mode fragment m/z of ``cfg.enc_offset_libs`` (training spectra and NP-TIMS / SYN-TIMS
+queries) are lowered by ``cfg.enc_pos_mz_offset_da`` (R7: one electron mass high). Targets:
 ``chem.morgan_fps`` (std_mol + InChI round trip) of the representative's label SMILES.
 """
 
@@ -87,6 +90,32 @@ def instrument_codes(fam: np.ndarray) -> np.ndarray:
     return pd.Series(fam, dtype=object).map(lambda v: lut.get(v, lut["other"])).to_numpy(np.int8)
 
 
+def correct_offset(mz: np.ndarray, offsets: np.ndarray, mask: np.ndarray, cfg: Config) -> tuple[np.ndarray, int]:
+    """Subtract ``cfg.enc_pos_mz_offset_da`` from the peaks of spectra where ``mask`` (positive
+    mode, Enveda timsTOF libraries: fragments read one electron mass high in train, the hidden
+    test was corrected; docs/EXPERIMENTS.md R7 calibration). Returns (new mz, peaks shifted)."""
+    if cfg.enc_pos_mz_offset_da == 0.0 or not np.any(mask):
+        return mz, 0
+    per_peak = np.repeat(np.asarray(mask, bool), np.diff(np.asarray(offsets, np.int64)))
+    out = np.asarray(mz, np.float64).copy()
+    out[per_peak] -= cfg.enc_pos_mz_offset_da
+    return out.astype(np.float32), int(per_peak.sum())
+
+
+def query_store(q: pd.DataFrame, truth: pd.DataFrame, cfg: Config):
+    """Cleaned query spectra and metadata; positive-mode queries from the Enveda libraries get
+    the same m/z offset correction as the training spectra (the hidden test is corrected)."""
+    from casmi.fpmodel import spectra_from_frame
+    from casmi.spectra import SpectrumStore
+
+    store, meta = spectra_from_frame(q, cfg)
+    qlib = q["molecule_id"].map(truth.set_index("molecule_id")["query_lib"]).astype(str).to_numpy()
+    mask = (meta.polarity > 0) & np.isin(qlib, list(cfg.enc_offset_libs))
+    mz, n = correct_offset(store.mz, store.offsets, mask, cfg)
+    log.info("queries: m/z offset applied to %d of %d spectra (%d peaks)", int(mask.sum()), len(mask), n)
+    return SpectrumStore(mz, store.intensity, store.offsets), meta
+
+
 # --------------------------------------------------------------------------------------
 # training spectra
 # --------------------------------------------------------------------------------------
@@ -153,7 +182,7 @@ def eval_pack(name: str, cfg: Config, val_dir: Path, np_ik14: np.ndarray, np_mas
 
     q, truth = load_queries(name, val_dir)
     q = q.sort_values(["molecule_id", "spectrum_id"], kind="mergesort").reset_index(drop=True)
-    store, meta = spectra_from_frame(q, cfg)
+    store, meta = query_store(q, truth, cfg)
     mols = mass_tables(q, cfg)[0].sort_values("molecule_id", kind="mergesort").reset_index(drop=True)
     code = {m: i for i, m in enumerate(mols["molecule_id"].astype(str))}
     q_mol = np.array([code[str(m)] for m in q["molecule_id"]], np.int32)
@@ -209,7 +238,7 @@ def pc_pack(cfg: Config, val_dir: Path, name: str = "SYN-TIMS") -> E.EvalPack:
     truth = truth[~truth["eligible_c1"].astype(bool)]
     q = q[q["molecule_id"].isin(set(truth["molecule_id"]))]
     q = q.sort_values(["molecule_id", "spectrum_id"], kind="mergesort").reset_index(drop=True)
-    store, meta = spectra_from_frame(q, cfg)
+    store, meta = query_store(q, truth, cfg)
     mols = mass_tables(q, cfg)[0].sort_values("molecule_id", kind="mergesort").reset_index(drop=True)
     code = {m: i for i, m in enumerate(mols["molecule_id"].astype(str))}
     tk_path = val_dir / "truth_keys.parquet"
@@ -314,6 +343,13 @@ def build(cfg: Config, out: Path, n_jobs: int, lib_dir: Path, train_dir: Path, h
     store = SpectrumStore.load(lib_dir)
     sub = store.take(df["spec_idx"].to_numpy(np.int64))
     pol = df["polarity"].to_numpy(np.int64)
+    shift_mask = (pol > 0) & df["ingest_lib"].astype(str).isin(set(cfg.enc_offset_libs)).to_numpy()
+    new_mz, n_shift = correct_offset(sub.mz, sub.offsets, shift_mask, cfg)
+    sub = SpectrumStore(new_mz, sub.intensity, sub.offsets)
+    counts["mz_offset_spectra"] = int(shift_mask.sum())
+    counts["mz_offset_peaks"] = n_shift
+    log.info("m/z offset %.6f Da subtracted from %d positive-mode spectra (%d peaks) of %s",
+             cfg.enc_pos_mz_offset_da, int(shift_mask.sum()), n_shift, list(cfg.enc_offset_libs))
     s = {"spec_prec": df["precursor_mz"].to_numpy(np.float64),
          "spec_mass": np.where(np.isfinite(df["m_spec"].to_numpy(np.float64)),
                                df["m_spec"].to_numpy(np.float64), df["mono_mass"].to_numpy(np.float64)),
@@ -430,7 +466,7 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     log_run(log, args)
     cfg = load_config(args.config)
-    out = Path(args.out) if args.out else paths.PROCESSED / "encoder" / "bundle_v2"
+    out = Path(args.out) if args.out else paths.PROCESSED / "encoder" / "bundle_v3"
     holdout = Path(args.holdout) if args.holdout else paths.SPLITS / "holdout_v1.csv"
     if not args.pc_only:
         build(cfg, out, args.n_jobs, paths.PROCESSED / "library", paths.PROCESSED / "train", holdout,
