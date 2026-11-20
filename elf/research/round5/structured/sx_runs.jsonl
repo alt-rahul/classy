@@ -90,3 +90,12 @@
 {"id": "scored_0222", "old": 33, "new": null, "status": "UNKNOWN", "tl": 60.0, "tag": "sx-small"}
 {"id": "scored_0092", "old": 34, "new": null, "status": "INFEASIBLE", "tl": 60.0, "tag": "sx-small"}
 {"id": "scored_0548", "old": 34, "new": null, "status": "INFEASIBLE", "tl": 60.0, "tag": "sx-small"}
+{"id": "scored_0029", "old": 35, "new": null, "status": "UNKNOWN", "tl": 60.0, "tag": "sx-small"}
+{"id": "scored_0749", "old": 89, "new": null, "status": "UNKNOWN", "tl": 150.0, "tag": "sx-mid"}
+{"id": "scored_0749", "old": 89, "new": null, "status": "INFEASIBLE", "tl": 100.0, "tag": "sx-th"}
+{"id": "scored_0727", "old": 77, "new": null, "status": "UNKNOWN", "tl": 60.0, "tag": "sx-th"}
+{"id": "scored_0522", "old": 86, "new": null, "status": "UNKNOWN", "tl": 60.0, "tag": "sx-th"}
+{"id": "scored_0727", "old": 77, "new": null, "status": "UNKNOWN", "tl": 120.0, "tag": "sx2", "env": {"SX_K2": "300", "SX_TH": "1000000"}}
+{"id": "scored_0233", "old": 32, "new": null, "status": "UNKNOWN", "tl": 120.0, "tag": "sx2", "env": {"SX_K2": "300", "SX_TH": "1000000"}}
+{"id": "scored_0779", "old": 113, "new": null, "status": "INFEASIBLE", "tl": 40.0, "tag": "sx-th"}
+{"id": "scored_0835", "old": 112, "new": null, "status": "INFEASIBLE", "tl": 40.0, "tag": "sx-th"}

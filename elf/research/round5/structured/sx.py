@@ -24,6 +24,8 @@ def universe(p,nodes):
                 if lo>1 and hi%lo==0:
                     q=hi//lo
                     if q not in curset: c1.setdefault(q,[]).append(('/',hi,lo))
+    TH=int(os.environ.get('SX_TH','0'))
+    if TH: c1={v:r for v,r in c1.items() if v<TH}
     return cur,c1
 
 def recipes_for(x,U,Uset,L):

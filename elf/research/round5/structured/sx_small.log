@@ -266,3 +266,6 @@ scored_0548 n0 34 U 1837 usednew 1773 recipes 5245 gen 0.0s
 scored_0548 status INFEASIBLE obj None bound 0.0 t 8.3
 none scored_0548 34 INFEASIBLE 
 scored_0029 n0 35 U 1707 usednew 1666 recipes 5224 gen 0.0s
+scored_0029 status UNKNOWN obj None bound 19.0 t 60.1
+none scored_0029 35 UNKNOWN 
+scored_0221 n0 35 U 1474 usednew 1423 recipes 4326 gen 0.0s

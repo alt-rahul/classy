@@ -1,0 +1,7 @@
+scored_0779 n0 113 U 1913 usednew 1792 recipes 6887 gen 0.0s
+scored_0779 status INFEASIBLE obj None bound 0.0 t 0.9
+none scored_0779 113 INFEASIBLE 
+scored_0835 n0 112 U 1258 usednew 1140 recipes 4073 gen 0.0s
+scored_0835 status INFEASIBLE obj None bound 0.0 t 0.5
+none scored_0835 112 INFEASIBLE 
+scored_0427 n0 116 U 1345 usednew 1224 recipes 4743 gen 0.0s
