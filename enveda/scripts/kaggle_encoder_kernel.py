@@ -216,6 +216,9 @@ cmd = [sys.executable, str(CODE / "scripts" / "eval_encoder_pc.py"), "--bundle",
        "--np-dir", str(NPDIR), "--pubchem-dir", str(PCDIR), "--n-jobs", "4", "--threads", "4",
        "--max-mol", str(MAX_MOL), "--budget-min", str(BUDGET_MIN), "--shard", str(SHARD),
        "--n-shards", str(N_SHARDS), "--out", str(WORK / "c2pc.json")] + models
+import torch
+if torch.cuda.is_available():
+    cmd += ["--device", "cuda"]
 r = subprocess.run(cmd, env=env, capture_output=True, text=True)
 print(r.stdout[-3000:])
 print(r.stderr[-6000:])
@@ -281,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-mol", type=int, default=0, help="push-pc: molecules (0 = all)")
     p.add_argument("--budget-min", type=float, default=600.0, help="push-pc: time budget in minutes")
     p.add_argument("--n-shards", type=int, default=1, help="push-pc: parallel CPU kernels <slug>-<i>")
+    p.add_argument("--gpu", action="store_true",
+                   help="push-pc: run on a GPU machine (when the 5 batch CPU sessions are taken)")
     p.add_argument("--arms", nargs="+", default=["bce", "focal_con"])
     p.add_argument("--hours", type=float, default=4.5)
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
@@ -309,8 +314,9 @@ def main(argv: list[str] | None = None) -> int:
                              i, args.n_shards)
             path = ROOT / "notebooks" / "kaggle_eval_encoder_pc.ipynb"
             path.write_text(json.dumps(nb, indent=1) + "\n")
-            d = save_kernel(own, nb, datasets, int((args.budget_min / 60 + 1.0) * 3600), None, slug=sl,
-                            title=sl.replace("-", " "), gpu=False, kernels=[f"{own}/{args.train_slug}"])
+            d = save_kernel(own, nb, datasets, int((args.budget_min / 60 + 1.0) * 3600),
+                            args.machine_shape if args.gpu else None, slug=sl,
+                            title=sl.replace("-", " "), gpu=args.gpu, kernels=[f"{own}/{args.train_slug}"])
             kc.say(f"pushed /code/{own}/{sl} version {d.get('versionNumber')} (shard {i} of {len(slugs)})")
         if args.wait:
             for sl in slugs:

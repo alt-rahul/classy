@@ -1739,7 +1739,8 @@ def load_pools(pool_dir: Path | str, sets: Sequence[str] | None = None,
 
 def ranks_from_pools(pools: pd.DataFrame, cfg: Config, score: Any = None, *,
                      exact: bool = True, n_jobs: int = 1,
-                     fallback: pd.DataFrame | None = None) -> pd.DataFrame:
+                     fallback: pd.DataFrame | None = None,
+                     key_cache: dict | None = None) -> pd.DataFrame:
     """Rank of the truth per (set, cell, molecule) in stored pools under a new score.
 
     ``score``: None (the stored "score"), a column name, or ``callable(pools, cfg) -> array``
@@ -1750,7 +1751,8 @@ def ranks_from_pools(pools: pd.DataFrame, cfg: Config, score: Any = None, *,
     whose truth is not in its stored pool keeps the rr of ``fallback`` (the original run's
     result table: its truth came from padding, whose position does not depend on the score),
     else 0. Returns a v2 result table (RESULT_V2_COLUMNS subset: set, cell, molecule_id, rr,
-    rank, top1, top5, top25, in_pool_main)."""
+    rank, top1, top5, top25, in_pool_main). ``key_cache``: SMILES -> metric key, read and
+    extended in place (``load_pool_keys`` / ``save_pool_keys`` keep it next to the pools)."""
     from . import fusion
     from .chem import canonical_smiles
     from .metric import mkeys
@@ -1782,14 +1784,27 @@ def ranks_from_pools(pools: pd.DataFrame, cfg: Config, score: Any = None, *,
     smi = p["smiles"].astype(object).to_numpy(object)
     ik = p["ik14"].astype(object).to_numpy(object)
 
+    kc: dict = key_cache if key_cache is not None else {}
+
     def keys_for(rows: np.ndarray) -> list[Any]:
         if not exact:
             return [ik[i] if isinstance(smi[i], str) else None for i in rows]
-        can = [canonical_smiles(smi[i]) if isinstance(smi[i], str) else None for i in rows]
-        mk = mkeys([c for c in can if c], cfg, n_jobs=n_jobs, cache=True,
-                   timeout_s=cfg.mkey_timeout_s) if any(can) else []
-        it = iter(mk)
-        return [(next(it) or ik[i]) if c else None for c, i in zip(can, rows)]
+        todo = sorted({smi[i] for i in rows if isinstance(smi[i], str) and smi[i] not in kc})
+        if todo:
+            can = [canonical_smiles(x) for x in todo]
+            ok = [c for c in can if c]
+            mk = dict(zip(ok, mkeys(ok, cfg, n_jobs=n_jobs, cache=True,
+                                    timeout_s=cfg.mkey_timeout_s))) if ok else {}
+            for x, c in zip(todo, can):
+                kc[x] = (mk.get(c) or "") if c else None   # "" = parseable, no key: use ik14
+        out = []
+        for i in rows:
+            if not isinstance(smi[i], str):
+                out.append(None)
+                continue
+            v = kc.get(smi[i])
+            out.append(None if v is None else (v or ik[i]))
+        return out
 
     want = []
     for g, (a, stop, first) in prefix.items():
@@ -2509,3 +2524,18 @@ def load_holdout_v2_meta_safe() -> dict[str, Any]:
         return load_holdout_v2_meta()
     except Exception:  # noqa: BLE001
         return {}
+
+
+def load_pool_keys(pool_dir: Path | str) -> dict:
+    """SMILES -> metric key cache stored next to a run's pools (``_keys.parquet``)."""
+    p = Path(pool_dir) / "_keys.parquet"
+    if not p.exists():
+        return {}
+    d = pd.read_parquet(p)
+    return {s: (None if k is None or (isinstance(k, float) and np.isnan(k)) else str(k))
+            for s, k in zip(d["smiles"], d["key"])}
+
+
+def save_pool_keys(pool_dir: Path | str, cache: Mapping[str, Any]) -> None:
+    p = Path(pool_dir) / "_keys.parquet"
+    pd.DataFrame({"smiles": list(cache), "key": [cache[k] for k in cache]}).to_parquet(p, index=False)

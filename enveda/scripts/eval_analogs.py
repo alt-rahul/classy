@@ -37,6 +37,9 @@ Usage:
     python scripts/eval_analogs.py --stage analyse --sets NP-TIMS NP-OTHER SYN-TIMS
     python scripts/eval_analogs.py --sets NP-TIMS --max-molecules 30 --tag smoke
     python scripts/eval_analogs.py --cell C2-NP --rows pipeline --tag v2   # once R1 lands
+    nice -n 10 python scripts/eval_analogs.py --stage speed --sets NP-OTHER --max-molecules 400
+
+4. ``speed`` (separate): the real pipeline stages on complete NP-tier pools (``stage_speed``).
 """
 
 from __future__ import annotations
@@ -673,10 +676,106 @@ def stage_analyse(args, cfg, lg) -> None:
     lg.info("wrote %s", p)
 
 
+def _rank_by(g: pd.DataFrame, key: np.ndarray, truth: frozenset) -> int:
+    o = np.lexsort((g["ik14"].astype(str).to_numpy(object), -g["score"].to_numpy(np.float64),
+                    -np.nan_to_num(key, nan=-np.inf)))
+    ik = g["ik14"].astype(str).to_numpy(object)[o]
+    return _first_truth_rank(ik, np.fromiter((k in truth for k in ik), bool, len(ik)))
+
+
+def stage_speed(args, cfg, lg) -> None:
+    """The pipeline stages mass, pool (NP tier only), features, score and ``analogs`` on the
+    first ``--max-molecules`` (default 400) molecules of the first set under the cell's
+    exclusions, in batches of ``cfg.batch_molecules``: wall time of the analogs stage, and the
+    MRR of the complete NP-tier pools ranked by the prior, by the analog score alone and by
+    prior + analog (weights from the cross-fit study, given with --speed-weights)."""
+    from casmi import analogs as A
+    from casmi import db as cdb
+    from casmi import pipeline, validation
+    from casmi.library import Library
+
+    set_name = args.sets[0]
+    if not args.max_molecules:
+        args.max_molecules = 400
+    c = cfg.replace(db_tiers=("np",))
+    lib = Library.load(cfg=c)
+    q, t = _load_set(args, set_name)
+    hooks, _ = _hooks(args, c, q, t)
+    proxy = validation.ExcludingDB(cdb.get_db(c), hooks)
+    tr = t.set_index(t["molecule_id"].astype(str))
+    truth = {m: frozenset(str(g).split(";")) for m, g in tr["ik14_group"].items()}
+    order = sorted(tr.index, key=lambda m: (float(tr.at[m, "mono_mass"]), m))
+    qpos = q.groupby(q["molecule_id"].astype(str)).indices
+    A.warmup()
+    t_an, n_rows, n_struct, pools = 0.0, 0, 0, []
+    t_all = time.perf_counter()
+    bs = int(c.batch_molecules)
+    for a in range(0, len(order), bs):
+        chunk = order[a:a + bs]
+        rows = np.sort(np.concatenate([qpos[m] for m in chunk if m in qpos]))
+        sub = q.iloc[rows].reset_index(drop=True)
+        hooks.active = tuple(sorted(chunk))
+        st = pipeline.State(test_df=sub, db=proxy, extras={"validation": hooks, "library": lib})
+        for fn in (pipeline.stage_mass, pipeline.stage_pool, pipeline.stage_features,
+                   pipeline.stage_score):
+            st = fn(st, c)
+        t0 = time.perf_counter()
+        st = A.stage_analogs(st, c)
+        t_an += time.perf_counter() - t0
+        hooks.compact(chunk, {})
+        n_rows += len(st.pool)
+        n_struct += int(st.molecules["an_n_scored_struct"].sum())
+        pools.append(st.pool[["molecule_id", "ik14", "score", *A.FEATURES]].copy())
+    lg.info("speed: %d molecules (%s, %s), %d pool rows, %d with structure features: analogs "
+            "stage %.1f s (%.3f s per molecule), all stages %.1f s, peak RSS %.0f MB", len(order),
+            set_name, args.cell, n_rows, n_struct, t_an, t_an / max(len(order), 1),
+            time.perf_counter() - t_all, peak_rss_mb())
+    pool = pd.concat(pools, ignore_index=True)
+    w = dict(kv.split("=") for kv in args.speed_weights)
+    res: dict = {}
+    keys = {"prior": None, "analog alone": PRIMARY, "an_tan_wmax_z alone": "an_tan_wmax_z",
+            "an_sub_w_z alone": "an_sub_w_z"}
+    for name, f in keys.items():
+        rr = []
+        for m, g in pool.groupby("molecule_id", sort=True):
+            key = np.zeros(len(g)) if f is None else g[f].to_numpy(np.float64)
+            r = _rank_by(g, key, truth[m])
+            rr.append(1.0 / r if 0 < r <= 25 else 0.0)
+        res[name] = float(np.mean(rr))
+    for f, wv in w.items():
+        rr = []
+        for m, g in pool.groupby("molecule_id", sort=True):
+            key = g["score"].to_numpy(np.float64) + float(wv) * np.nan_to_num(
+                g[f].to_numpy(np.float64), nan=0.0)
+            r = _rank_by(g, key, truth[m])
+            rr.append(1.0 / r if 0 < r <= 25 else 0.0)
+        res[f"prior + {wv} x {f}"] = float(np.mean(rr))
+    v2 = _v2_weights({set_name: None}, args)
+    if v2 is not None:
+        mids = sorted(pool["molecule_id"].astype(str).unique())
+        vv = v2.reindex(mids)
+        sel = [m for m in mids if vv.at[m, "c2_cell"] == "NP"]
+        ww = vv.loc[sel, "w_obs"].to_numpy(np.float64)
+        for name, f in keys.items():
+            rr = []
+            for m in sel:
+                g = pool[pool["molecule_id"] == m]
+                key = np.zeros(len(g)) if f is None else g[f].to_numpy(np.float64)
+                r = _rank_by(g, key, truth[m])
+                rr.append(1.0 / r if 0 < r <= 25 else 0.0)
+            res[f"{name} (v2 C2-NP, w_obs, n {len(sel)})"] = float(np.dot(rr, ww) / ww.sum())
+    for k, v in res.items():
+        lg.info("speed pools: MRR %-46s %.4f", k, v)
+    p = Path(args.out) / f"speed_{args.tag}_{_slug(set_name)}_{args.cell}.json"
+    p.write_text(json.dumps({"seconds_analogs": t_an, "molecules": len(order), "rows": n_rows,
+                             "struct_rows": n_struct, "mrr": res}, indent=1), encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", type=Path, default=None)
-    ap.add_argument("--stage", choices=("hits", "features", "analyse", "all"), default="all")
+    ap.add_argument("--stage", choices=("hits", "features", "analyse", "all", "speed"),
+                    default="all")
     ap.add_argument("--sets", nargs="+", default=["NP-TIMS", "NP-OTHER", "SYN-TIMS"])
     ap.add_argument("--cell", "--condition", dest="cell", default="C2",
                     help="v1 condition (C1, C2, C3) or v2 cell (C1, C2-NP, C2-PC, C3h, C3e)")
@@ -692,6 +791,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--variants", nargs="*", default=None,
                     help="hit-selection variants for the analysis (key=value[,key=value]); "
                          "no value = the default list")
+    ap.add_argument("--speed-weights", nargs="*", default=[f"{PRIMARY}=0.05"],
+                    help="--stage speed: prior + w x feature rankings to report (feature=w)")
     ap.add_argument("--set-config", nargs="*", default=[],
                     help="extra Config overrides as key=value (YAML-parsed values)")
     args = ap.parse_args(argv)
@@ -716,6 +817,8 @@ def main(argv: list[str] | None = None) -> int:
         stage_features(args, cfg, lg)
     if args.stage in ("analyse", "all"):
         stage_analyse(args, cfg, lg)
+    if args.stage == "speed":
+        stage_speed(args, cfg, lg)
     lg.info("done; peak RSS %.0f MB", peak_rss_mb())
     return 0
 

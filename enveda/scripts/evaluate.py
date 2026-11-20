@@ -220,7 +220,14 @@ def _v2(args, cfg, lg) -> int:
             pcfg = cfg.replace(probe_rule=args.probe)
             pools = pools[probe_mask(pools, pcfg)].reset_index(drop=True)
             fb = None   # probe lists carry no padding
-        ranks = ranks_from_pools(pools, cfg, score, exact=not args.inexact, n_jobs=n_jobs, fallback=fb)
+        from casmi.validation import load_pool_keys, save_pool_keys
+
+        kc = load_pool_keys(out_dir / "pools" / src)
+        n0 = len(kc)
+        ranks = ranks_from_pools(pools, cfg, score, exact=not args.inexact, n_jobs=n_jobs, fallback=fb,
+                                 key_cache=kc)
+        if len(kc) > n0:
+            save_pool_keys(out_dir / "pools" / src, kc)
         table = rescore_table(base, ranks)
         if args.probe:  # molecules with no row of that source score 0
             key = set(zip(ranks["set"], ranks["cell"], ranks["molecule_id"]))
