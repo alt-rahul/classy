@@ -66,3 +66,9 @@ engines on shards of our store; a local loop harvests their outputs and merges t
 - 2026-11-20 21:46:32 UTC launched elf-c03 v2 [leverB_g]: 40 puzzles (len 218..229, 8952 instr), budget 3.5 h, engines leverB_grun
 - 2026-11-20 21:46:34 UTC launched elf-c04 v2 [leverB_g]: 40 puzzles (len 209..217, 8520 instr), budget 3.5 h, engines leverB_grun
 - 2026-11-20 21:46:36 UTC launched elf-c05 v2 [public]: 30 puzzles (len 175..180, 5327 instr), budget 2.5 h, engines elfopt,recomb,wj_anneal,wj_anneal_seeded,wj_incremental,wj_incremental_seeded,wj_compact_rotate,wj_quartet,wj_anneal_div,wj_incremental_div
+- 2026-11-20 21:47 UTC WAVE 1 RESULT (public engines, c02-c05, 2.5 h each, 120 puzzles of 209-252 instructions, start = store
+  at 19:15): 0 instructions in 39.9 CPU-h (4,654 engine runs: elfopt LNS+kicks 1,572 runs / 19.6 CPU-h, WJ anneal /
+  anneal_seeded / incremental / incremental_seeded / compact_rotate / quartet 507 / 511 / 513 / 488 / 534 / 529 runs,
+  21 CPU-h together). Public engines yield nothing on the long random-like puzzles, as the research agent predicted.
+  Decision: c01-c04 -> lever B (grun), c05 stays on public engines for the 80-180 band (where public notes report
+  their gains) as the running comparison; reallocate by merged gain per CPU-hour when lever B results are in.

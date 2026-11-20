@@ -58,3 +58,10 @@ Scripts: lib.py (helpers), stat.py, show.py (annotated value program), cone_stat
   4.2 / 5.8 / 7.5 per random target; marginal S given R only 1.4-2.0. Control (subset.py): closure of 14 random targets
   of a PURE puzzle / 14 = 5.7-5.8 (shared), 4.7-5.2 (multiplicative), 6.3-6.6 (mixed-pure). So the structured half of
   a mixed puzzle costs what 14 targets of a pure puzzle cost; no excess to harvest there.
+- POSITIVE CONTROL FAILED for SX (control.py): a deliberately weak program for scored_0617 (public constructor + 5 s
+  LNS, 122 ops vs 90 stored) is ALSO reported INFEASIBLE by SX with new smalls < 1e5. So the INFEASIBLE counts above
+  only say "locally optimal for one-level exchanges"; they are NOT evidence that the stored programs are near the
+  global optimum. The landscape is rugged; LNS/SX local optima exist 30% above the best known program.
+- Seeded restart (hubseed.py): true mids + hubs (read from the stored program) as extra targets for the public
+  constructor: scored_0617 construct 111-113 (unseeded 124-127), 30 s LNS -> 100 (unseeded 118, stored 90). Knowing
+  the hidden hubs closes two thirds of the gap of a weak constructor; the rest is the constant pool / chain design.

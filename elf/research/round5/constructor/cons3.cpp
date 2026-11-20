@@ -50,7 +50,7 @@ static void buildDict(const vector<u64>& pool, Dict& d, int minLevel, int maxLev
     d.bl.assign((size_t)1 << (d.BB - 6), 0); for (auto& x : d.e) { u64 h = d.hh(x.v); d.bl[h >> 6] |= 1ULL << (h & 63); }
 }
 struct Rec { int cost; u64 T, x, y, r; char sg; };
-static size_t MAXRAW = 8000000;
+static size_t MAXRAW = 8000000; static double RANDTIE = 0;
 static int NB = 6; static u64 RMAX = 1ULL << 34; static int NBS = 32; static u64 RMAXS = 1ULL << 44;
 // enumerate recipes of T with cost <= cmax. If out==nullptr only the min cost is tracked (cmax shrinks). returns min cost (99 none)
 // y candidates are scanned per level: sparse levels (0,1) with a wide window, dense levels (>=2) with a narrow one.
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
     int kalt = 0, delta = 1, look = 0; u64 seed = 1; int rbits = 34; int cmaxBase = 8;
     if (argc > 1) CAP = atoi(argv[1]); if (argc > 2) kalt = atoi(argv[2]); if (argc > 3) delta = atoi(argv[3]); if (argc > 4) seed = atoll(argv[4]);
     if (argc > 5) POLICY = atoi(argv[5]); if (argc > 6) look = atoi(argv[6]); if (argc > 7) NB = atoi(argv[7]); if (argc > 8) rbits = atoi(argv[8]);
-    if (argc > 9) EXACT = atoi(argv[9]); if (argc > 10) REGCAP = atoi(argv[10]); if (argc > 11) PCAP = atoi(argv[11]); if (argc > 12) W_POT = atof(argv[12]); if (argc > 13) NBS = atoi(argv[13]); if (argc > 14) RMAXS = 1ULL << atoi(argv[14]); if (argc > 15) MAXRAW = atoll(argv[15]);
+    if (argc > 9) EXACT = atoi(argv[9]); if (argc > 10) REGCAP = atoi(argv[10]); if (argc > 11) PCAP = atoi(argv[11]); if (argc > 12) W_POT = atof(argv[12]); if (argc > 13) NBS = atoi(argv[13]); if (argc > 14) RMAXS = 1ULL << atoi(argv[14]); if (argc > 15) MAXRAW = atoll(argv[15]); if (argc > 16) RANDTIE = atof(argv[16]);
     RMAX = 1ULL << rbits; mt19937_64 rng(seed);
     size_t ns, nt, ni; if (scanf("%llu %zu", &LIM, &ns) != 2) return 1;
     State S; vector<u64> sv(ns); for (auto& x : sv) { scanf("%llu", &x); STARTS.insert(x); }
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
                     if (look && nev >= kalt) break;
                     tried++; vector<Step> o = expandRec(d, recs[c]); State ch = S; long before = 0; for (int x : S.occ) before += x;
                     if (!applyExact(ch, o, recs[c].T)) continue;
-                    long after = 0; for (int x : ch.occ) after += x; double key = (double)o.size() + 1e-5 * (after - before);
+                    long after = 0; for (int x : ch.occ) after += x; double key = (double)o.size() + 1e-5 * (after - before); if (RANDTIE > 0) key = (double)o.size() + RANDTIE * (rng() % 1000) / 1000.0;
                     if (look && ch.rem.size() >= 1) {
                         nev++; makePool(ch); Dict dc; buildDict(ch.pool, dc, 2, 14, MAXRAW, BIG);
                         int m1 = 99; double pot = 0; int cnt = 0;
