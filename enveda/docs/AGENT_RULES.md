@@ -23,7 +23,9 @@ Several agents work in this repo at the same time on one machine. Follow these r
 
 ## Code
 - Python 3.10 to 3.13 compatible.
-- Inference code path (anything `casmi.pipeline` imports) may use only numpy, pandas, pyarrow, scipy, numba, rdkit, lightgbm. Build and training code may also use polars, duckdb, torch, scikit-learn.
+- Inference code path (anything `casmi.pipeline` imports) may use numpy, pandas, pyarrow, scipy, numba, rdkit, lightgbm, and torch (preinstalled on Kaggle; import it lazily inside the stage that needs it). Every GPU stage needs a CPU fallback guarded by a time budget. Build and training code may also use polars, duckdb, scikit-learn.
+- Final submissions must be reproducible from our own code: no third-party model weights without their original training code (host rule); no NIST or NIST-derived data, except the host-approved GNPS-NIST14-MATCHES; never use the `pc_src_mask` column of public PubChem prior tables.
+- The binding plan is `docs/ROADMAP.md` (validation protocol in its section 2).
 - Deterministic: seeds from `Config.seed`, sorted iteration, stable sorts with explicit tie-breakers.
 - `pytest -q` must pass (whole suite, not just your tests) before you report done. Tests that need large data use `@pytest.mark.data`.
 
